@@ -1,0 +1,9 @@
+# Core: OpenAI SDK talks to OpenAI and any OpenAI-compatible gateway
+# (OpenRouter, Groq, local servers, ...).
+openai>=1.50
+
+# Tool parameter validation + JSON schema generation.
+pydantic>=2.5
+
+# Optional but recommended: nicer terminal output.
+rich>=13.0

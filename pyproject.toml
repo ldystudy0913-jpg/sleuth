@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sleuth"
+version = "0.1.0"
+description = "A Python reimplementation of opencode's core coding-agent loop."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "sleuth contributors" }]
+dependencies = [
+    "openai>=1.50",
+    "pydantic>=2.5",
+    "rich>=13.0",
+]
+
+[project.scripts]
+sleuth = "sleuth.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sleuth*"]
+
+[tool.setuptools.package-data]
+sleuth = ["prompts/*.txt"]

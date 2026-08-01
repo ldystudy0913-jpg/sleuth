@@ -1,0 +1,60 @@
+// Example sleuth config (opencode.json / opencode.jsonc).
+// Place at your project root or in ~/.config/opencode/. JSONC comments are allowed.
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Default model as "provider/model". Set OPENAI_API_KEY in .env.
+  // Any OpenAI-compatible model works; for other gateways see "provider" below.
+  "model": "openai/gpt-4o",
+
+  // Smaller/cheaper model for session titles + context compaction.
+  "small_model": "openai/gpt-4o-mini",
+
+  // Token budget used by compaction (also overridable via OPENCODE_CONTEXT_LIMIT).
+  "context_limit": 128000,
+  "compaction": { "auto": true, "reserved": 20000 },
+
+  // Max nested `task` subagent depth (default 1).
+  "subagent_depth": 1,
+
+  // Default agent when none is selected.
+  "default_agent": "build",
+
+  // Hard cap on agentic iterations per prompt.
+  "max_steps": 50,
+
+  // Per-agent overrides. `permission` maps tool -> "allow"|"ask"|"deny".
+  "agent": {
+    "build": {
+      "prompt": "You are a senior software engineer working in the user's codebase.",
+      "steps": 50
+    },
+    "plan": {
+      "prompt": "You are a careful planner. Explore the codebase and propose a plan; do not make changes.",
+      "steps": 20
+    }
+  },
+
+  // OpenAI-compatible gateway options. For non-OpenAI providers, set baseURL
+  // and the matching *_API_KEY in .env. The provider id is the part before "/".
+  "provider": {
+    // "openrouter": { "options": { "baseURL": "https://openrouter.ai/api/v1" } },
+    // "groq":      { "options": { "baseURL": "https://api.groq.com/openai/v1" } }
+  },
+
+  // Permission baseline applied on top of the agent's defaults.
+  "permission": {
+    "bash": "ask",
+    "edit": "ask",
+    "write": "ask"
+  },
+
+  // Extra system-prompt lines appended to every turn.
+  "instructions": [],
+
+  // Tool output size limits.
+  "tool_output": {
+    "max_lines": 2000,
+    "max_bytes": 50000
+  }
+}
