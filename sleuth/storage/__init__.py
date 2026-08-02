@@ -1,10 +1,5 @@
-"""Persistence layer.
-
-opencode persists sessions/messages/parts to SQLite via Drizzle. We port the
-same shape with the stdlib `sqlite3` driver (no new dependency) — see
-sqlite.py for the schema and base.py for the Store protocol.
-"""
-from .base import Store, SessionRecord
+from .base import SessionRecord, Store, UsageEvent
+from .factory import create_store
 from .sqlite import SQLiteStore
 
-__all__ = ["Store", "SessionRecord", "SQLiteStore"]
+__all__ = ["Store", "SessionRecord", "UsageEvent", "SQLiteStore", "create_store"]

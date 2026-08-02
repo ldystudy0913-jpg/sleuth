@@ -1,31 +1,8 @@
-"""Configuration loading and merging.
+"""Configuration loading — .env first, then optional JSONC overlays.
 
-opencode discovers config from many places (global ~/.config/opencode,
-project tree opencode.jsonc, .opencode/ dirs, env vars) and deep-merges
-them. We port the essential shape: a single Config dataclass plus a loader
-that walks from the cwd up to the worktree root, merging each found file on
-top of the global one.
-
-Supported top-level keys (a deliberate subset of opencode's schema):
-  model            "provider/model" e.g. "openai/gpt-4o"
-  small_model      model used for title/summary tasks
-  default_agent    "build" | "plan"
-  agent            { build: {prompt, model, permission, steps}, plan: {...} }
-  provider         { openai: {options: {apiKey, baseURL}}, openrouter: {...}, ... }
-  permission       { edit: "allow"|"ask"|"deny", bash: ..., ... }
-  instructions     [str, ...]   extra system-prompt lines / globs / http(s) URLs
-  tool_output      { max_lines, max_bytes }
-  max_steps        hard cap on agentic iterations
-  subagent_depth   max nested task depth (default 1)
-  context_limit    model context window for compaction (default 128000)
-  compaction       { auto: bool, reserved: int }
-  command          { name: { template, description, agent } } — also loaded from
-                   .opencode/command/*.md
-
-The model, api key, and base url can all live in .env instead — see
-provider/factory.py: OPENCODE_MODEL, <PROVIDER>_API_KEY, <PROVIDER>_BASE_URL.
-Precedence: --model flag > opencode.json > .env (OPENCODE_MODEL) for the
-model; config options > .env > SDK default for keys/base_url.
+Primary knobs live in `.env` (see `.env.example`). Project `opencode.jsonc`
+and markdown agents/commands remain supported as overlays for nested shapes
+(MCP servers, custom agents).
 """
 from __future__ import annotations
 
@@ -34,11 +11,6 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-
-# ---------------------------------------------------------------------------
-# dataclasses
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -79,10 +51,62 @@ class CommandConfig:
 
 
 @dataclass
+class McpServerConfig:
+    name: str
+    type: str = "remote"
+    url: Optional[str] = None
+    headers: Dict[str, str] = field(default_factory=dict)
+    command: Optional[List[str]] = None
+    environment: Dict[str, str] = field(default_factory=dict)
+    disabled: bool = False
+    timeout: Dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class SkillS3Entry:
+    uri: Optional[str] = None
+    bucket: Optional[str] = None
+    key: Optional[str] = None
+    prefix: Optional[str] = None
+    region: Optional[str] = None
+    manifest: bool = False
+
+
+@dataclass
+class SkillsConfig:
+    paths: List[str] = field(default_factory=list)
+    urls: List[str] = field(default_factory=list)
+    s3: List[SkillS3Entry] = field(default_factory=list)
+    refresh_seconds: int = 300
+
+
+@dataclass
+class StorageConfig:
+    backend: str = "sqlite"  # sqlite | mysql
+    sqlite_path: Optional[str] = None
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_user: str = "sleuth"
+    mysql_password: str = ""
+    mysql_database: str = "sleuth"
+    mysql_password_env: str = "SLEUTH_MYSQL_PASSWORD"
+
+
+@dataclass
+class ServerConfig:
+    host: str = "127.0.0.1"
+    port: int = 8787
+    admin_token: str = ""
+    # Prefer mysql in production via SLEUTH_STORAGE_BACKEND=mysql
+    default_backend: str = "sqlite"
+
+
+@dataclass
 class Config:
     model: Optional[str] = None
     small_model: Optional[str] = None
     default_agent: str = "build"
+    user_id: str = "local"
     agents: Dict[str, AgentConfig] = field(default_factory=dict)
     providers: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     permission: Dict[str, Any] = field(default_factory=dict)
@@ -94,6 +118,15 @@ class Config:
     context_limit: int = 128_000
     compaction: Dict[str, Any] = field(default_factory=lambda: {"auto": True})
     commands: Dict[str, CommandConfig] = field(default_factory=dict)
+    mcp_servers: Dict[str, McpServerConfig] = field(default_factory=dict)
+    mcp_timeout: Dict[str, int] = field(
+        default_factory=lambda: {"startup": 30_000, "request": 120_000}
+    )
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
+    # Product disclosure guardrails (block sleuth internals / secrets).
+    guardrails: bool = True
 
     def agent(self, name: Optional[str] = None) -> AgentConfig:
         name = name or self.default_agent
@@ -102,7 +135,9 @@ class Config:
     def provider_options(self, provider_id: str) -> Dict[str, Any]:
         return self.providers.get(provider_id, {}).get("options", {})
 
-    # deep-merge a raw dict on top of self
+    def enabled_mcp_servers(self) -> List[McpServerConfig]:
+        return [s for s in self.mcp_servers.values() if not s.disabled]
+
     def merge(self, raw: Dict[str, Any]) -> "Config":
         if "model" in raw and raw["model"]:
             self.model = raw["model"]
@@ -110,6 +145,8 @@ class Config:
             self.small_model = raw["small_model"]
         if "default_agent" in raw and raw["default_agent"]:
             self.default_agent = raw["default_agent"]
+        if "user_id" in raw and raw["user_id"]:
+            self.user_id = str(raw["user_id"])
         if "max_steps" in raw and raw["max_steps"] is not None:
             self.max_steps = int(raw["max_steps"])
         if "subagent_depth" in raw and raw["subagent_depth"] is not None:
@@ -147,17 +184,148 @@ class Config:
                     description=ccfg.get("description"),
                     agent=ccfg.get("agent"),
                 )
+        if "storage" in raw and isinstance(raw["storage"], dict):
+            self._merge_storage(raw["storage"])
+        if "server" in raw and isinstance(raw["server"], dict):
+            self._merge_server(raw["server"])
+        self._merge_mcp(raw)
+        self._merge_skills(raw)
         return self
 
+    def _merge_storage(self, block: Dict[str, Any]) -> None:
+        if block.get("backend"):
+            self.storage.backend = str(block["backend"])
+        sqlite = block.get("sqlite") or {}
+        if isinstance(sqlite, dict) and sqlite.get("path") is not None:
+            self.storage.sqlite_path = str(sqlite["path"]) if sqlite["path"] else None
+        if block.get("sqlite_path") is not None:
+            self.storage.sqlite_path = str(block["sqlite_path"]) if block["sqlite_path"] else None
+        mysql = block.get("mysql") or {}
+        if isinstance(mysql, dict):
+            if mysql.get("host"):
+                self.storage.mysql_host = str(mysql["host"])
+            if mysql.get("port") is not None:
+                self.storage.mysql_port = int(mysql["port"])
+            if mysql.get("user"):
+                self.storage.mysql_user = str(mysql["user"])
+            if mysql.get("password") is not None:
+                self.storage.mysql_password = str(mysql["password"])
+            if mysql.get("database"):
+                self.storage.mysql_database = str(mysql["database"])
+            if mysql.get("password_env"):
+                self.storage.mysql_password_env = str(mysql["password_env"])
 
-# ---------------------------------------------------------------------------
-# discovery + loading
-# ---------------------------------------------------------------------------
+    def _merge_server(self, block: Dict[str, Any]) -> None:
+        if block.get("host"):
+            self.server.host = str(block["host"])
+        if block.get("port") is not None:
+            self.server.port = int(block["port"])
+        if block.get("admin_token") is not None:
+            self.server.admin_token = str(block["admin_token"])
+        if block.get("default_backend"):
+            self.server.default_backend = str(block["default_backend"])
+
+    def _merge_mcp(self, raw: Dict[str, Any]) -> None:
+        if "mcpServers" in raw and isinstance(raw["mcpServers"], dict):
+            for name, entry in raw["mcpServers"].items():
+                if isinstance(entry, dict):
+                    self.mcp_servers[name] = _parse_mcp_server(name, entry)
+
+        block = raw.get("mcp")
+        if not isinstance(block, dict):
+            return
+        timeout = block.get("timeout")
+        if isinstance(timeout, dict):
+            self.mcp_timeout.update(
+                {k: int(v) for k, v in timeout.items() if v is not None}
+            )
+        servers = block.get("servers")
+        if isinstance(servers, dict):
+            for name, entry in servers.items():
+                if isinstance(entry, dict):
+                    self.mcp_servers[name] = _parse_mcp_server(name, entry)
+
+    def _merge_skills(self, raw: Dict[str, Any]) -> None:
+        block = raw.get("skills")
+        if not isinstance(block, dict):
+            return
+        if block.get("refresh_seconds") is not None:
+            self.skills.refresh_seconds = int(block["refresh_seconds"])
+        paths = block.get("paths")
+        if isinstance(paths, list):
+            for p in paths:
+                if isinstance(p, str) and p not in self.skills.paths:
+                    self.skills.paths.append(p)
+        urls = block.get("urls")
+        if isinstance(urls, list):
+            for u in urls:
+                if isinstance(u, str) and u not in self.skills.urls:
+                    self.skills.urls.append(u)
+        s3 = block.get("s3")
+        if isinstance(s3, list):
+            for item in s3:
+                entry = _parse_s3_entry(item)
+                if entry is not None:
+                    self.skills.s3.append(entry)
+
+
+def _parse_s3_entry(item: Any) -> Optional[SkillS3Entry]:
+    if isinstance(item, str):
+        return SkillS3Entry(uri=item)
+    if not isinstance(item, dict):
+        return None
+    return SkillS3Entry(
+        uri=str(item["uri"]) if item.get("uri") else None,
+        bucket=str(item["bucket"]) if item.get("bucket") else None,
+        key=str(item["key"]) if item.get("key") else None,
+        prefix=str(item["prefix"]) if item.get("prefix") else None,
+        region=str(item["region"]) if item.get("region") else None,
+        manifest=bool(item.get("manifest", False)),
+    )
+
+
+def _parse_mcp_server(name: str, entry: Dict[str, Any]) -> McpServerConfig:
+    stype = entry.get("type")
+    url = entry.get("url")
+    command = entry.get("command")
+    if stype is None:
+        if url:
+            stype = "remote"
+        elif command:
+            stype = "local"
+        else:
+            stype = "remote"
+
+    cmd_list: Optional[List[str]] = None
+    if isinstance(command, list):
+        cmd_list = [str(c) for c in command]
+    elif isinstance(command, str):
+        args = entry.get("args") or []
+        cmd_list = [command] + [str(a) for a in args]
+
+    headers = entry.get("headers") or {}
+    if not isinstance(headers, dict):
+        headers = {}
+    env = entry.get("environment") or entry.get("env") or {}
+    if not isinstance(env, dict):
+        env = {}
+    timeout = entry.get("timeout") or {}
+    if not isinstance(timeout, dict):
+        timeout = {}
+
+    return McpServerConfig(
+        name=name,
+        type=str(stype),
+        url=str(url) if url else None,
+        headers={str(k): str(v) for k, v in headers.items()},
+        command=cmd_list,
+        environment={str(k): str(v) for k, v in env.items()},
+        disabled=bool(entry.get("disabled", False)),
+        timeout={str(k): int(v) for k, v in timeout.items()},
+    )
 
 
 def _strip_comments(text: str) -> str:
-    """Crude JSONC comment stripper (// line and /* block */). Good enough
-    for hand-edited config files; not a full parser."""
     out: List[str] = []
     i = 0
     n = len(text)
@@ -205,7 +373,6 @@ def _load_jsonc(path: Path) -> Dict[str, Any]:
 
 
 def _global_config_dir() -> Path:
-    # XDG_CONFIG_HOME on posix, %APPDATA% on windows, else ~/.config
     env = os.environ.get("OPENCODE_CONFIG_DIR") or os.environ.get("XDG_CONFIG_HOME")
     if env:
         return Path(env) / "opencode"
@@ -220,10 +387,6 @@ _CONFIG_FILENAMES = ("opencode.jsonc", "opencode.json", "config.json")
 
 
 def _walk_project_configs(cwd: Path) -> List[Path]:
-    """Walk *up* from cwd collecting opencode config files.
-
-    Stops at the git worktree root (or filesystem root) like opencode does.
-    """
     found: List[Path] = []
     root = _git_root(cwd) or _fs_root(cwd)
     cur = cwd.resolve()
@@ -232,7 +395,6 @@ def _walk_project_configs(cwd: Path) -> List[Path]:
             p = cur / name
             if p.is_file():
                 found.append(p)
-        # also .opencode/opencode.jsonc
         for name in _CONFIG_FILENAMES:
             p = cur / ".opencode" / name
             if p.is_file():
@@ -259,7 +421,6 @@ def _fs_root(cwd: Path) -> Path:
 
 
 def _load_markdown_agents(dir_path: Path, cfg: Config) -> None:
-    """Port of opencode `config/agent.ts` — `{agent,agents}/**/*.md`."""
     from .util.markdown_fm import entry_name_from_path, parse_file
 
     if not dir_path.is_dir():
@@ -282,7 +443,6 @@ def _load_markdown_agents(dir_path: Path, cfg: Config) -> None:
 
 
 def _load_markdown_commands(dir_path: Path, cfg: Config) -> None:
-    """Port of opencode `config/command.ts` — `{command,commands}/**/*.md`."""
     from .util.markdown_fm import entry_name_from_path, parse_file
 
     if not dir_path.is_dir():
@@ -307,34 +467,179 @@ def _load_markdown_commands(dir_path: Path, cfg: Config) -> None:
 
 
 def _opencode_dirs(cwd: Path) -> List[Path]:
-    """Global + project `.opencode` dirs (and cwd itself for agent/command)."""
     dirs: List[Path] = []
     gdir = _global_config_dir()
     if gdir.is_dir():
         dirs.append(gdir)
-    # walk up like configs
     root = _git_root(cwd) or _fs_root(cwd)
     cur = cwd.resolve()
     found: List[Path] = []
     while True:
-        for name in (".opencode",):
-            p = cur / name
-            if p.is_dir():
-                found.append(p)
+        p = cur / ".opencode"
+        if p.is_dir():
+            found.append(p)
         if cur == root or cur == cur.parent:
             break
         cur = cur.parent
-    # cwd-nearest last so it wins when merged
     dirs.extend(reversed(found))
     return dirs
 
 
+def _env_bool(name: str, default: Optional[bool] = None) -> Optional[bool]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: Optional[int] = None) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_csv(name: str) -> List[str]:
+    raw = os.environ.get(name)
+    if not raw:
+        return []
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _apply_env(cfg: Config) -> None:
+    """Map SLEUTH_* / OPENCODE_* environment variables onto Config."""
+    model = os.environ.get("SLEUTH_MODEL") or os.environ.get("OPENCODE_MODEL")
+    if model:
+        cfg.model = model
+    small = os.environ.get("SLEUTH_SMALL_MODEL") or os.environ.get("OPENCODE_SMALL_MODEL")
+    if small:
+        cfg.small_model = small
+    agent = os.environ.get("SLEUTH_DEFAULT_AGENT") or os.environ.get("OPENCODE_DEFAULT_AGENT")
+    if agent:
+        cfg.default_agent = agent
+    user = os.environ.get("SLEUTH_USER_ID") or os.environ.get("OPENCODE_USER_ID")
+    if user:
+        cfg.user_id = user
+
+    guard = _env_bool("SLEUTH_GUARDRAILS")
+    if guard is not None:
+        cfg.guardrails = guard
+
+    for key, attr in (
+        ("SLEUTH_MAX_STEPS", "max_steps"),
+        ("OPENCODE_MAX_STEPS", "max_steps"),
+        ("SLEUTH_SUBAGENT_DEPTH", "subagent_depth"),
+        ("SLEUTH_CONTEXT_LIMIT", "context_limit"),
+        ("OPENCODE_CONTEXT_LIMIT", "context_limit"),
+        ("SLEUTH_TOOL_OUTPUT_MAX_LINES", "tool_output_max_lines"),
+        ("SLEUTH_TOOL_OUTPUT_MAX_BYTES", "tool_output_max_bytes"),
+    ):
+        val = _env_int(key)
+        if val is not None:
+            setattr(cfg, attr, val)
+
+    auto = _env_bool("SLEUTH_COMPACTION_AUTO")
+    if auto is not None:
+        cfg.compaction["auto"] = auto
+    reserved = _env_int("SLEUTH_COMPACTION_RESERVED")
+    if reserved is not None:
+        cfg.compaction["reserved"] = reserved
+
+    # storage
+    backend = os.environ.get("SLEUTH_STORAGE_BACKEND")
+    if backend:
+        cfg.storage.backend = backend.strip().lower()
+    if os.environ.get("SLEUTH_SQLITE_PATH"):
+        cfg.storage.sqlite_path = os.environ["SLEUTH_SQLITE_PATH"]
+    if os.environ.get("SLEUTH_MYSQL_HOST"):
+        cfg.storage.mysql_host = os.environ["SLEUTH_MYSQL_HOST"]
+    port = _env_int("SLEUTH_MYSQL_PORT")
+    if port is not None:
+        cfg.storage.mysql_port = port
+    if os.environ.get("SLEUTH_MYSQL_USER"):
+        cfg.storage.mysql_user = os.environ["SLEUTH_MYSQL_USER"]
+    if os.environ.get("SLEUTH_MYSQL_PASSWORD"):
+        cfg.storage.mysql_password = os.environ["SLEUTH_MYSQL_PASSWORD"]
+    if os.environ.get("SLEUTH_MYSQL_DATABASE"):
+        cfg.storage.mysql_database = os.environ["SLEUTH_MYSQL_DATABASE"]
+    if os.environ.get("SLEUTH_MYSQL_PASSWORD_ENV"):
+        cfg.storage.mysql_password_env = os.environ["SLEUTH_MYSQL_PASSWORD_ENV"]
+
+    # server
+    if os.environ.get("SLEUTH_SERVER_HOST"):
+        cfg.server.host = os.environ["SLEUTH_SERVER_HOST"]
+    sport = _env_int("SLEUTH_SERVER_PORT")
+    if sport is not None:
+        cfg.server.port = sport
+    if os.environ.get("SLEUTH_SERVER_ADMIN_TOKEN") is not None:
+        cfg.server.admin_token = os.environ.get("SLEUTH_SERVER_ADMIN_TOKEN") or ""
+    if os.environ.get("SLEUTH_SERVER_DEFAULT_BACKEND"):
+        cfg.server.default_backend = os.environ["SLEUTH_SERVER_DEFAULT_BACKEND"]
+
+    # skills
+    refresh = _env_int("SLEUTH_SKILLS_REFRESH_SECONDS")
+    if refresh is not None:
+        cfg.skills.refresh_seconds = refresh
+    for p in _env_csv("SLEUTH_SKILLS_PATHS"):
+        if p not in cfg.skills.paths:
+            cfg.skills.paths.append(p)
+    for u in _env_csv("SLEUTH_SKILLS_URLS"):
+        if u not in cfg.skills.urls:
+            cfg.skills.urls.append(u)
+    s3_json = os.environ.get("SLEUTH_SKILLS_S3")
+    if s3_json:
+        try:
+            data = json.loads(s3_json)
+            if isinstance(data, list):
+                for item in data:
+                    entry = _parse_s3_entry(item)
+                    if entry is not None:
+                        cfg.skills.s3.append(entry)
+        except json.JSONDecodeError:
+            # treat as comma-separated s3:// uris
+            for uri in _env_csv("SLEUTH_SKILLS_S3"):
+                cfg.skills.s3.append(SkillS3Entry(uri=uri))
+
+    # MCP servers as JSON
+    mcp_json = os.environ.get("SLEUTH_MCP_SERVERS")
+    if mcp_json:
+        try:
+            data = json.loads(mcp_json)
+            if isinstance(data, dict):
+                cfg.merge({"mcp": {"servers": data}})
+        except json.JSONDecodeError:
+            pass
+
+    startup = _env_int("SLEUTH_MCP_TIMEOUT_STARTUP")
+    if startup is not None:
+        cfg.mcp_timeout["startup"] = startup
+    request = _env_int("SLEUTH_MCP_TIMEOUT_REQUEST")
+    if request is not None:
+        cfg.mcp_timeout["request"] = request
+
+    # provider options shortcuts
+    for env_key, provider_id in (
+        ("OPENAI_API_KEY", "openai"),
+        ("OPENAI_BASE_URL", "openai"),
+        ("OPENROUTER_API_KEY", "openrouter"),
+        ("OPENROUTER_BASE_URL", "openrouter"),
+    ):
+        if env_key.endswith("_API_KEY") and os.environ.get(env_key):
+            opts = cfg.providers.setdefault(provider_id, {}).setdefault("options", {})
+            opts.setdefault("apiKey", os.environ[env_key])
+        if env_key.endswith("_BASE_URL") and os.environ.get(env_key):
+            opts = cfg.providers.setdefault(provider_id, {}).setdefault("options", {})
+            opts.setdefault("baseURL", os.environ[env_key])
+
+
 def load(cwd: Optional[Path] = None) -> Config:
-    """Load merged config from global + project sources + env override."""
+    """Load config: dotenv already applied by CLI; merge files then env wins."""
     cfg = Config()
     cwd = cwd or Path.cwd()
 
-    # 1. global
     gdir = _global_config_dir()
     for name in _CONFIG_FILENAMES:
         p = gdir / name
@@ -342,46 +647,33 @@ def load(cwd: Optional[Path] = None) -> Config:
             cfg.merge(_load_jsonc(p))
             break
 
-    # 2. project tree (lowest-to-highest precedence as we walk up; later
-    #    files in the list override earlier, and the cwd file wins last)
     for p in _walk_project_configs(cwd):
         cfg.merge(_load_jsonc(p))
 
-    # 3. markdown agents/commands from global + .opencode dirs
     for d in _opencode_dirs(cwd):
         _load_markdown_agents(d, cfg)
         _load_markdown_commands(d, cfg)
 
-    # 4. env override: inline JSON content
-    inline = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    inline = os.environ.get("OPENCODE_CONFIG_CONTENT") or os.environ.get("SLEUTH_CONFIG_CONTENT")
     if inline:
         try:
             cfg.merge(json.loads(inline))
         except json.JSONDecodeError:
             pass
 
-    # 5. env var: explicit file path (highest precedence)
-    explicit = os.environ.get("OPENCODE_CONFIG")
+    explicit = os.environ.get("OPENCODE_CONFIG") or os.environ.get("SLEUTH_CONFIG")
     if explicit:
         p = Path(explicit)
         if p.is_file():
             cfg.merge(_load_jsonc(p))
 
-    # 6. context limit from env
-    env_ctx = os.environ.get("OPENCODE_CONTEXT_LIMIT")
-    if env_ctx:
-        try:
-            cfg.context_limit = int(env_ctx)
-        except ValueError:
-            pass
-
+    # .env / process env applied last so they win over JSONC
+    _apply_env(cfg)
     return cfg
 
 
 def parse_model_ref(ref: str) -> tuple[str, str]:
-    """Split "provider/model" into (provider_id, model_id)."""
     if "/" not in ref:
-        # default to openai if a bare model id is given
         return "openai", ref
     provider, _, model = ref.partition("/")
     return provider, model

@@ -136,6 +136,9 @@ class TaskTool:
                 store=session.store,
                 title=default_title(child=True),
                 parent_id=session.id,
+                user_id=getattr(session, "user_id", None)
+                or getattr(session.config, "user_id", "local")
+                or "local",
             )
 
         try:

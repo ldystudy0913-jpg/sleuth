@@ -100,6 +100,8 @@ class ToolContext:
     abort: Any = None
     # live Session for nested tools (task); optional
     session: Any = None
+    # product disclosure guardrails (path denylist); not bypassed by --yolo
+    guardrails_enabled: bool = True
 
     def is_aborted(self) -> bool:
         flag = self.abort

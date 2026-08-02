@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from ..guardrails import deny_if_protected, filter_unprotected_paths
 from .base import Tool, ToolContext, ToolResult
 
 MAX_MATCHES = 100
@@ -34,6 +35,11 @@ class GrepTool:
         base = Path(p.path) if p.path and Path(p.path).is_absolute() else ctx.workdir / (p.path or "")
         if not base.exists():
             return ToolResult.error("grep", f"directory does not exist: {base}")
+        denied = deny_if_protected(
+            base, workdir=ctx.workdir, enabled=ctx.guardrails_enabled
+        )
+        if denied:
+            return ToolResult.error("grep", denied)
 
         try:
             regex = re.compile(p.pattern)
@@ -45,7 +51,12 @@ class GrepTool:
         total = 0
         truncated = False
 
-        for fpath in base.glob(glob_pat):
+        candidates = filter_unprotected_paths(
+            base.glob(glob_pat),
+            workdir=ctx.workdir,
+            enabled=ctx.guardrails_enabled,
+        )
+        for fpath in candidates:
             if not fpath.is_file():
                 continue
             try:

@@ -26,6 +26,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from ..guardrails import deny_if_protected
 from .base import Tool, ToolContext, ToolResult
 from .read import _resolve
 
@@ -53,6 +54,11 @@ class EditTool:
     def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
         p = EditParams(**args)
         path = _resolve(p.file_path, ctx.workdir)
+        denied = deny_if_protected(
+            path, workdir=ctx.workdir, enabled=ctx.guardrails_enabled
+        )
+        if denied:
+            return ToolResult.error("edit", denied)
 
         if not path.is_file():
             return ToolResult.error("edit", f"file does not exist: {path}")

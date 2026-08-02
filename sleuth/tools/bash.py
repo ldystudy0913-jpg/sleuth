@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from ..guardrails import bash_command_blocked
 from ..util.truncate import Limits, truncate
 from .base import Tool, ToolContext, ToolResult
 
@@ -36,10 +38,16 @@ class BashTool:
     def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
         p = BashParams(**args)
         workdir = p.workdir or str(ctx.workdir)
+        blocked = bash_command_blocked(
+            p.command,
+            workdir=ctx.workdir,
+            cwd=Path(workdir) if workdir else ctx.workdir,
+            enabled=ctx.guardrails_enabled,
+        )
+        if blocked:
+            return ToolResult.error("bash", blocked)
 
-        # opencode registers the full command text as a permission pattern and
-        # an "always" pattern of "<first-token> *" so a granted command
-        # (e.g. "git status") auto-approves future "git ..." calls.
+        # Permission pattern: full command + "<first-token> *" for always-allow.
         first_token = (p.command.strip().split()[:1] or [""])[0]
         always = [first_token + " *"] if first_token else []
         ctx.ask("bash", patterns=[p.command], always=always)

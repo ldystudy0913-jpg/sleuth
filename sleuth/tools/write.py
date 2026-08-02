@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from ..guardrails import deny_if_protected
 from .base import Tool, ToolContext, ToolResult
 from .read import _resolve  # reuse the same path resolver
 
@@ -27,6 +28,11 @@ class WriteTool:
     def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
         p = WriteParams(**args)
         path = _resolve(p.file_path, ctx.workdir)
+        denied = deny_if_protected(
+            path, workdir=ctx.workdir, enabled=ctx.guardrails_enabled
+        )
+        if denied:
+            return ToolResult.error("write", denied)
 
         ctx.ask("write", patterns=[str(path)], always=[str(path)])
 

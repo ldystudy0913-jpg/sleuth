@@ -94,6 +94,7 @@ class Session:
     store: object = None  # Store protocol (sleuth.storage.base.Store)
     title: str = field(default_factory=default_title)
     parent_id: Optional[str] = None
+    user_id: str = "local"
 
     # lifecycle
     status: str = "idle"  # "idle" | "busy" | "retry"
@@ -183,6 +184,11 @@ class Session:
         )
         if new_msgs is not None:
             self.messages = new_msgs
+            if self.store is not None and hasattr(self.store, "replace_messages"):
+                try:
+                    self.store.replace_messages(self.id, new_msgs)
+                except Exception as exc:
+                    self.renderer.on_error(f"compact persist failed: {exc}")
             on_retry = getattr(self.renderer, "on_retry", None)
             if callable(on_retry):
                 on_retry(0, "context compacted", 0.0)
@@ -192,13 +198,15 @@ class Session:
     def _run_loop(self) -> None:
         agent_cfg = self.config.agent(self.agent_name)
         max_steps = self.config.max_steps or agent_cfg.steps
+        tools = self.registry.specs(permission_rules=self.permission.rules)
         system = assemble(
             workdir=self.workdir,
             config=self.config,
             agent_name=self.agent_name,
             model=self.model_id,
+            tool_specs=tools,
+            guardrails=self.config.guardrails,
         )
-        tools = self.registry.specs(permission_rules=self.permission.rules)
 
         for step in range(1, max_steps + 1):
             self.renderer.on_step(step, max_steps)
@@ -279,7 +287,6 @@ class Session:
                 return
 
             end_snap = self._safe_capture()
-            self._accumulate_usage(usage)
 
             assistant_blocks: List = []
             if reasoning_buf:
@@ -297,6 +304,9 @@ class Session:
             )
             self.messages.append(assistant_msg)
             self._persist_message(assistant_msg)
+            self._accumulate_usage(
+                usage, message_id=str(assistant_msg.metadata.get("id") or "")
+            )
             self._update_record()
 
             if aborted:
@@ -341,6 +351,7 @@ class Session:
             permission=self.permission,
             abort=self._abort,
             session=self,
+            guardrails_enabled=bool(getattr(self.config, "guardrails", True)),
         )
         try:
             if self._abort.is_set():
@@ -355,13 +366,34 @@ class Session:
         cost = options.get("cost")
         return cost if isinstance(cost, dict) else None
 
-    def _accumulate_usage(self, usage: dict) -> None:
+    def _accumulate_usage(self, usage: dict, *, message_id: Optional[str] = None) -> None:
         if not usage:
             return
         self._last_usage = dict(usage)
         for key in ("input", "output", "reasoning", "cache_read", "cache_write"):
             self._tokens[key] = self._tokens.get(key, 0) + int(usage.get(key, 0) or 0)
-        self._session_cost += compute_cost(usage, self._cost_rates())
+        turn_cost = compute_cost(usage, self._cost_rates())
+        self._session_cost += turn_cost
+        if self.store is not None and message_id and hasattr(self.store, "save_usage_event"):
+            try:
+                from .storage.base import UsageEvent
+
+                self.store.save_usage_event(
+                    UsageEvent(
+                        user_id=self.user_id,
+                        session_id=self.id,
+                        message_id=message_id,
+                        model=self.model_id,
+                        tokens_input=int(usage.get("input", 0) or 0),
+                        tokens_output=int(usage.get("output", 0) or 0),
+                        tokens_reasoning=int(usage.get("reasoning", 0) or 0),
+                        tokens_cache_read=int(usage.get("cache_read", 0) or 0),
+                        tokens_cache_write=int(usage.get("cache_write", 0) or 0),
+                        cost=turn_cost,
+                    )
+                )
+            except Exception as exc:
+                self.renderer.on_error(f"usage event persist failed: {exc}")
 
     # ---- snapshot ----
 
@@ -403,6 +435,7 @@ class Session:
                 directory=str(self.workdir),
                 title=self.title,
                 agent=self.agent_name,
+                user_id=self.user_id or getattr(self.config, "user_id", "local") or "local",
                 model={"id": self.model_id, "providerID": getattr(self.provider, "id", "")},
                 metadata=meta,
                 permission=[r.__dict__ for r in self.permission.rules],
@@ -429,6 +462,7 @@ class Session:
                 return
         existing.agent = self.agent_name
         existing.title = self.title
+        existing.user_id = self.user_id or existing.user_id or "local"
         existing.cost = self._session_cost
         existing.tokens_input = self._tokens.get("input", 0)
         existing.tokens_output = self._tokens.get("output", 0)
@@ -450,6 +484,7 @@ class Session:
         parent_id = None
         if rec and rec.metadata:
             parent_id = rec.metadata.get("parent_id")
+        user_id = (rec.user_id if rec else None) or getattr(config, "user_id", "local") or "local"
         sess = cls(
             provider=provider, registry=registry, config=config,
             workdir=workdir, permission=permission,
@@ -459,6 +494,7 @@ class Session:
             renderer=renderer or NullRenderer(), store=store,
             title=(rec.title if rec else default_title()),
             parent_id=parent_id,
+            user_id=user_id,
         )
         if rec:
             sess._session_cost = float(rec.cost or 0)
@@ -469,4 +505,12 @@ class Session:
                 "cache_read": rec.tokens_cache_read or 0,
                 "cache_write": rec.tokens_cache_write or 0,
             }
+        if store is not None and hasattr(store, "load_todos"):
+            try:
+                from .tools import todo as todo_mod
+
+                todos = store.load_todos(session_id_value)
+                todo_mod.set_state(todos)
+            except Exception:
+                pass
         return sess

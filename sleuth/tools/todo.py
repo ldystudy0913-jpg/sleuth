@@ -19,10 +19,16 @@ class TodoParams(BaseModel):
     todos: List[TodoItem] = Field(description="The full updated todo list.")
 
 
-# A single shared todo store (per-process). opencode persists these to the
-# session; for the MVP an in-memory singleton is enough to give the model
-# working memory across turns within one run.
 _STATE: List[dict] = []
+
+
+def set_state(todos: List[dict]) -> None:
+    _STATE.clear()
+    _STATE.extend(list(todos or []))
+
+
+def get_state() -> List[dict]:
+    return list(_STATE)
 
 
 class TodoTool:
@@ -38,8 +44,16 @@ class TodoTool:
     def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
         p = TodoParams(**args)
         items = [t.model_dump() for t in p.todos]
-        _STATE.clear()
-        _STATE.extend(items)
+        set_state(items)
+
+        session = getattr(ctx, "session", None)
+        store = getattr(session, "store", None) if session is not None else None
+        session_id = getattr(ctx, "session_id", None)
+        if store is not None and session_id and hasattr(store, "save_todos"):
+            try:
+                store.save_todos(session_id, items)
+            except Exception as exc:
+                return ToolResult.error("todo", f"persist failed: {exc}")
 
         rendered = "\n".join(
             f"- [{'x' if t['status'] == 'completed' else ' '}] {t['content']}"

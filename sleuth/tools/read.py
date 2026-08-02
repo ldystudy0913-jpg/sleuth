@@ -12,6 +12,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from ..guardrails import deny_if_protected
 from .base import ToolContext, ToolResult
 
 MAX_LINES = 2000
@@ -47,6 +48,11 @@ class ReadTool:
     def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
         p = ReadParams(**args)
         path = _resolve(p.file_path, ctx.workdir)
+        denied = deny_if_protected(
+            path, workdir=ctx.workdir, enabled=ctx.guardrails_enabled
+        )
+        if denied:
+            return ToolResult.error("read", denied)
 
         if path.is_dir():
             return _list_dir(path)

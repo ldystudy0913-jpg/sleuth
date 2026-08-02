@@ -1,0 +1,44 @@
+// Example sleuth.jsonc — optional overlay; .env wins for the same keys.
+{
+  "model": "openai/gpt-4o",
+  "small_model": "openai/gpt-4o-mini",
+  "context_limit": 128000,
+  "compaction": { "auto": true, "reserved": 20000 },
+  "subagent_depth": 1,
+  "default_agent": "build",
+  "max_steps": 50,
+  "agent": {
+    "build": {
+      "prompt": "You are a senior software engineer working in the user's codebase.",
+      "steps": 50
+    },
+    "plan": {
+      "prompt": "You are a careful planner. Explore and propose a plan; do not make changes.",
+      "steps": 20
+    }
+  },
+  "permission": {
+    "bash": "ask",
+    "edit": "ask",
+    "write": "ask"
+  },
+  "mcp": {
+    "timeout": { "startup": 30000, "request": 120000 },
+    "servers": {
+      // "mytools": {
+      //   "type": "remote",
+      //   "url": "https://mcp.example.com/mcp",
+      //   "headers": { "Authorization": "Bearer YOUR_TOKEN" }
+      // }
+    }
+  },
+  "skills": {
+    "refresh_seconds": 300,
+    "paths": [],
+    "urls": [],
+    "s3": []
+  },
+  "storage": {
+    "backend": "sqlite"
+  }
+}

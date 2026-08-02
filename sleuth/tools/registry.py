@@ -6,7 +6,7 @@ hands the final set to the session loop as provider specs + executables.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from .base import Tool, ToolContext, ToolResult, to_provider_spec, validate_args
 from .read import ReadTool
@@ -19,6 +19,7 @@ from .todo import TodoTool
 from .question import QuestionTool
 from .webfetch import WebFetchTool
 from .task import TaskTool
+from .skill_tool import SkillTool
 
 
 def _builtins() -> List[Tool]:
@@ -33,6 +34,7 @@ def _builtins() -> List[Tool]:
         QuestionTool(),
         WebFetchTool(),
         TaskTool(),
+        SkillTool(),
     ]
 
 
@@ -43,6 +45,13 @@ class ToolRegistry:
         self._tools: Dict[str, Tool] = {}
         for t in tools or _builtins():
             self._tools[t.name] = t
+
+    def register(self, tool: Tool) -> None:
+        self._tools[tool.name] = tool
+
+    def register_many(self, tools: Iterable[Tool]) -> None:
+        for t in tools:
+            self.register(t)
 
     def get(self, name: str) -> Optional[Tool]:
         return self._tools.get(name)

@@ -5,19 +5,27 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sleuth"
 version = "0.1.0"
-description = "A Python reimplementation of opencode's core coding-agent loop."
+description = "A Python coding agent with MCP, skills, and optional MySQL persistence."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "sleuth contributors" }]
 dependencies = [
     "openai>=1.50",
     "pydantic>=2.5",
     "rich>=13.0",
+    "mcp>=1.2",
 ]
+
+[project.optional-dependencies]
+s3 = ["boto3>=1.34"]
+mysql = ["PyMySQL>=1.1"]
+server = ["starlette>=0.37", "uvicorn>=0.30"]
+all = ["boto3>=1.34", "PyMySQL>=1.1", "starlette>=0.37", "uvicorn>=0.30"]
 
 [project.scripts]
 sleuth = "sleuth.cli:main"
+sleuth-server = "sleuth.server.app:main"
 
 [tool.setuptools.packages.find]
 include = ["sleuth*"]

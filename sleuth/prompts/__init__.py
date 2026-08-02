@@ -1,11 +1,8 @@
 """System prompt assembly.
 
-Loads the bundled prompt templates and stitches them together the way
-opencode's `session/system.ts` does:
-  base prompt (default or plan) + environment block + extra instructions.
-
-The environment block tells the model where it is running (cwd, platform,
-date) so it can reason about paths and tooling.
+Loads the bundled prompt templates and stitches them together:
+  base prompt (default or plan) + environment block + extra instructions
+  + optional product disclosure guardrails and public catalogs.
 """
 from __future__ import annotations
 
@@ -13,7 +10,7 @@ import datetime
 import platform
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Sequence
 
 from ..config import Config
 
@@ -50,6 +47,8 @@ def assemble(
     config: Config,
     agent_name: str,
     model: str,
+    tool_specs: Optional[Sequence[dict]] = None,
+    guardrails: Optional[bool] = None,
 ) -> str:
     """Build the full system prompt for a turn."""
     from ..instruction import (
@@ -59,6 +58,7 @@ def assemble(
     )
 
     agent = config.agent(agent_name)
+    use_guardrails = config.guardrails if guardrails is None else bool(guardrails)
 
     if agent_name == "plan":
         base = _load("plan.txt")
@@ -75,12 +75,23 @@ def assemble(
         parts.append(base)
     parts.append(environment(workdir, model))
 
-    # AGENTS.md / CLAUDE.md / remote instructions (opencode Instruction.system)
+    # AGENTS.md / CLAUDE.md / remote instructions
     file_paths = discover_paths(workdir, config)
     parts.extend(load_instruction_texts(workdir, config))
     inline = inline_instruction_lines(config, file_paths)
     if inline:
         parts.append("\n".join(inline))
+
+    if use_guardrails:
+        from ..guardrails import (
+            disclosure_policy_block,
+            public_skills_block,
+            public_tools_block,
+        )
+
+        parts.append(disclosure_policy_block())
+        parts.append(public_tools_block(list(tool_specs or [])))
+        parts.append(public_skills_block())
 
     parts.append(
         "\n".join(

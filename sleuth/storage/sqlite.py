@@ -1,15 +1,4 @@
-"""SQLite-backed Store (stdlib sqlite3).
-
-Schema mirrors opencode's packages/core/src/session/sql.ts:
-  - session:  metadata + token/cost totals
-  - message:  id, session_id, data(JSON)  (one row per Message)
-  - part:     id, message_id, session_id, data(JSON)  (one row per block;
-              polymorphic via the `type` field inside the JSON)
-  - todo:     session_id, content, status, priority, position
-
-No encryption at rest — opencode stores plaintext JSON too (see plan's
-SKIP list; GM/MySQL encryption is intentionally not implemented).
-"""
+"""SQLite-backed Store (stdlib sqlite3)."""
 from __future__ import annotations
 
 import json
@@ -20,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from ..messages import Message, block_from_dict, block_to_dict
 from ..util.ids import message_id, part_id
-from .base import SessionRecord, Store
+from .base import SessionRecord, Store, UsageEvent
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS session (
@@ -28,6 +17,7 @@ CREATE TABLE IF NOT EXISTS session (
     directory TEXT NOT NULL,
     title TEXT NOT NULL,
     agent TEXT,
+    user_id TEXT NOT NULL DEFAULT 'local',
     model TEXT,
     cost REAL NOT NULL DEFAULT 0,
     tokens_input INTEGER NOT NULL DEFAULT 0,
@@ -75,28 +65,41 @@ CREATE TABLE IF NOT EXISTS todo (
     PRIMARY KEY (session_id, position),
     FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS usage_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    model TEXT,
+    tokens_input INTEGER NOT NULL DEFAULT 0,
+    tokens_output INTEGER NOT NULL DEFAULT 0,
+    tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+    cost REAL NOT NULL DEFAULT 0,
+    time_created INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_user_idx ON usage_event(user_id, time_created);
 """
 
 
 def default_db_path() -> Path:
-    """~/.local/share/opencode/sleuth.db (OPENCODE_DATA_DIR overrides)."""
     import os
 
-    base = os.environ.get("OPENCODE_DATA_DIR")
+    base = os.environ.get("SLEUTH_DATA_DIR")
     if not base:
         home = Path.home()
         if os.name == "nt":
-            base = str(home / "AppData" / "Local" / "opencode")
+            base = str(home / "AppData" / "Local" / "sleuth")
         else:
-            base = str(home / ".local" / "share" / "opencode")
+            base = str(home / ".local" / "share" / "sleuth")
     p = Path(base)
     p.mkdir(parents=True, exist_ok=True)
     return p / "sleuth.db"
 
 
 class SQLiteStore(Store):
-    """A simple connection-per-call SQLite store (good enough for an MVP)."""
-
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else default_db_path()
         self._init()
@@ -110,8 +113,33 @@ class SQLiteStore(Store):
     def _init(self) -> None:
         with self._conn() as c:
             c.executescript(_SCHEMA)
-
-    # ---- session ----
+            cols = {r[1] for r in c.execute("PRAGMA table_info(session)").fetchall()}
+            if "user_id" not in cols:
+                c.execute(
+                    "ALTER TABLE session ADD COLUMN user_id TEXT NOT NULL DEFAULT 'local'"
+                )
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS session_user_idx ON session(user_id, time_updated)"
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS usage_event (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    model TEXT,
+                    tokens_input INTEGER NOT NULL DEFAULT 0,
+                    tokens_output INTEGER NOT NULL DEFAULT 0,
+                    tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+                    tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+                    tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+                    cost REAL NOT NULL DEFAULT 0,
+                    time_created INTEGER NOT NULL
+                )"""
+            )
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS usage_user_idx ON usage_event(user_id, time_created)"
+            )
 
     def create_session(self, rec: SessionRecord) -> None:
         now = int(time.time() * 1000)
@@ -120,13 +148,13 @@ class SQLiteStore(Store):
         with self._conn() as c:
             c.execute(
                 """INSERT OR REPLACE INTO session
-                   (id, directory, title, agent, model, cost,
+                   (id, directory, title, agent, user_id, model, cost,
                     tokens_input, tokens_output, tokens_reasoning,
                     tokens_cache_read, tokens_cache_write,
                     metadata, permission, time_created, time_updated)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    rec.id, rec.directory, rec.title, rec.agent,
+                    rec.id, rec.directory, rec.title, rec.agent, rec.user_id or "local",
                     json.dumps(rec.model) if rec.model else None,
                     rec.cost,
                     rec.tokens_input, rec.tokens_output, rec.tokens_reasoning,
@@ -142,13 +170,13 @@ class SQLiteStore(Store):
         with self._conn() as c:
             c.execute(
                 """UPDATE session SET
-                   title=?, agent=?, model=?, cost=?,
+                   title=?, agent=?, user_id=?, model=?, cost=?,
                    tokens_input=?, tokens_output=?, tokens_reasoning=?,
                    tokens_cache_read=?, tokens_cache_write=?,
                    metadata=?, permission=?, time_updated=?
                    WHERE id=?""",
                 (
-                    rec.title, rec.agent,
+                    rec.title, rec.agent, rec.user_id or "local",
                     json.dumps(rec.model) if rec.model else None,
                     rec.cost,
                     rec.tokens_input, rec.tokens_output, rec.tokens_reasoning,
@@ -164,24 +192,30 @@ class SQLiteStore(Store):
             row = c.execute("SELECT * FROM session WHERE id=?", (session_id,)).fetchone()
         return _row_to_session(row) if row else None
 
-    def list_sessions(self, directory: Optional[str] = None, limit: int = 50) -> List[SessionRecord]:
+    def list_sessions(
+        self,
+        directory: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[SessionRecord]:
+        clauses = []
+        args: List[Any] = []
+        if directory:
+            clauses.append("directory=?")
+            args.append(directory)
+        if user_id:
+            clauses.append("user_id=?")
+            args.append(user_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        args.append(limit)
         with self._conn() as c:
-            if directory:
-                rows = c.execute(
-                    "SELECT * FROM session WHERE directory=? ORDER BY time_updated DESC LIMIT ?",
-                    (directory, limit),
-                ).fetchall()
-            else:
-                rows = c.execute(
-                    "SELECT * FROM session ORDER BY time_updated DESC LIMIT ?", (limit,)
-                ).fetchall()
+            rows = c.execute(
+                f"SELECT * FROM session{where} ORDER BY time_updated DESC LIMIT ?",
+                args,
+            ).fetchall()
         return [_row_to_session(r) for r in rows]
 
-    # ---- messages ----
-
     def save_message(self, session_id: str, message: Message) -> str:
-        """Persist a message + its content blocks. Idempotent: re-saving
-        replaces the message and its parts (keyed by message id)."""
         msg_id = message.metadata.get("id") or message_id()
         message.metadata["id"] = msg_id
         now = int(time.time() * 1000)
@@ -197,7 +231,6 @@ class SQLiteStore(Store):
                    VALUES (?,?,?,?,?,?)""",
                 (msg_id, session_id, seq, now, now, json.dumps(data, default=str)),
             )
-            # replace parts for this message
             c.execute("DELETE FROM part WHERE message_id=?", (msg_id,))
             for i, block in enumerate(message.content):
                 c.execute(
@@ -236,7 +269,12 @@ class SQLiteStore(Store):
             out.append(Message(role=data.get("role", "user"), content=blocks, metadata=meta))
         return out
 
-    # ---- todos ----
+    def replace_messages(self, session_id: str, messages: List[Message]) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM part WHERE session_id=?", (session_id,))
+            c.execute("DELETE FROM message WHERE session_id=?", (session_id,))
+        for msg in messages:
+            self.save_message(session_id, msg)
 
     def save_todos(self, session_id: str, todos: List[dict]) -> None:
         now = int(time.time() * 1000)
@@ -256,10 +294,45 @@ class SQLiteStore(Store):
             ).fetchall()
         return [{"content": r["content"], "status": r["status"], "priority": r["priority"]} for r in rows]
 
-    # ---- delete ----
+    def save_usage_event(self, event: UsageEvent) -> None:
+        now = event.time_created or int(time.time() * 1000)
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO usage_event
+                   (user_id, session_id, message_id, model,
+                    tokens_input, tokens_output, tokens_reasoning,
+                    tokens_cache_read, tokens_cache_write, cost, time_created)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    event.user_id, event.session_id, event.message_id, event.model,
+                    event.tokens_input, event.tokens_output, event.tokens_reasoning,
+                    event.tokens_cache_read, event.tokens_cache_write, event.cost, now,
+                ),
+            )
+
+    def sum_usage(self, user_id: str) -> Dict[str, Any]:
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT COUNT(*) AS n,
+                          COALESCE(SUM(tokens_input),0) AS ti,
+                          COALESCE(SUM(tokens_output),0) AS to_,
+                          COALESCE(SUM(tokens_reasoning),0) AS tr,
+                          COALESCE(SUM(cost),0) AS cost
+                   FROM usage_event WHERE user_id=?""",
+                (user_id,),
+            ).fetchone()
+        return {
+            "user_id": user_id,
+            "events": int(row["n"] or 0),
+            "tokens_input": int(row["ti"] or 0),
+            "tokens_output": int(row["to_"] or 0),
+            "tokens_reasoning": int(row["tr"] or 0),
+            "cost": float(row["cost"] or 0),
+        }
 
     def delete_session(self, session_id: str) -> None:
         with self._conn() as c:
+            c.execute("DELETE FROM usage_event WHERE session_id=?", (session_id,))
             c.execute("DELETE FROM session WHERE id=?", (session_id,))
 
 
@@ -269,14 +342,17 @@ def _next_seq(c: sqlite3.Connection, session_id: str) -> int:
 
 
 def _row_to_session(row: sqlite3.Row) -> SessionRecord:
+    keys = row.keys()
     model = json.loads(row["model"]) if row["model"] else None
     metadata = json.loads(row["metadata"]) if row["metadata"] else {}
     permission = json.loads(row["permission"]) if row["permission"] else None
+    user_id = row["user_id"] if "user_id" in keys else "local"
     return SessionRecord(
         id=row["id"],
         directory=row["directory"],
         title=row["title"],
         agent=row["agent"] or "build",
+        user_id=user_id or "local",
         model=model,
         cost=row["cost"],
         tokens_input=row["tokens_input"],

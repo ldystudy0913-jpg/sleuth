@@ -5,7 +5,8 @@ prints so the tool still runs out of the box.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+import os
+from typing import TYPE_CHECKING, List, Optional
 
 from .tools.base import ToolResult
 
@@ -22,6 +23,19 @@ try:
 except Exception:  # pragma: no cover
     _console = None
     _HAS_RICH = False
+
+# Thinking block collapses when longer than this many lines (env override).
+_DEFAULT_REASONING_COLLAPSE_LINES = 8
+
+
+def _reasoning_collapse_lines() -> int:
+    raw = os.environ.get("SLEUTH_REASONING_COLLAPSE_LINES")
+    if raw is None or raw == "":
+        return _DEFAULT_REASONING_COLLAPSE_LINES
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DEFAULT_REASONING_COLLAPSE_LINES
 
 
 def _print(text: str) -> None:
@@ -45,34 +59,69 @@ def _panel(text: str, title: str, style: str = "cyan") -> None:
         print(f"--- {title} ---\n{text}\n---")
 
 
+def _count_lines(text: str) -> int:
+    if not text:
+        return 0
+    # splitlines() drops a trailing bare newline's empty last line — fine for preview.
+    return max(1, len(text.splitlines()))
+
+
 class RichRenderer:
     """Render streaming events to the terminal."""
 
-    def __init__(self, *, show_tools: bool = True):
+    def __init__(
+        self,
+        *,
+        show_tools: bool = True,
+        interactive: bool = True,
+        reasoning_collapse_lines: Optional[int] = None,
+    ):
         self.show_tools = show_tools
-        self._text_open = False  # are we mid-stream of assistant text?
+        self.interactive = interactive
+        self.reasoning_collapse_lines = (
+            _reasoning_collapse_lines()
+            if reasoning_collapse_lines is None
+            else max(0, int(reasoning_collapse_lines))
+        )
+        self._text_open = False
+        self._reasoning_open = False
+        self._reasoning_parts: List[str] = []
+        self._reasoning_status_drawn = False
+        self._pending_full_reasoning: Optional[str] = None
 
     def on_step(self, step: int, max_steps: int) -> None:
-        pass  # keep output clean; uncomment for debugging
-        # if _HAS_RICH: _console.log(f"[dim]step {step}/{max_steps}[/dim]")
+        pass
 
     def on_text(self, text: str) -> None:
-        # Stream raw text as it arrives; markdown rendering happens at the
-        # end via on_stop when we have the full block. Streaming raw keeps
-        # latency low and avoids partial-markdown render glitches.
+        self._finalize_reasoning(allow_expand=True)
+        if not self._text_open:
+            _print("\n")
         _print(text)
         self._text_open = True
 
     def on_reasoning(self, text: str) -> None:
-        """Render the model's thinking in dim/gray (opencode textMuted)."""
-        self._newline_if_open()
-        if _HAS_RICH:
-            _console.print(text, style="dim", end="")
-        else:
-            # ANSI dim prefix \x1b[2m ... \x1b[0m
-            _print("\x1b[2m" + text + "\x1b[0m")
+        """Buffer thinking; show a live line counter, collapse when finished."""
+        import sys
+
+        if self._text_open:
+            self._newline_if_open()
+        if not self._reasoning_open:
+            self._reasoning_open = True
+            self._reasoning_parts = []
+            self._reasoning_status_drawn = False
+            self._pending_full_reasoning = None
+        self._reasoning_parts.append(text)
+        body = "".join(self._reasoning_parts)
+        n = _count_lines(body)
+        status = f"thinking... {n} line{'s' if n != 1 else ''}"
+        # Carriage-return status (avoid dumping the full stream mid-flight).
+        sys.stdout.write("\r\x1b[2m" + status + "\x1b[0m\x1b[K")
+        sys.stdout.flush()
+        self._reasoning_status_drawn = True
 
     def on_tool_start(self, name: str, args: dict) -> None:
+        # Mid-tool-loop: collapse without blocking for expand.
+        self._finalize_reasoning(allow_expand=False)
         if not self.show_tools:
             return
         self._newline_if_open()
@@ -90,6 +139,8 @@ class RichRenderer:
         _print(f"  {mark} {result.title}\n")
 
     def on_stop(self, reason: str, usage: dict) -> None:
+        self._finalize_reasoning(allow_expand=True)
+        self._offer_pending_expand()
         self._newline_if_open()
         if usage and _HAS_RICH:
             extras = ""
@@ -108,6 +159,7 @@ class RichRenderer:
             )
 
     def on_retry(self, attempt: int, message: str, wait: float) -> None:
+        self._finalize_reasoning(allow_expand=False)
         self._newline_if_open()
         if _HAS_RICH:
             _console.print(
@@ -118,6 +170,7 @@ class RichRenderer:
             print(f"retry {attempt}: {message} (waiting {wait:.1f}s)")
 
     def on_error(self, message: str) -> None:
+        self._finalize_reasoning(allow_expand=False)
         self._newline_if_open()
         if _HAS_RICH:
             _console.print(f"[red]error:[/red] {message}")
@@ -129,6 +182,89 @@ class RichRenderer:
             _print("\n")
             self._text_open = False
 
+    def _finalize_reasoning(self, *, allow_expand: bool = False) -> None:
+        import sys
+
+        if not self._reasoning_open:
+            return
+        body = "".join(self._reasoning_parts).strip("\n")
+        self._reasoning_open = False
+        self._reasoning_parts = []
+        if self._reasoning_status_drawn:
+            sys.stdout.write("\r\x1b[K")
+            sys.stdout.flush()
+            self._reasoning_status_drawn = False
+
+        if not body:
+            return
+
+        lines = body.splitlines() or [body]
+        limit = self.reasoning_collapse_lines
+        # 0 = always collapse (still expandable when interactive).
+        collapsed = limit == 0 or len(lines) > limit
+
+        if not collapsed:
+            self._emit_reasoning_block(body, collapsed=False)
+            _print("\n")
+            return
+
+        preview_n = 3 if limit == 0 else min(3, max(1, limit))
+        preview = "\n".join(lines[:preview_n])
+        hidden = max(0, len(lines) - preview_n)
+        summary = f"{preview}\n... (+{hidden} lines)" if hidden else preview
+        self._emit_reasoning_block(summary, collapsed=True, total_lines=len(lines))
+        _print("\n")
+
+        if allow_expand and self.interactive and not os.environ.get("SLEUTH_REASONING_NO_PROMPT"):
+            self._pending_full_reasoning = None
+            self._prompt_expand(body)
+        elif self.interactive and not os.environ.get("SLEUTH_REASONING_NO_PROMPT"):
+            # Defer expand until answer/stop so tool loops are not blocked.
+            self._pending_full_reasoning = body
+
+    def _offer_pending_expand(self) -> None:
+        body = self._pending_full_reasoning
+        if not body:
+            return
+        self._pending_full_reasoning = None
+        if self.interactive and not os.environ.get("SLEUTH_REASONING_NO_PROMPT"):
+            self._prompt_expand(body)
+
+    def _prompt_expand(self, body: str) -> None:
+        try:
+            ans = input("  expand thinking? [e=expand / Enter=skip] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+            _print("\n")
+        if ans in ("e", "expand", "y", "yes"):
+            self._emit_reasoning_block(body, collapsed=False)
+            _print("\n")
+
+    def _emit_reasoning_block(
+        self,
+        body: str,
+        *,
+        collapsed: bool,
+        total_lines: Optional[int] = None,
+    ) -> None:
+        title = "thinking"
+        if collapsed:
+            n = total_lines if total_lines is not None else _count_lines(body)
+            title = f"thinking (collapsed, {n} lines)"
+        if _HAS_RICH:
+            _console.print()
+            _console.print(
+                Panel(
+                    body,
+                    title=title,
+                    border_style="dim",
+                    expand=False,
+                    style="dim",
+                )
+            )
+        else:
+            print(f"\n--- {title} ---\n{body}\n---")
+
 
 # ---------------------------------------------------------------------------
 # CLI entry point
@@ -138,66 +274,26 @@ class RichRenderer:
 def _build_session(args) -> "Session":
     from pathlib import Path
 
-    from .agent import ruleset_for
+    from .app import build_session
     from .config import load
-    from .permission import Permission, allow_all_rules, from_config as permission_from_config
-    from .provider.factory import resolve_model
-    from .session import Session
-    from .storage.sqlite import SQLiteStore
-    from .tools.registry import ToolRegistry
 
-    config = load()
-
-    agent_name = args.agent or config.default_agent
-    provider, model_id = resolve_model(config, agent_name)
-
-    # permission ruleset: --yolo wins, else agent baseline + agent/config overrides
-    if args.yolo:
-        rules = allow_all_rules()
-    else:
-        rules = ruleset_for(agent_name)
-        agent_cfg = config.agent(agent_name)
-        if agent_cfg.permission:
-            rules = rules + permission_from_config(agent_cfg.permission)
-        if config.permission:
-            # opencode fromConfig: {bash:"ask"} or {bash:{"git *":"allow"}}
-            rules = rules + permission_from_config(config.permission)
-
-    permission = Permission(rules=rules)
-    store = SQLiteStore()
-
-    # resume a persisted session when requested
-    if getattr(args, "session_id", None):
-        return Session.load(
-            provider=provider, registry=ToolRegistry(), config=config,
-            workdir=Path.cwd(), permission=permission, store=store,
-            session_id_value=args.session_id, agent_name=agent_name,
-            model_id=model_id,
-            renderer=RichRenderer(show_tools=not args.print_mode),
-        )
-    if getattr(args, "continue_session", False):
-        recent = store.list_sessions(directory=str(Path.cwd()), limit=1)
-        if recent:
-            return Session.load(
-                provider=provider, registry=ToolRegistry(), config=config,
-                workdir=Path.cwd(), permission=permission, store=store,
-                session_id_value=recent[0].id, agent_name=agent_name,
-                model_id=model_id,
-                renderer=RichRenderer(show_tools=not args.print_mode),
-            )
-
-    session = Session(
-        provider=provider,
-        registry=ToolRegistry(),
+    config = load(Path.cwd())
+    if getattr(args, "user", None):
+        config.user_id = args.user
+    renderer = RichRenderer(
+        show_tools=not args.print_mode,
+        interactive=not args.print_mode,
+    )
+    return build_session(
         config=config,
         workdir=Path.cwd(),
-        permission=permission,
-        agent_name=agent_name,
-        model_id=model_id,
-        renderer=RichRenderer(show_tools=not args.print_mode),
-        store=store,
+        agent_name=args.agent,
+        user_id=config.user_id,
+        session_id=getattr(args, "session_id", None),
+        continue_latest=bool(getattr(args, "continue_session", False)),
+        yolo=bool(args.yolo),
+        renderer=renderer,
     )
-    return session
 
 
 def _parse_args(argv=None):
@@ -205,7 +301,7 @@ def _parse_args(argv=None):
 
     parser = argparse.ArgumentParser(
         prog="sleuth",
-        description="sleuth — a Python coding agent (opencode port)",
+        description="sleuth — a Python coding agent",
     )
     parser.add_argument("prompt", nargs="?", help="prompt; if omitted, starts interactive REPL")
     parser.add_argument("--agent", default=None, help="agent to use (build, plan, or custom)")
@@ -219,6 +315,10 @@ def _parse_args(argv=None):
                         help="continue the most recent session in this directory")
     parser.add_argument("--revert", dest="revert_message_id", default=None,
                         help="revert working tree to snapshot at the given assistant message id")
+    parser.add_argument("--user", default=None,
+                        help="user id for session/usage isolation (or SLEUTH_USER_ID)")
+    parser.add_argument("--refresh-skills", action="store_true",
+                        help="force reload skills from paths/urls/s3 before starting")
     return parser.parse_args(argv)
 
 
@@ -236,18 +336,31 @@ def main(argv=None) -> int:
             except Exception:
                 pass
 
-    # Load .env from cwd and ~/.config/opencode/.env (does not overwrite real
-    # env vars). Keeps API keys out of the committed opencode.json.
+    # Load .env from cwd (does not overwrite already-exported env vars).
     from pathlib import Path
     from .util.env import load_dotenv
     load_dotenv(Path.cwd())
 
-    # --model override: inject into config at runtime
-    from .config import Config, parse_model_ref
+    if getattr(args, "refresh_skills", False):
+        from .app import reload_skills
+        from .config import load
+        reload_skills(load(Path.cwd()), Path.cwd())
 
     session = _build_session(args)
+    try:
+        return _run_session(args, session)
+    finally:
+        try:
+            from .mcp import shutdown_manager
+            shutdown_manager()
+        except Exception:
+            pass
+
+
+def _run_session(args, session) -> int:
+    from .config import parse_model_ref
+
     if args.model:
-        # rebuild config with the override model for the active agent
         session.config.model = args.model
         provider_id, model_id = parse_model_ref(args.model)
         from .provider.factory import build_provider
@@ -260,7 +373,6 @@ def main(argv=None) -> int:
         return 0 if ok else 1
 
     if args.prompt:
-        # non-interactive single-shot. Ctrl+C aborts the running turn.
         _print(f"[session {session.id}]\n")
         try:
             text = _expand_command(session, args.prompt)
@@ -272,7 +384,6 @@ def main(argv=None) -> int:
             _print("\n[aborted]\n")
         return 0
 
-    # interactive REPL
     _print(
         "sleuth interactive session. Type your prompt; Ctrl+C or 'exit' to quit.\n"
         f"[session {session.id}] title={session.title!r}\n"
@@ -297,7 +408,6 @@ def main(argv=None) -> int:
                 if session.title:
                     _print(f"\n[title: {session.title}]\n")
             except KeyboardInterrupt:
-                # Ctrl+C mid-turn: abort the running turn, stay in the REPL.
                 session.cancel()
                 _print("\n[aborted; press enter to continue]\n")
             _print("\n\n")

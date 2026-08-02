@@ -6,6 +6,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from ..guardrails import deny_if_protected, filter_unprotected_paths
 from .base import Tool, ToolContext, ToolResult
 
 MAX_RESULTS = 100
@@ -30,8 +31,16 @@ class GlobTool:
         base = Path(p.path) if p.path and Path(p.path).is_absolute() else ctx.workdir / (p.path or "")
         if not base.exists():
             return ToolResult.error("glob", f"directory does not exist: {base}")
+        denied = deny_if_protected(
+            base, workdir=ctx.workdir, enabled=ctx.guardrails_enabled
+        )
+        if denied:
+            return ToolResult.error("glob", denied)
 
         matches = sorted(base.glob(p.pattern), key=lambda x: x.stat().st_mtime, reverse=True)
+        matches = filter_unprotected_paths(
+            matches, workdir=ctx.workdir, enabled=ctx.guardrails_enabled
+        )
         truncated = len(matches) > MAX_RESULTS
         matches = matches[:MAX_RESULTS]
 
