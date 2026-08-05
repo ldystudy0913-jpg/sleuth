@@ -26,9 +26,10 @@ class ReasoningDelta:
 
     Mirrors opencode's `reasoning-delta` event (packages/llm/src/schema/
     events.ts). On the OpenAI-compatible path this comes from
-    `delta.reasoning_content`. The session loop accumulates it into a
-    ReasoningBlock and renders it dim/gray; it is NOT sent back to the model
-    on subsequent turns for non-interleaved models.
+    `delta.reasoning_content` (DeepSeek) or `delta.reasoning` (some Qwen
+    proxies). The session loop accumulates it into a ReasoningBlock and
+    renders it dim/gray; it is NOT sent back to the model on subsequent
+    turns for non-interleaved models.
     """
 
     text: str

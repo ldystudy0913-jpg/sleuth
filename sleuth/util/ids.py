@@ -1,33 +1,24 @@
 """Identifier generation.
 
-Mirrors opencode's monotonic id schemes (msg_<n>, toolu_<n>, sess_...).
-A process-global counter keeps ids ascending within a run so message
-ordering is stable when persisted to disk.
+Persistent IDs (session / message / part / tool_use) MUST be globally unique
+across process restarts and multiple workers — never reuse a process-local
+monotonic counter for MySQL/SQLite primary keys.
 """
 from __future__ import annotations
 
 import secrets
-from itertools import count
-
-_counter = count(1)
 
 
 def reset() -> None:
-    """Reset the global counter (mainly for tests)."""
-    global _counter
-    _counter = count(1)
-
-
-def _next() -> int:
-    return next(_counter)
+    """No-op kept for test compatibility (IDs are random, not sequenced)."""
+    return
 
 
 def message_id() -> str:
-    return f"msg_{_next()}"
+    return "msg_" + secrets.token_hex(12)
 
 
 def tool_use_id() -> str:
-    # Use a "toolu_" prefix so ids are obvious in logs and round-trip cleanly.
     return "toolu_" + secrets.token_hex(12)
 
 
@@ -36,4 +27,4 @@ def session_id() -> str:
 
 
 def part_id() -> str:
-    return f"part_{_next()}"
+    return "part_" + secrets.token_hex(12)

@@ -197,7 +197,18 @@ Skill = 带 frontmatter 的说明包；模型通过内置 `skill` 工具按名�
    ```powershell
    py -3.12 -m sleuth --refresh-skills --yolo "用 skill 工具加载 my-skill 并总结要点"
    ```
-   HTTP：`GET /v1/skills`，强制刷新 `POST /v1/skills/reload`（需 admin token 时带头）。
+   HTTP：`GET /v1/skills`（会走懒惰 TTL），强制刷新 `POST /v1/skills/reload`（需 admin token 时带头）。
+
+### 热加载语义
+
+| 方式 | 行为 |
+|------|------|
+| `SLEUTH_SKILLS_REFRESH_SECONDS`（默认 300） | **懒惰 TTL**：满间隔后，下一次 `Session.prompt()` / `GET /v1/skills` 自动 `discover`。无后台线程。 |
+| 手动立即 | 启动 CLI：`--refresh-skills`；已运行的 HTTP：`POST /v1/skills/reload` |
+| 本轮内 | 目录在 `prompt()` 开头刷新后冻结；`skill` 工具写入历史的正文不会被中途改写 |
+| 远程源 | URL/S3 用 ETag / LastModified；未变则跳过重下 |
+
+实现：[`sleuth/skill/__init__.py`](../sleuth/skill/__init__.py)；触发点：[`session.prompt`](../sleuth/session.py)。
 
 ### 远程分发
 
@@ -205,9 +216,6 @@ Skill = 带 frontmatter 的说明包；模型通过内置 `skill` 工具按名�
 |------|------|------|
 | HTTP zip | `SLEUTH_SKILLS_URLS` | zip 内可含多个 `**/SKILL.md` |
 | S3 | `SLEUTH_SKILLS_S3` | 单对象 / 前缀 / manifest；需 boto3 + AWS 凭证 |
-| 热更新 | `SLEUTH_SKILLS_REFRESH_SECONDS` | ETag / LastModified；CLI `--refresh-skills` |
-
-实现：[`sleuth/skill/__init__.py`](../sleuth/skill/__init__.py)。
 
 ### 自检清单
 
@@ -262,6 +270,8 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
 ## 7. 扩展存储（Store）
 
 协议：[`storage/base.py`](../sleuth/storage/base.py)（`SessionRecord` / `Message` / todo / `UsageEvent`）。
+
+`message` / `part` 的主键由 [`util/ids.py`](../sleuth/util/ids.py) 生成随机 ID（`msg_` / `part_` + hex），保证跨进程重启与多 worker 全局唯一。**不要**改回进程内单调计数器，否则 MySQL 会报 `Duplicate entry 'part_N' for key 'part.PRIMARY'`。
 
 ### 新增后端步骤
 

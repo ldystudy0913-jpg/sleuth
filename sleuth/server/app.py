@@ -1,7 +1,6 @@
 """Thin Starlette HTTP API over the shared Session core."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -36,6 +35,14 @@ def _check_admin(request, config) -> Optional[Any]:
     return None
 
 
+def _session_model_payload(sess) -> Dict[str, str]:
+    return {
+        "ref": sess.model_ref(),
+        "id": sess.model_id,
+        "providerID": getattr(sess.provider, "id", "") or "",
+    }
+
+
 def create_app(workdir: Optional[Path] = None):
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -43,7 +50,7 @@ def create_app(workdir: Optional[Path] = None):
 
     import os
 
-    workdir = workdir or Path.cwd
+    workdir = workdir or Path.cwd()
     load_dotenv(workdir)
     config = load(workdir)
     if not os.environ.get("SLEUTH_STORAGE_BACKEND") and config.server.default_backend:
@@ -54,9 +61,9 @@ def create_app(workdir: Optional[Path] = None):
         return _json_response({"ok": True})
 
     async def create_session(request: Request):
-        body = {}
+        body: Dict[str, Any] = {}
         try:
-            body = await request.json
+            body = await request.json()
         except Exception:
             body = {}
         user_id = body.get("user_id") or _user_id(request)
@@ -67,16 +74,22 @@ def create_app(workdir: Optional[Path] = None):
             agent_name=agent,
             user_id=user_id,
             yolo=bool(body.get("yolo", True)),
-            renderer=NullRenderer,
+            renderer=NullRenderer(),
             store=store,
         )
-        sess._ensure_persisted
+        if body.get("model"):
+            try:
+                sess.set_model(str(body["model"]))
+            except Exception as exc:
+                return _json_response({"error": f"invalid model: {exc}"}, 400)
+        sess._ensure_persisted()
         return _json_response(
             {
                 "id": sess.id,
                 "user_id": sess.user_id,
                 "title": sess.title,
                 "agent": sess.agent_name,
+                "model": _session_model_payload(sess),
             }
         )
 
@@ -90,6 +103,7 @@ def create_app(workdir: Optional[Path] = None):
                     "user_id": r.user_id,
                     "title": r.title,
                     "agent": r.agent,
+                    "model": r.model,
                     "cost": r.cost,
                     "tokens_input": r.tokens_input,
                     "tokens_output": r.tokens_output,
@@ -112,6 +126,7 @@ def create_app(workdir: Optional[Path] = None):
                 "user_id": rec.user_id,
                 "title": rec.title,
                 "agent": rec.agent,
+                "model": rec.model,
                 "cost": rec.cost,
                 "tokens": {
                     "input": rec.tokens_input,
@@ -140,7 +155,7 @@ def create_app(workdir: Optional[Path] = None):
         if rec is None or (rec.user_id and rec.user_id != user_id):
             return _json_response({"error": "not found"}, 404)
         try:
-            body = await request.json
+            body = await request.json()
         except Exception:
             return _json_response({"error": "invalid json"}, 400)
         prompt = body.get("prompt") or body.get("text") or ""
@@ -155,15 +170,21 @@ def create_app(workdir: Optional[Path] = None):
             user_id=user_id,
             session_id=sid,
             yolo=bool(body.get("yolo", True)),
-            renderer=NullRenderer,
+            renderer=NullRenderer(),
             store=store,
         )
+        if body.get("model"):
+            try:
+                sess.set_model(str(body["model"]))
+            except Exception as exc:
+                return _json_response({"error": f"invalid model: {exc}"}, 400)
         text = sess.prompt(str(prompt))
         return _json_response(
             {
                 "session_id": sess.id,
                 "text": text,
                 "title": sess.title,
+                "model": _session_model_payload(sess),
                 "usage": sess._last_usage,
                 "cost": sess._session_cost,
             }
@@ -189,11 +210,9 @@ def create_app(workdir: Optional[Path] = None):
         )
 
     async def skills_list(_: Request):
-        from ..skill import get_skills
+        from ..skill import ensure_skills_fresh
 
-        skills = get_skills()
-        if not skills:
-            skills = reload_skills(load(workdir), workdir)
+        skills = ensure_skills_fresh(load(workdir), workdir)
         return _json_response(
             [
                 {"name": s.name, "description": s.description, "location": str(s.location)}
@@ -225,7 +244,7 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args(argv)
 
-    cwd = Path.cwd
+    cwd = Path.cwd()
     load_dotenv(cwd)
     cfg = load(cwd)
     # Prefer mysql for server when SLEUTH_STORAGE_BACKEND unset and default_backend=mysql

@@ -100,6 +100,8 @@ def assemble(
                 "- Reference code as `file_path:line_number`.",
                 "- Prefer editing existing files over creating new ones.",
                 "- Keep responses short; answer in 1-3 sentences unless detail is requested.",
+                "- For AML conclusions, cite evidence; do not invent regulatory citations.",
+                "- Treat customer/transaction data as sensitive; avoid unnecessary PII in output.",
             ]
         )
     )

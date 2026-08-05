@@ -2,6 +2,8 @@
 
 Python 编程 Agent：本机 CLI 与多用户 HTTP 服务。支持远程 MCP 工具、外部 Skill（本地路径 / HTTP URL / S3），会话与用量按用户隔离持久化（SQLite 或 MySQL）。
 
+整体架构与模块职责见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
 要求 **Python ≥ 3.10**。Windows 上若默认 `python` 仍是 3.9，请使用 `py -3.12`。
 
 ## 快速开始
@@ -24,8 +26,10 @@ py -3.12 -m sleuth --yolo "用三句话说明 sleuth/session.py 做什么"
 
 | 变量 | 含义 |
 |------|------|
-| `SLEUTH_MODEL` | 模型，如 `openai/gpt-4o` |
-| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI 兼容接口 |
+| `SLEUTH_MODEL` | 默认模型：目录 key，或 `provider/model` |
+| `SLEUTH_MODELS` | 模型目录；可无 provider 前缀，每项自带 `apiKey`+`baseURL` |
+| `SLEUTH_PROVIDERS` | （可选）按 provider id 配凭证；对象目录已自带时可省略 |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | 单网关快捷方式 |
 | `SLEUTH_USER_ID` | 用户 ID |
 | `SLEUTH_STORAGE_BACKEND` | `sqlite`（默认）或 `mysql` |
 | `SLEUTH_SKILLS_URLS` | HTTP Skill zip（逗号分隔） |
@@ -42,7 +46,7 @@ py -3.12 -m sleuth --yolo "用三句话说明 sleuth/session.py 做什么"
 - HTTP：`SLEUTH_SKILLS_URLS`
 - S3（boto3）：`SLEUTH_SKILLS_S3`（多对象 / 前缀 / manifest；单 zip 可含多个 `SKILL.md`）
 
-服务端按 TTL + ETag 条件刷新；`POST /v1/skills/reload` 可立即重载。CLI：`--refresh-skills`。
+服务端 / CLI 使用**懒惰 TTL**（默认 `SLEUTH_SKILLS_REFRESH_SECONDS=300`）：距上次刷新满 TTL 后，**下一次** `Session.prompt` 或 `GET /v1/skills` 时自动重扫；**不是**后台定时器。立即生效：CLI 启动加 `--refresh-skills`，或运行中 `POST /v1/skills/reload`。本轮 agent 循环内目录冻结；已写入会话历史的 skill 正文不会被热更改写。
 
 ## 存储与用量
 
@@ -59,7 +63,29 @@ py -3.12 -m sleuth --user alice -c
 py -3.12 -m sleuth --session sess_xxx
 py -3.12 -m sleuth --refresh-skills --yolo "..."
 py -3.12 -m sleuth --agent plan "..."
+py -3.12 -m sleuth --model openai/gpt-4o-mini
 ```
+
+交互中切换模型：
+
+```text
+>>> /model
+current model: deepseek-chat/deepseek-chat
+configured models:
+  deepseek-chat: deepseek-chat @ https://api.deepseek.com *
+  qwen-max: qwen-max @ https://dashscope...
+>>> /model qwen-max
+model set to qwen-max/qwen-max
+```
+
+**没有 `deepseek/` 这种 provider 前缀时**（只有 model id，且每套 sk/url 不同），直接在目录里写对象：
+
+```env
+SLEUTH_MODEL=deepseek-chat
+SLEUTH_MODELS={"deepseek-chat":{"apiKey":"sk-ds","baseURL":"https://api.deepseek.com"},"qwen-max":{"apiKey":"sk-qw","baseURL":"https://dashscope.aliyuncs.com/compatible-mode/v1"}}
+```
+
+`/model qwen-max` 会用该条目自己的 key/url，不必再配 `SLEUTH_PROVIDERS`。若有短名需求可写 `"ds":{"model":"deepseek-chat","apiKey":"...","baseURL":"..."}`。
 
 ## HTTP 服务
 

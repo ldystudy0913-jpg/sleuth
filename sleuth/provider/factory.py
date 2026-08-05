@@ -30,7 +30,9 @@ def build_provider(config: Config, provider_id: str) -> Provider:
 
     # Everything is OpenAI-compatible: the official API, OpenRouter, Groq,
     # local llama.cpp servers, etc. They all speak the Chat Completions API.
-    return OpenAIProvider(api_key=api_key, base_url=base_url)
+    provider = OpenAIProvider(api_key=api_key, base_url=base_url)
+    provider.id = provider_id
+    return provider
 
 
 def _env_key(provider_id: str) -> Optional[str]:
@@ -69,14 +71,18 @@ def resolve_model(config: Config, agent_name: str) -> tuple[Provider, str]:
 
     Precedence: agent config `model` -> config top-level `model` ->
     OPENCODE_MODEL env var (so a pure .env setup works with no json file).
+
+    Bare catalog names (``SLEUTH_MODELS`` object entries without a
+    ``provider/`` prefix) are expanded via ``prepare_model_ref``.
     """
     agent = config.agent(agent_name)
-    ref = agent.model or config.model or os.environ.get("OPENCODE_MODEL")
-    if not ref:
+    raw = agent.model or config.model or os.environ.get("OPENCODE_MODEL")
+    if not raw:
         raise ProviderError(
-            "no model configured. Set OPENCODE_MODEL (or `model` in "
-            'opencode.json) to e.g. "openai/gpt-4o".'
+            "no model configured. Set SLEUTH_MODEL (or `model` in "
+            'config) to e.g. "openai/gpt-4o" or a SLEUTH_MODELS key.'
         )
+    ref = config.prepare_model_ref(str(raw))
     provider_id, model_id = parse_model_ref(ref)
     provider = build_provider(config, provider_id)
     return provider, model_id

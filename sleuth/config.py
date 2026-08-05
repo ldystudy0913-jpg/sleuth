@@ -105,6 +105,11 @@ class ServerConfig:
 class Config:
     model: Optional[str] = None
     small_model: Optional[str] = None
+    # Named model catalog for mid-session switching.
+    # Values are either a ref string ("provider/model") or an object
+    # {"model": "deepseek-chat", "apiKey": "...", "baseURL": "..."} — no
+    # provider prefix required; the alias name is used as the provider id.
+    models: Dict[str, Any] = field(default_factory=dict)
     default_agent: str = "build"
     user_id: str = "local"
     agents: Dict[str, AgentConfig] = field(default_factory=dict)
@@ -135,6 +140,58 @@ class Config:
     def provider_options(self, provider_id: str) -> Dict[str, Any]:
         return self.providers.get(provider_id, {}).get("options", {})
 
+    def resolve_model_alias(self, name: str) -> str:
+        """Expand a catalog entry into ``provider/model`` (seeds credentials)."""
+        return self.prepare_model_ref(name)
+
+    def prepare_model_ref(self, name: str) -> str:
+        """Resolve alias/ref and attach per-model credentials when present.
+
+        Catalog entry shapes::
+
+            "ds": "deepseek/deepseek-chat"
+            "deepseek-chat": {"apiKey": "sk-...", "baseURL": "https://..."}
+            "ds": {"model": "deepseek-chat", "apiKey": "...", "baseURL": "..."}
+
+        Object entries do not need a provider prefix: the alias becomes the
+        internal provider id used to look up apiKey/baseURL.
+        """
+        key = (name or "").strip()
+        if not key:
+            return key
+        entry = self.models.get(key)
+        if entry is None:
+            return key
+        if isinstance(entry, str):
+            return entry.strip() or key
+        if not isinstance(entry, dict):
+            return key
+        model_id = str(entry.get("model") or entry.get("id") or key).strip()
+        provider_id = str(entry.get("provider") or key).strip() or key
+        opts = self.providers.setdefault(provider_id, {}).setdefault("options", {})
+        api_key = entry.get("apiKey") or entry.get("api_key")
+        base_url = entry.get("baseURL") or entry.get("base_url")
+        if api_key:
+            opts["apiKey"] = str(api_key)
+        if base_url:
+            opts["baseURL"] = str(base_url)
+        return f"{provider_id}/{model_id}"
+
+    def model_entry_label(self, alias: str) -> str:
+        """Human-readable label for ``/model`` listing."""
+        entry = self.models.get(alias)
+        if entry is None:
+            return alias
+        if isinstance(entry, str):
+            return entry
+        if isinstance(entry, dict):
+            model_id = entry.get("model") or entry.get("id") or alias
+            base = entry.get("baseURL") or entry.get("base_url") or ""
+            if base:
+                return f"{model_id} @ {base}"
+            return str(model_id)
+        return str(entry)
+
     def enabled_mcp_servers(self) -> List[McpServerConfig]:
         return [s for s in self.mcp_servers.values() if not s.disabled]
 
@@ -143,6 +200,12 @@ class Config:
             self.model = raw["model"]
         if "small_model" in raw and raw["small_model"]:
             self.small_model = raw["small_model"]
+        if "models" in raw and isinstance(raw["models"], dict):
+            for alias, entry in raw["models"].items():
+                if not alias or entry in (None, ""):
+                    continue
+                if isinstance(entry, (str, dict)):
+                    self.models[str(alias)] = entry
         if "default_agent" in raw and raw["default_agent"]:
             self.default_agent = raw["default_agent"]
         if "user_id" in raw and raw["user_id"]:
@@ -509,6 +572,41 @@ def _env_csv(name: str) -> List[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
+def _parse_models_env(raw: str) -> Dict[str, Any]:
+    """Parse SLEUTH_MODELS as JSON object or ``alias:provider/model`` CSV.
+
+    JSON values may be strings or credential objects::
+
+        {"deepseek-chat": {"apiKey": "sk-...", "baseURL": "https://..."}}
+        {"ds": "deepseek/deepseek-chat"}
+    """
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    out: Dict[str, Any] = {}
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(data, dict):
+            for alias, entry in data.items():
+                if not alias or entry in (None, ""):
+                    continue
+                if isinstance(entry, (str, dict)):
+                    out[str(alias)] = entry
+        return out
+    for part in text.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        alias, _, ref = part.partition(":")
+        alias, ref = alias.strip(), ref.strip()
+        if alias and ref:
+            out[alias] = ref
+    return out
+
+
 def _apply_env(cfg: Config) -> None:
     """Map SLEUTH_* / OPENCODE_* environment variables onto Config."""
     model = os.environ.get("SLEUTH_MODEL") or os.environ.get("OPENCODE_MODEL")
@@ -517,6 +615,9 @@ def _apply_env(cfg: Config) -> None:
     small = os.environ.get("SLEUTH_SMALL_MODEL") or os.environ.get("OPENCODE_SMALL_MODEL")
     if small:
         cfg.small_model = small
+    models_raw = os.environ.get("SLEUTH_MODELS")
+    if models_raw:
+        cfg.models.update(_parse_models_env(models_raw))
     agent = os.environ.get("SLEUTH_DEFAULT_AGENT") or os.environ.get("OPENCODE_DEFAULT_AGENT")
     if agent:
         cfg.default_agent = agent
@@ -620,7 +721,18 @@ def _apply_env(cfg: Config) -> None:
     if request is not None:
         cfg.mcp_timeout["request"] = request
 
-    # provider options shortcuts
+    # Multi-provider credentials: SLEUTH_PROVIDERS JSON
+    # {"deepseek":{"apiKey":"sk-...","baseURL":"https://..."}, "qwen":{...}}
+    providers_json = os.environ.get("SLEUTH_PROVIDERS")
+    if providers_json:
+        try:
+            data = json.loads(providers_json)
+            if isinstance(data, dict):
+                _merge_providers_env(cfg, data)
+        except json.JSONDecodeError:
+            pass
+
+    # provider options shortcuts (single-provider env vars)
     for env_key, provider_id in (
         ("OPENAI_API_KEY", "openai"),
         ("OPENAI_BASE_URL", "openai"),
@@ -633,6 +745,20 @@ def _apply_env(cfg: Config) -> None:
         if env_key.endswith("_BASE_URL") and os.environ.get(env_key):
             opts = cfg.providers.setdefault(provider_id, {}).setdefault("options", {})
             opts.setdefault("baseURL", os.environ[env_key])
+
+
+def _merge_providers_env(cfg: Config, data: Dict[str, Any]) -> None:
+    """Merge SLEUTH_PROVIDERS entries into cfg.providers.*.options."""
+    for pid, entry in data.items():
+        if not pid or not isinstance(entry, dict):
+            continue
+        opts = cfg.providers.setdefault(str(pid), {}).setdefault("options", {})
+        nested = entry.get("options") if isinstance(entry.get("options"), dict) else None
+        src = nested or entry
+        if src.get("apiKey") or src.get("api_key"):
+            opts["apiKey"] = str(src.get("apiKey") or src.get("api_key"))
+        if src.get("baseURL") or src.get("base_url"):
+            opts["baseURL"] = str(src.get("baseURL") or src.get("base_url"))
 
 
 def load(cwd: Optional[Path] = None) -> Config:

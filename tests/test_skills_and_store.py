@@ -10,7 +10,16 @@ import zipfile
 from pathlib import Path
 
 from sleuth.config import Config, SkillsConfig, SkillS3Entry, _apply_env
-from sleuth.skill import _materialize_bytes, _collect_from_root, discover_skills
+from sleuth.skill import (
+    _materialize_bytes,
+    _collect_from_root,
+    discover_skills,
+    ensure_skills_fresh,
+    get_skills,
+    set_skills,
+    refresh_skills,
+)
+import sleuth.skill as skill_mod
 from sleuth.storage.sqlite import SQLiteStore
 from sleuth.storage.base import SessionRecord, UsageEvent
 from sleuth.messages import Message
@@ -116,6 +125,44 @@ class SqliteStoreTests(unittest.TestCase):
             msgs = store.load_messages(rec.id)
             self.assertEqual(len(msgs), 1)
             self.assertIn("compacted", msgs[0].text)
+
+
+class SkillRefreshTests(unittest.TestCase):
+    def tearDown(self):
+        set_skills({})
+        skill_mod._LAST_REFRESH = 0.0
+
+    def test_ensure_fresh_skips_within_ttl_then_picks_up_new_skill(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+            root = Path(td)
+            first = root / "one"
+            first.mkdir()
+            (first / "SKILL.md").write_text(
+                "---\nname: one\ndescription: first\n---\n\n# one\n",
+                encoding="utf-8",
+            )
+            cfg = Config(skills=SkillsConfig(paths=[str(root)], refresh_seconds=300))
+            found = refresh_skills(cfg, root, force=True)
+            self.assertIn("one", found)
+            self.assertNotIn("two", get_skills())
+
+            # Still within TTL: new skill on disk must not appear yet.
+            second = root / "two"
+            second.mkdir()
+            (second / "SKILL.md").write_text(
+                "---\nname: two\ndescription: second\n---\n\n# two\n",
+                encoding="utf-8",
+            )
+            skill_mod._LAST_REFRESH = skill_mod.time.time()
+            mid = ensure_skills_fresh(cfg, root)
+            self.assertIn("one", mid)
+            self.assertNotIn("two", mid)
+
+            # Past TTL: rediscover picks up the new skill.
+            skill_mod._LAST_REFRESH = skill_mod.time.time() - 400
+            later = ensure_skills_fresh(cfg, root)
+            self.assertIn("one", later)
+            self.assertIn("two", later)
 
 
 class AppImportTests(unittest.TestCase):

@@ -126,7 +126,8 @@ class Tool(Protocol):
     `name`    — identifier sent to the model (also the permission key).
     `description` — prose the model sees when choosing tools.
     `params`  — a pydantic model class; we validate args against it and
-                generate the JSON schema from it.
+                generate the JSON schema from it (unless the tool sets
+                ``parameters_json_schema`` / ``skip_strict_validation``).
     `execute(args, ctx)` — run the tool; returns a ToolResult.
     """
 
@@ -142,12 +143,20 @@ def to_provider_spec(tool: Tool) -> Dict[str, Any]:
 
     Produces a neutral dict both providers understand:
         {name, description, parameters_json_schema}
+
+    Prefer an explicit ``parameters_json_schema`` attribute when present (MCP
+    bridges store the server's original JSON Schema there). Fall back to the
+    pydantic ``params`` model otherwise.
     """
     schema: Dict[str, Any] = {}
-    try:
-        schema = tool.params.model_json_schema()
-    except Exception:  # pragma: no cover - schema generation should not fail
-        schema = {"type": "object", "properties": {}}
+    explicit = getattr(tool, "parameters_json_schema", None)
+    if isinstance(explicit, dict) and explicit:
+        schema = explicit
+    else:
+        try:
+            schema = tool.params.model_json_schema()
+        except Exception:  # pragma: no cover - schema generation should not fail
+            schema = {"type": "object", "properties": {}}
     return {
         "name": tool.name,
         "description": tool.description,
@@ -159,7 +168,13 @@ def validate_args(tool: Tool, raw: dict) -> tuple[Optional[dict], Optional[str]]
     """Validate raw args against the tool's pydantic model.
 
     Returns (parsed, None) on success or (None, error_message).
+
+    Tools that set ``skip_strict_validation = True`` (MCP bridges) pass
+    arguments through unchanged so we do not strip fields or inject nulls
+    that the remote schema never declared.
     """
+    if getattr(tool, "skip_strict_validation", False):
+        return dict(raw or {}), None
     try:
         instance = tool.params.model_validate(raw)
         return instance.model_dump(exclude_none=False), None

@@ -1,9 +1,9 @@
 """Bridge MCP tool descriptors into sleuth Tool objects."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import List, TYPE_CHECKING
 
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel
 
 from ..tools.base import ToolContext, ToolResult
 from .manager import McpManager, McpToolInfo
@@ -12,29 +12,14 @@ if TYPE_CHECKING:
     from ..tools.base import Tool
 
 
-class _EmptyParams(BaseModel):
-    """Fallback when MCP tool has no input schema properties."""
+class _McpPassthroughParams(BaseModel):
+    """Placeholder params model for the Tool protocol.
 
-
-def _params_model_for(info: McpToolInfo) -> type:
-    """Build a loose pydantic model from JSON Schema properties (best-effort)."""
-    schema = info.input_schema or {}
-    props = schema.get("properties") or {}
-    if not isinstance(props, dict) or not props:
-        return _EmptyParams
-    fields: Dict[str, Any] = {}
-    required = set(schema.get("required") or [])
-    for key, spec in props.items():
-        if not isinstance(key, str):
-            continue
-        default = ... if key in required else None
-        fields[key] = (Any, default)
-    if not fields:
-        return _EmptyParams
-    try:
-        return create_model(f"McpParams_{info.qualified}", **fields)  # type: ignore[call-overload]
-    except Exception:
-        return _EmptyParams
+    MCP tools skip pydantic validation and expose the server's original JSON
+    Schema via ``parameters_json_schema``. Building dynamic models from MCP
+    property names (e.g. ``schema``) shadows BaseModel attributes and is
+    unnecessary.
+    """
 
 
 class McpBridgeTool:
@@ -45,7 +30,7 @@ class McpBridgeTool:
     def __init__(self, info: McpToolInfo, manager: McpManager):
         self.name = info.qualified
         self.description = info.description
-        self.params = _params_model_for(info)
+        self.params = _McpPassthroughParams
         self.parameters_json_schema = info.input_schema or {
             "type": "object",
             "properties": {},

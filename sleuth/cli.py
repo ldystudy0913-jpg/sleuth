@@ -358,14 +358,13 @@ def main(argv=None) -> int:
 
 
 def _run_session(args, session) -> int:
-    from .config import parse_model_ref
-
     if args.model:
-        session.config.model = args.model
-        provider_id, model_id = parse_model_ref(args.model)
-        from .provider.factory import build_provider
-        session.provider = build_provider(session.config, provider_id)
-        session.model_id = model_id
+        try:
+            ref = session.set_model(args.model)
+            _print(f"model: {ref}\n")
+        except Exception as exc:
+            _print(f"error: invalid --model: {exc}\n")
+            return 1
 
     if getattr(args, "revert_message_id", None):
         ok = session.revert_to(args.revert_message_id)
@@ -373,7 +372,7 @@ def _run_session(args, session) -> int:
         return 0 if ok else 1
 
     if args.prompt:
-        _print(f"[session {session.id}]\n")
+        _print(f"[session {session.id}] model={session.model_ref()}\n")
         try:
             text = _expand_command(session, args.prompt)
             if text is None:
@@ -386,8 +385,8 @@ def _run_session(args, session) -> int:
 
     _print(
         "sleuth interactive session. Type your prompt; Ctrl+C or 'exit' to quit.\n"
-        f"[session {session.id}] title={session.title!r}\n"
-        "Slash commands from .opencode/command/*.md: /name [args]\n\n"
+        f"[session {session.id}] title={session.title!r} model={session.model_ref()}\n"
+        "Slash: /model [alias|provider/model]  ·  commands from .opencode/command/*.md\n\n"
     )
     try:
         while True:
@@ -419,7 +418,11 @@ def _run_session(args, session) -> int:
 def _expand_command(session, line: str) -> Optional[str]:
     """Expand `/command args` using config.commands (opencode command templates).
 
-    Returns the prompt text, or None if the command was unknown (error printed).
+    Built-in meta-commands (``/model``) are handled first and return None so
+    they do not start an LLM turn.
+
+    Returns the prompt text, or None if the command was a meta-command or
+    unknown (error printed).
     """
     if not line.startswith("/"):
         return line
@@ -429,10 +432,14 @@ def _expand_command(session, line: str) -> Optional[str]:
     name, _, rest = body.partition(" ")
     name = name.strip()
     rest = rest.strip()
+
+    if name == "model":
+        return _handle_model_command(session, rest)
+
     cmd = session.config.commands.get(name)
     if cmd is None:
         known = ", ".join(sorted(session.config.commands)) or "(none)"
-        _print(f"unknown command /{name}. known: {known}\n")
+        _print(f"unknown command /{name}. known: /model, {known}\n")
         return None
     template = cmd.template or ""
     # Simple $ARGUMENTS / {{args}} substitution (opencode-style)
@@ -447,3 +454,34 @@ def _expand_command(session, line: str) -> Optional[str]:
     if cmd.agent:
         session.agent_name = cmd.agent
     return text
+
+
+def _handle_model_command(session, rest: str) -> None:
+    """``/model`` list or ``/model alias|provider/model`` switch."""
+    if session.is_busy():
+        _print("busy: wait for the current turn to finish before /model\n")
+        return None
+    if not rest:
+        current = session.model_ref()
+        _print(f"current model: {current}\n")
+        aliases = session.config.models
+        if aliases:
+            _print("configured models (SLEUTH_MODELS):\n")
+            for alias in sorted(aliases):
+                label = session.config.model_entry_label(alias)
+                resolved = session.config.prepare_model_ref(alias)
+                mark = " *" if resolved == current or alias == current else ""
+                _print(f"  {alias}: {label}{mark}\n")
+        else:
+            _print(
+                "no model catalog. Set SLEUTH_MODELS with per-model "
+                "apiKey/baseURL, or pass provider/model\n"
+            )
+        return None
+    try:
+        ref = session.set_model(rest)
+    except Exception as exc:
+        _print(f"model switch failed: {exc}\n")
+        return None
+    _print(f"model set to {ref}\n")
+    return None

@@ -107,12 +107,53 @@ class Session:
 
     # ---- public API ----
 
+    def model_ref(self) -> str:
+        """Current ``provider/model`` ref for display and persistence."""
+        if self.config.model:
+            return self.config.model
+        pid = getattr(self.provider, "id", "") or "openai"
+        return f"{pid}/{self.model_id}" if self.model_id else pid
+
+    def set_model(self, ref_or_alias: str) -> str:
+        """Switch provider/model for subsequent turns.
+
+        ``ref_or_alias`` may be:
+
+        - a ``SLEUTH_MODELS`` key (string ref or credential object)
+        - a full ``provider/model`` ref
+        - a bare model id (defaults provider to ``openai`` unless catalogued)
+
+        Returns the resolved full ref.
+        """
+        from .config import parse_model_ref
+        from .provider.factory import build_provider
+
+        raw = (ref_or_alias or "").strip()
+        if not raw:
+            raise ValueError("model ref required (catalog key or provider/model)")
+        ref = self.config.prepare_model_ref(raw)
+        provider_id, model_id = parse_model_ref(ref)
+        if not model_id:
+            raise ValueError(f"invalid model ref: {ref!r}")
+        self.config.model = ref
+        self.provider = build_provider(self.config, provider_id)
+        self.model_id = model_id
+        try:
+            self._update_record()
+        except Exception as exc:
+            self.renderer.on_error(f"persist model failed: {exc}")
+        return ref
+
     def prompt(self, user_text: str) -> str:
         """Send a user message and run the loop to completion.
 
         Returns the assistant's final text response.
         """
         self._abort.clear()
+        # Lazy TTL skill refresh once per user turn; catalog stays frozen for this loop.
+        from .skill import ensure_skills_fresh
+
+        ensure_skills_fresh(self.config, self.workdir)
         self._ensure_persisted()
         user_msg = Message.user_text(user_text, agent=self.agent_name)
         self.messages.append(user_msg)
@@ -463,6 +504,10 @@ class Session:
         existing.agent = self.agent_name
         existing.title = self.title
         existing.user_id = self.user_id or existing.user_id or "local"
+        existing.model = {
+            "id": self.model_id,
+            "providerID": getattr(self.provider, "id", "") or "",
+        }
         existing.cost = self._session_cost
         existing.tokens_input = self._tokens.get("input", 0)
         existing.tokens_output = self._tokens.get("output", 0)
@@ -485,11 +530,22 @@ class Session:
         if rec and rec.metadata:
             parent_id = rec.metadata.get("parent_id")
         user_id = (rec.user_id if rec else None) or getattr(config, "user_id", "local") or "local"
+        stored_model_id = (rec.model.get("id") if rec and rec.model else None) or model_id
+        stored_provider = (rec.model.get("providerID") if rec and rec.model else None) or ""
+        if stored_provider and stored_model_id:
+            # Prefer the provider that was last used in this session.
+            from .provider.factory import build_provider
+
+            try:
+                provider = build_provider(config, stored_provider)
+                config.model = f"{stored_provider}/{stored_model_id}"
+            except Exception:
+                pass
         sess = cls(
             provider=provider, registry=registry, config=config,
             workdir=workdir, permission=permission,
             agent_name=(rec.agent if rec else agent_name) or agent_name,
-            model_id=(rec.model.get("id") if rec and rec.model else model_id) or model_id,
+            model_id=stored_model_id or model_id,
             id=session_id_value, messages=messages,
             renderer=renderer or NullRenderer(), store=store,
             title=(rec.title if rec else default_title()),

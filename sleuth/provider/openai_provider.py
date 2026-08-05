@@ -38,6 +38,8 @@ class OpenAIProvider:
                 "the 'openai' package is required: pip install openai"
             ) from exc
         self._openai = openai
+        self.api_key = api_key
+        self.base_url = base_url
         kwargs: Dict[str, Any] = {}
         if api_key:
             kwargs["api_key"] = api_key
@@ -177,7 +179,7 @@ class OpenAIProvider:
                 if delta.content:
                     yield TextDelta(text=delta.content)
 
-                reasoning = getattr(delta, "reasoning_content", None)
+                reasoning = _delta_reasoning_text(delta)
                 if reasoning:
                     yield ReasoningDelta(text=reasoning)
 
@@ -249,6 +251,42 @@ class OpenAIProvider:
             ) from exc
         except Exception as exc:
             raise ProviderError(f"openai stream failed: {exc}") from exc
+
+
+def _delta_reasoning_text(delta: Any) -> str:
+    """Extract thinking text from an OpenAI-compatible stream delta.
+
+    Gateways disagree on the field name:
+
+    - DeepSeek official Chat Completions: ``reasoning_content``
+    - Some Qwen / proxy gateways: ``reasoning``
+    - Others: ``thinking``
+
+    The OpenAI SDK may keep unknown keys only in ``model_extra``; check both
+    attributes and dumped/extra dicts.
+    """
+    for key in ("reasoning", "reasoning_content", "thinking"):
+        val = getattr(delta, key, None)
+        if isinstance(val, str) and val:
+            return val
+    extra = getattr(delta, "model_extra", None) or getattr(delta, "__pydantic_extra__", None)
+    if isinstance(extra, dict):
+        for key in ("reasoning", "reasoning_content", "thinking"):
+            val = extra.get(key)
+            if isinstance(val, str) and val:
+                return val
+    dump = None
+    try:
+        if hasattr(delta, "model_dump"):
+            dump = delta.model_dump(exclude_none=False)
+    except Exception:
+        dump = None
+    if isinstance(dump, dict):
+        for key in ("reasoning", "reasoning_content", "thinking"):
+            val = dump.get(key)
+            if isinstance(val, str) and val:
+                return val
+    return ""
 
 
 def _attachments_to_content(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
