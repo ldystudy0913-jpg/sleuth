@@ -94,20 +94,25 @@ def create_app(workdir: Optional[Path] = None):
         )
 
     async def list_sessions(request: Request):
+        from ..session_browse import build_session_list_rows
+
         user_id = _user_id(request)
-        rows = store.list_sessions(user_id=user_id, limit=int(request.query_params.get("limit", 50)))
+        limit = int(request.query_params.get("limit", 50))
+        rows = build_session_list_rows(store, user_id=user_id, limit=limit)
         return _json_response(
             [
                 {
-                    "id": r.id,
-                    "user_id": r.user_id,
-                    "title": r.title,
-                    "agent": r.agent,
-                    "model": r.model,
-                    "cost": r.cost,
-                    "tokens_input": r.tokens_input,
-                    "tokens_output": r.tokens_output,
-                    "time_updated": r.time_updated,
+                    "id": r["id"],
+                    "user_id": r["user_id"],
+                    "title": r["title"],
+                    "agent": r["agent"],
+                    "model": r["model"],
+                    "cost": r["cost"],
+                    "tokens_input": r["tokens_input"],
+                    "tokens_output": r["tokens_output"],
+                    "time_updated": r["time_updated"],
+                    "time_updated_local": r["time_updated_local"],
+                    "preview": r["preview"],
                 }
                 for r in rows
             ]

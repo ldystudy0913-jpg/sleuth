@@ -5,14 +5,18 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
-from sleuth.config import Config, SkillsConfig, SkillS3Entry, _apply_env
+from sleuth.config import Config, SkillsConfig, _apply_env
 from sleuth.skill import (
     _materialize_bytes,
     _collect_from_root,
+    _cache_dir,
+    _safe_slug,
     discover_skills,
     ensure_skills_fresh,
     get_skills,
@@ -27,21 +31,70 @@ from sleuth.messages import Message
 
 class SkillMaterializeTests(unittest.TestCase):
     def test_zip_with_multiple_skills(self):
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr(
-                "alpha/SKILL.md",
-                "---\nname: alpha\ndescription: A\n---\n\n# Alpha\n",
-            )
-            zf.writestr(
-                "beta/SKILL.md",
-                "---\nname: beta\ndescription: B\n---\n\n# Beta\n",
-            )
-        root = _materialize_bytes(buf.getvalue(), "test:multi-zip")
-        self.assertIsNotNone(root)
-        found = {}
-        _collect_from_root(root, found)
-        self.assertEqual(set(found), {"alpha", "beta"})
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+            old = os.environ.get("SLEUTH_DATA_DIR")
+            os.environ["SLEUTH_DATA_DIR"] = td
+            try:
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w") as zf:
+                    zf.writestr(
+                        "alpha/SKILL.md",
+                        "---\nname: alpha\ndescription: A\n---\n\n# Alpha\n",
+                    )
+                    zf.writestr(
+                        "beta/SKILL.md",
+                        "---\nname: beta\ndescription: B\n---\n\n# Beta\n",
+                    )
+                root = _materialize_bytes(buf.getvalue(), "test:multi-zip")
+                self.assertIsNotNone(root)
+                found = {}
+                _collect_from_root(root, found)
+                self.assertEqual(set(found), {"alpha", "beta"})
+            finally:
+                if old is None:
+                    os.environ.pop("SLEUTH_DATA_DIR", None)
+                else:
+                    os.environ["SLEUTH_DATA_DIR"] = old
+
+    def test_materialize_replace_keeps_complete_tree(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+            old = os.environ.get("SLEUTH_DATA_DIR")
+            os.environ["SLEUTH_DATA_DIR"] = td
+            try:
+                key = "test:replace-zip"
+                buf1 = io.BytesIO()
+                with zipfile.ZipFile(buf1, "w") as zf:
+                    zf.writestr(
+                        "v1/SKILL.md",
+                        "---\nname: pack\ndescription: v1\n---\n\n# v1\n",
+                    )
+                root1 = _materialize_bytes(buf1.getvalue(), key)
+                self.assertIsNotNone(root1)
+                self.assertTrue((root1 / "v1" / "SKILL.md").is_file())
+
+                buf2 = io.BytesIO()
+                with zipfile.ZipFile(buf2, "w") as zf:
+                    zf.writestr(
+                        "v2/SKILL.md",
+                        "---\nname: pack\ndescription: v2\n---\n\n# v2\n",
+                    )
+                root2 = _materialize_bytes(buf2.getvalue(), key)
+                self.assertIsNotNone(root2)
+                self.assertEqual(root1, root2)
+                self.assertTrue((root2 / "v2" / "SKILL.md").is_file())
+                self.assertFalse((root2 / "v1" / "SKILL.md").exists())
+                slug = _safe_slug(key)
+                cache = _cache_dir()
+                leftovers = [
+                    p for p in cache.iterdir()
+                    if p.name.startswith(f".{slug}.tmp-") or p.name.startswith(f".{slug}.old-")
+                ]
+                self.assertEqual(leftovers, [])
+            finally:
+                if old is None:
+                    os.environ.pop("SLEUTH_DATA_DIR", None)
+                else:
+                    os.environ["SLEUTH_DATA_DIR"] = old
 
     def test_discover_local_paths(self):
         with tempfile.TemporaryDirectory() as td:
@@ -131,6 +184,8 @@ class SkillRefreshTests(unittest.TestCase):
     def tearDown(self):
         set_skills({})
         skill_mod._LAST_REFRESH = 0.0
+        with skill_mod._REFRESH_GATE:
+            skill_mod._REFRESH_EVENT = None
 
     def test_ensure_fresh_skips_within_ttl_then_picks_up_new_skill(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
@@ -163,6 +218,56 @@ class SkillRefreshTests(unittest.TestCase):
             later = ensure_skills_fresh(cfg, root)
             self.assertIn("one", later)
             self.assertIn("two", later)
+
+    def test_ensure_fresh_single_flight_one_discover(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+            root = Path(td)
+            skill_dir = root / "one"
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: one\ndescription: first\n---\n\n# one\n",
+                encoding="utf-8",
+            )
+            cfg = Config(skills=SkillsConfig(paths=[str(root)], refresh_seconds=60))
+            refresh_skills(cfg, root, force=True)
+            skill_mod._LAST_REFRESH = skill_mod.time.time() - 120
+
+            results: list = []
+            errors: list = []
+            call_count = {"n": 0}
+            entered = threading.Event()
+            release = threading.Event()
+            real_discover = skill_mod.discover_skills
+
+            def counting_discover(*args, **kwargs):
+                call_count["n"] += 1
+                entered.set()
+                self.assertTrue(release.wait(timeout=5))
+                return real_discover(*args, **kwargs)
+
+            def worker():
+                try:
+                    results.append(ensure_skills_fresh(cfg, root))
+                except Exception as exc:  # pragma: no cover
+                    errors.append(exc)
+
+            with patch.object(skill_mod, "discover_skills", side_effect=counting_discover):
+                t1 = threading.Thread(target=worker)
+                t2 = threading.Thread(target=worker)
+                t1.start()
+                t2.start()
+                self.assertTrue(entered.wait(timeout=5))
+                # Let the second thread become a waiter on the in-flight refresh.
+                skill_mod.time.sleep(0.15)
+                release.set()
+                t1.join(timeout=10)
+                t2.join(timeout=10)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(call_count["n"], 1)
+            self.assertEqual(len(results), 2)
+            for catalog in results:
+                self.assertIn("one", catalog)
 
 
 class AppImportTests(unittest.TestCase):

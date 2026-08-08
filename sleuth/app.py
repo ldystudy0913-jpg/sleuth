@@ -9,13 +9,13 @@ from .config import Config, load
 from .permission import Permission, allow_all_rules, from_config as permission_from_config
 from .provider.factory import resolve_model
 from .session import NullRenderer, Session
-from .skill import ensure_skills_fresh, refresh_skills, set_skills
+from .skill import ensure_skills_fresh, get_skills, refresh_skills, set_skills
 from .storage.factory import create_store
 from .tools.registry import ToolRegistry
 
 
 def build_registry(config: Config, *, workdir: Optional[Path] = None, renderer=None):
-    from .mcp import bridge_tools, get_manager
+    from .mcp import apply_agent_cards_to_config, bridge_tools, get_manager
 
     workdir = workdir or Path.cwd()
     registry = ToolRegistry()
@@ -29,6 +29,19 @@ def build_registry(config: Config, *, workdir: Optional[Path] = None, renderer=N
             if renderer is not None:
                 renderer.on_error(err)
         registry.register_many(bridge_tools(mcp_manager))
+        # Opt-in MCP Agent Cards → fill-empty into config.agents + skills
+        if mcp_manager.agent_cards:
+            card_skills = apply_agent_cards_to_config(
+                config,
+                mcp_manager.agent_cards,
+                server_by_agent=mcp_manager.agent_card_servers,
+            )
+            if card_skills:
+                merged = dict(get_skills())
+                for sk in card_skills:
+                    if sk.name not in merged:
+                        merged[sk.name] = sk
+                set_skills(merged)
     except Exception as exc:
         if renderer is not None:
             renderer.on_error(f"mcp init failed: {exc}")
@@ -55,6 +68,13 @@ def build_session(
     agent_name = agent_name or config.default_agent
     provider, model_id = resolve_model(config, agent_name)
 
+    if store is None:
+        store = create_store(config)
+    renderer = renderer or NullRenderer()
+    # Register MCP tools + optional Agent Cards before permission assembly
+    # so card permissions apply to --agent from MCP.
+    registry, mcp_manager = build_registry(config, workdir=workdir, renderer=renderer)
+
     if yolo:
         rules = allow_all_rules()
     else:
@@ -66,10 +86,6 @@ def build_session(
             rules = rules + permission_from_config(config.permission)
 
     permission = Permission(rules=rules)
-    if store is None:
-        store = create_store(config)
-    renderer = renderer or NullRenderer()
-    registry, mcp_manager = build_registry(config, workdir=workdir, renderer=renderer)
 
     def _attach(sess: Session) -> Session:
         sess._mcp_manager = mcp_manager

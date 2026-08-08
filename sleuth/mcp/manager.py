@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import json
 import re
 import threading
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ class McpManager:
         self._tools: Dict[str, McpToolInfo] = {}
         self._errors: List[str] = []
         self._started = False
+        self._agent_cards: Dict[str, dict] = {}  # agent name -> card JSON
+        self._agent_card_servers: Dict[str, str] = {}  # agent name -> mcp server name
 
     @property
     def errors(self) -> List[str]:
@@ -51,6 +54,14 @@ class McpManager:
     @property
     def tools(self) -> Dict[str, McpToolInfo]:
         return dict(self._tools)
+
+    @property
+    def agent_cards(self) -> Dict[str, dict]:
+        return dict(self._agent_cards)
+
+    @property
+    def agent_card_servers(self) -> Dict[str, str]:
+        return dict(self._agent_card_servers)
 
     def start(self) -> None:
         if self._started:
@@ -206,6 +217,9 @@ class McpManager:
                         description=tool.description or f"MCP tool {tool.name} from {srv.name}",
                         input_schema=schema,
                     )
+                # Opt-in Agent Card (does not affect default tool-only MCP)
+                if getattr(srv, "agent", False):
+                    await self._maybe_fetch_agent_card(srv, session, listed.tools)
                 return
             except Exception as exc:
                 last_err = exc
@@ -222,6 +236,31 @@ class McpManager:
                         pass
                 continue
         raise RuntimeError(f"could not connect to {url}: {last_err}")
+
+    async def _maybe_fetch_agent_card(self, srv: McpServerConfig, session: Any, tools: Any) -> None:
+        """Call get_agent_card when present; failures are recorded, tools stay registered."""
+        names = {getattr(t, "name", "") for t in (tools or [])}
+        if "get_agent_card" not in names:
+            self._errors.append(
+                f"mcp[{srv.name}]: agent=true but get_agent_card tool not found"
+            )
+            return
+        try:
+            text, is_error = await self._call(session, "get_agent_card", {})
+            if is_error:
+                self._errors.append(f"mcp[{srv.name}]: get_agent_card error: {text}")
+                return
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                raise ValueError("card is not an object")
+            agent_name = str(data.get("name") or "").strip()
+            if not agent_name:
+                raise ValueError("card missing name")
+            data.setdefault("mcp_server", srv.name)
+            self._agent_cards[agent_name] = data
+            self._agent_card_servers[agent_name] = srv.name
+        except Exception as exc:
+            self._errors.append(f"mcp[{srv.name}]: get_agent_card failed: {exc}")
 
     async def _call(self, session: Any, name: str, arguments: Dict[str, Any]) -> Tuple[str, bool]:
         result = await session.call_tool(name, arguments=arguments)
@@ -242,6 +281,11 @@ class McpManager:
         drop = [k for k, v in self._tools.items() if v.server == name]
         for k in drop:
             del self._tools[k]
+        # Drop agent cards registered from this server
+        drop_agents = [a for a, s in self._agent_card_servers.items() if s == name]
+        for a in drop_agents:
+            self._agent_card_servers.pop(a, None)
+            self._agent_cards.pop(a, None)
         if not pair:
             return
         if len(pair) == 3:

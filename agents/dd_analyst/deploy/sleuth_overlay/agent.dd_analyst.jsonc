@@ -1,0 +1,22 @@
+{
+  // Merge into your sleuth.jsonc under top-level "agent".
+  // Usage: py -3.12 -m sleuth --agent dd_analyst
+  "agent": {
+    "dd_analyst": {
+      "description": "尽调报告检查分析师：优先调用 MCP ddcheck_run_dd_check，再中文归纳。",
+      "mode": "primary",
+      "permission": {
+        "ddcheck_run_dd_check": "allow",
+        "ddcheck_resume_dd_check": "allow",
+        "ddcheck_run_dd_batch": "allow",
+        "ddcheck_run_check": "allow",
+        "ddcheck_run_batch": "allow",
+        "ddcheck_describe_graph": "allow",
+        "ddcheck_health": "allow",
+        "bash": "ask",
+        "edit": "deny",
+        "write": "deny"
+      }
+    }
+  }
+}

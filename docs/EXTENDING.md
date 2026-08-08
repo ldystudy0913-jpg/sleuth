@@ -165,6 +165,23 @@ py -3.12 -m sleuth --yolo "列出你可用的工具名，看是否包含 docs_..
 
 相关代码：[`sleuth/mcp/manager.py`](../sleuth/mcp/manager.py)、[`bridge.py`](../sleuth/mcp/bridge.py)。
 
+### MCP Agent Card（opt-in：用 MCP 注册 Agent）
+
+默认 **兼容旧配置**：`SLEUTH_MCP_SERVERS` 不写 `"agent":true` 时，只桥接 Tools，与改前一致。
+
+需要「人设 + 建议权限 + Skill」也从 MCP 下发时：
+
+1. MCP server 实现工具 **`get_agent_card`**（无参，返回 JSON：`name` / `prompt` / `permission` / `skills`）。  
+2. Sleuth 配置：
+   ```bash
+   SLEUTH_MCP_SERVERS={"ddcheck":{"type":"remote","url":"http://127.0.0.1:8791/mcp","agent":true}}
+   ```
+3. 启动后可用 `sleuth --agent <card.name>`；本地 `.opencode/agent` / `SLEUTH_SKILLS_PATHS` 仍可用且**优先于** Card。  
+4. 安全：Card 里对 `bash`/`edit`/`write`/`task` 的 `allow` 默认降为 `ask`（`SLEUTH_MCP_AGENT_TRUST_PERMISSIONS=1` 可关闭消毒）。  
+5. 拉 Card 失败只记 error，**不阻断**工具注册。
+
+约定与解析：[`sleuth/mcp/agent_card.py`](../sleuth/mcp/agent_card.py)。样例 Agent：[`agents/dd_analyst`](../agents/dd_analyst)。
+
 ---
 
 ## 5. 新增 / 更新 Skill
@@ -203,10 +220,11 @@ Skill = 带 frontmatter 的说明包；模型通过内置 `skill` 工具按名�
 
 | 方式 | 行为 |
 |------|------|
-| `SLEUTH_SKILLS_REFRESH_SECONDS`（默认 300） | **懒惰 TTL**：满间隔后，下一次 `Session.prompt()` / `GET /v1/skills` 自动 `discover`。无后台线程。 |
+| `SLEUTH_SKILLS_REFRESH_SECONDS`（默认 300） | **懒惰 TTL**：满间隔后，下一次 `Session.prompt()` / `GET /v1/skills` 自动 `discover`。无后台线程。旧包少改、新包多时可配中长 TTL；新包要立刻可见时上架后打一次 reload，不必把 TTL 拧到极短。 |
 | 手动立即 | 启动 CLI：`--refresh-skills`；已运行的 HTTP：`POST /v1/skills/reload` |
 | 本轮内 | 目录在 `prompt()` 开头刷新后冻结；`skill` 工具写入历史的正文不会被中途改写 |
 | 远程源 | URL/S3 用 ETag / LastModified；未变则跳过重下 |
+| 并发安全 | 进程内刷新单飞；落盘按 cache_key 文件锁 + 临时目录原子切换，避免多 worker 撕同一缓存目录 |
 
 实现：[`sleuth/skill/__init__.py`](../sleuth/skill/__init__.py)；触发点：[`session.prompt`](../sleuth/session.py)。
 
@@ -342,7 +360,8 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
 1. 实现 [`provider/base.py`](../sleuth/provider/base.py) 约定的流式接口。  
 2. 在 [`provider/factory.py`](../sleuth/provider/factory.py) 按 `provider/model` 解析并实例化。  
 3. 用 `SLEUTH_MODEL=provider/model-id` 验证流式 `text` / `reasoning` / `tool_call` 事件都能到 `Session`。  
-4. CLI 折叠思考依赖 `on_reasoning`；新 provider 若支持 thinking，务必发 reasoning 事件。
+4. CLI 折叠思考依赖 `on_reasoning`；新 provider 若支持 thinking，务必发 reasoning 事件（字段名兼容 `reasoning` / `reasoning_content` / `thinking`）。  
+5. **会话内切模型**：CLI `/model` 或 `/model <alias|provider/model>`（见 `Session.set_model`）；HTTP 在 `POST /v1/sessions` 与 `.../messages` 传 `model`。多套 sk/url 用 `SLEUTH_MODELS` 对象目录（每项可带 `apiKey`/`baseURL`），默认模型仍设 `SLEUTH_MODEL`。
 
 ---
 

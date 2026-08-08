@@ -31,6 +31,7 @@ py -3.12 -m sleuth --yolo "用三句话说明 sleuth/session.py 做什么"
 | `SLEUTH_PROVIDERS` | （可选）按 provider id 配凭证；对象目录已自带时可省略 |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | 单网关快捷方式 |
 | `SLEUTH_USER_ID` | 用户 ID |
+| `SLEUTH_TIMEZONE` | 会话标题/列表时间显示时区（默认 `Asia/Shanghai`） |
 | `SLEUTH_STORAGE_BACKEND` | `sqlite`（默认）或 `mysql` |
 | `SLEUTH_SKILLS_URLS` | HTTP Skill zip（逗号分隔） |
 | `SLEUTH_SKILLS_S3` | S3 Skill（JSON 或 `s3://` 列表） |
@@ -48,6 +49,8 @@ py -3.12 -m sleuth --yolo "用三句话说明 sleuth/session.py 做什么"
 
 服务端 / CLI 使用**懒惰 TTL**（默认 `SLEUTH_SKILLS_REFRESH_SECONDS=300`）：距上次刷新满 TTL 后，**下一次** `Session.prompt` 或 `GET /v1/skills` 时自动重扫；**不是**后台定时器。立即生效：CLI 启动加 `--refresh-skills`，或运行中 `POST /v1/skills/reload`。本轮 agent 循环内目录冻结；已写入会话历史的 skill 正文不会被热更改写。
 
+新包上架（COS 前缀 / manifest 等）后若需立刻对所有会话可见，打一次 reload；TTL 可配中长（旧包少改时不必拧得很短）。并发刷新在进程内单飞，缓存落盘为原子解压并按包加文件锁，避免多请求撕同一目录。
+
 ## 存储与用量
 
 - SQLite：CLI 默认
@@ -64,6 +67,20 @@ py -3.12 -m sleuth --session sess_xxx
 py -3.12 -m sleuth --refresh-skills --yolo "..."
 py -3.12 -m sleuth --agent plan "..."
 py -3.12 -m sleuth --model openai/gpt-4o-mini
+```
+
+交互中浏览 / 切换会话（不必查库）：
+
+```text
+>>> /sessions
+sessions for user='local' (newest first):
+   1. [sess_abc123…] 2026-08-08 18:09:12
+      title: New session - 2026-08-08 18:09:12
+      preview: 请检查下面这份尽调报告…
+>>> /session 1
+switched to session sess_abc123...
+>>> /session
+current session id=...
 ```
 
 交互中切换模型：
@@ -97,9 +114,9 @@ py -3.12 -m sleuth.server
 | 方法 | 路径 |
 |------|------|
 | GET | `/health` |
-| POST/GET | `/v1/sessions` |
-| GET | `/v1/sessions/{id}` |
-| POST | `/v1/sessions/{id}/messages` |
+| POST/GET | `/v1/sessions`（创建可选 body `model`；响应含 `model`） |
+| GET | `/v1/sessions/{id}`（含 `model`） |
+| POST | `/v1/sessions/{id}/messages`（可选 body `model`，本轮前切换） |
 | GET | `/v1/users/{user_id}/usage` |
 | GET/POST | `/v1/skills` · `/v1/skills/reload` |
 

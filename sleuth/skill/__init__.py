@@ -54,6 +54,10 @@ _ETAGS: Dict[str, _CacheMeta] = {}
 _CONFIG_REF: Optional["Config"] = None
 _CWD: Optional[Path] = None
 
+# Single-flight refresh gate (separate from _LOCK so catalog reads stay short)
+_REFRESH_GATE = threading.Lock()
+_REFRESH_EVENT: Optional[threading.Event] = None
+
 
 def _expand(path: str, cwd: Path) -> Path:
     expanded = Path(os.path.expanduser(path))
@@ -79,7 +83,7 @@ def _global_skill_roots() -> List[Path]:
 
 
 def _cache_dir() -> Path:
-    base = os.environ.get("SLEUTH_DATA_DIR") or os.environ.get("SLEUTH_DATA_DIR")
+    base = os.environ.get("SLEUTH_DATA_DIR")
     if base:
         p = Path(base) / "skills-cache"
     elif os.name == "nt":
@@ -88,6 +92,57 @@ def _cache_dir() -> Path:
         p = Path.home() / ".local" / "share" / "sleuth" / "skills-cache"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+class _CacheFileLock:
+    """Cross-process exclusive lock for one cache_key (stdlib only)."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._fh: Any = None
+
+    def __enter__(self) -> "_CacheFileLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+b")
+        if os.name == "nt":
+            import msvcrt
+
+            self._fh.seek(0)
+            if self._fh.read(1) == b"":
+                self._fh.write(b"0")
+                self._fh.flush()
+            self._fh.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        if self._fh is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self._fh.seek(0)
+                try:
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            else:
+                import fcntl
+
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
+            self._fh = None
 
 
 def _safe_slug(key: str) -> str:
@@ -131,25 +186,81 @@ def _write_meta(dest: Path, meta: _CacheMeta) -> None:
     )
 
 
-def _materialize_bytes(data: bytes, cache_key: str) -> Optional[Path]:
-    """Write zip or SKILL.md bytes into cache; return extracted root."""
-    dest = _cache_dir() / _safe_slug(cache_key)
+def _dir_looks_materialized(dest: Path) -> bool:
+    if not dest.is_dir():
+        return False
+    try:
+        next(dest.rglob("SKILL.md"))
+        return True
+    except StopIteration:
+        return False
+
+
+def _atomic_swap_dir(tmp: Path, dest: Path) -> None:
+    """Replace dest with tmp atomically on the same volume; remove previous dest."""
+    token = f"{os.getpid()}-{time.time_ns()}"
+    old = dest.parent / f".{dest.name}.old-{token}"
+    if old.exists():
+        shutil.rmtree(old, ignore_errors=True)
     if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)
-    dest.mkdir(parents=True, exist_ok=True)
+        try:
+            dest.rename(old)
+        except OSError:
+            shutil.move(str(dest), str(old))
+        try:
+            tmp.rename(dest)
+        except OSError:
+            if not dest.exists() and old.exists():
+                try:
+                    old.rename(dest)
+                except OSError:
+                    pass
+            raise
+        shutil.rmtree(old, ignore_errors=True)
+    else:
+        tmp.rename(dest)
 
-    if data[:2] == b"PK":
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            zf.extractall(dest)
+
+def _materialize_bytes(data: bytes, cache_key: str) -> Optional[Path]:
+    """Write zip or SKILL.md bytes into cache; return extracted root.
+
+    Uses a per-cache_key file lock and extracts into a temp dir then swaps,
+    so concurrent workers never expose a half-written tree.
+    """
+    is_zip = data[:2] == b"PK"
+    is_md = b"---" in data[:200] or data.lstrip().startswith(b"#")
+    if not is_zip and not is_md:
+        # manifest JSON listing relative skill roots is handled elsewhere
+        log.warning("skill materialize: unsupported payload for %s", cache_key)
+        return None
+
+    cache = _cache_dir()
+    slug = _safe_slug(cache_key)
+    dest = cache / slug
+    lock_path = cache / f"{slug}.lock"
+    token = f"{os.getpid()}-{time.time_ns()}"
+    tmp = cache / f".{slug}.tmp-{token}"
+    had_dest = _dir_looks_materialized(dest)
+
+    with _CacheFileLock(lock_path):
+        # First-publish race: peer finished while we waited — reuse their tree.
+        if not had_dest and _dir_looks_materialized(dest):
+            return dest
+
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        try:
+            if is_zip:
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    zf.extractall(tmp)
+            else:
+                (tmp / "SKILL.md").write_bytes(data)
+            _atomic_swap_dir(tmp, dest)
+        except Exception:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
         return dest
-
-    if b"---" in data[:200] or data.lstrip().startswith(b"#"):
-        (dest / "SKILL.md").write_bytes(data)
-        return dest
-
-    # manifest JSON listing relative skill roots is handled elsewhere
-    log.warning("skill materialize: unsupported payload for %s", cache_key)
-    return None
 
 
 def _collect_from_root(root: Path, found: Dict[str, SkillInfo]) -> None:
@@ -435,25 +546,57 @@ def refresh_skills(
     *,
     force: bool = False,
 ) -> Dict[str, SkillInfo]:
-    """Re-discover and atomically swap the process catalog."""
-    global _LAST_REFRESH, _CONFIG_REF, _CWD
+    """Re-discover and atomically swap the process catalog (single-flight)."""
+    return _refresh_single_flight(config, cwd, force=force)
+
+
+def _refresh_single_flight(
+    config: Optional["Config"],
+    cwd: Optional[Path],
+    *,
+    force: bool,
+) -> Dict[str, SkillInfo]:
+    """Only one discover runs at a time; concurrent callers wait and share the result."""
+    global _LAST_REFRESH, _CONFIG_REF, _CWD, _REFRESH_EVENT
+
+    wait_event: Optional[threading.Event] = None
+    is_leader = False
+    with _REFRESH_GATE:
+        if _REFRESH_EVENT is not None:
+            wait_event = _REFRESH_EVENT
+        else:
+            is_leader = True
+            _REFRESH_EVENT = threading.Event()
+
+    if wait_event is not None:
+        wait_event.wait()
+        return get_skills()
+
     cfg = config or _CONFIG_REF
     if cfg is None:
         from ..config import load
 
         cfg = load(cwd)
     work = cwd or _CWD or Path.cwd()
-    skills = discover_skills(cfg, work, force=force)
-    set_skills(skills)
-    _CONFIG_REF = cfg
-    _CWD = work
-    _LAST_REFRESH = time.time()
-    return skills
+
+    try:
+        skills = discover_skills(cfg, work, force=force)
+        set_skills(skills)
+        _CONFIG_REF = cfg
+        _CWD = work
+        _LAST_REFRESH = time.time()
+        return skills
+    finally:
+        with _REFRESH_GATE:
+            ev = _REFRESH_EVENT
+            _REFRESH_EVENT = None
+            if ev is not None:
+                ev.set()
 
 
 def ensure_skills_fresh(config: "Config", cwd: Optional[Path] = None) -> Dict[str, SkillInfo]:
     """Refresh if TTL elapsed; otherwise return current catalog."""
-    global _LAST_REFRESH, _CONFIG_REF, _CWD
+    global _CONFIG_REF, _CWD
     ttl = int(getattr(config.skills, "refresh_seconds", 0) or 0)
     with _LOCK:
         empty = not _SKILLS
@@ -462,11 +605,8 @@ def ensure_skills_fresh(config: "Config", cwd: Optional[Path] = None) -> Dict[st
             _CONFIG_REF = config
             _CWD = cwd or Path.cwd()
             return dict(_SKILLS)
-    # Refresh outside the lock — set_skills() also acquires _LOCK (non-reentrant).
-    if empty:
-        return refresh_skills(config, cwd, force=False)
     try:
-        return refresh_skills(config, cwd, force=False)
+        return _refresh_single_flight(config, cwd, force=False)
     except Exception as exc:
         log.error("skill refresh failed; keeping previous catalog: %s", exc)
         return get_skills()

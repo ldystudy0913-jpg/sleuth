@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dd-analyst-capability"
+version = "0.2.0"
+description = "Capability library + tool surface for the dd_analyst Sleuth agent (does not modify sleuth)."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pydantic>=2.5",
+    "starlette>=0.37",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
+    "langgraph>=0.2",
+    "langgraph-checkpoint-sqlite>=2.0",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.9"]
+mysql = ["PyMySQL>=1.1"]
+cos = ["boto3>=1.34"]
+yaml = ["PyYAML>=6.0"]
+all = ["mcp>=1.9", "PyMySQL>=1.1", "boto3>=1.34", "PyYAML>=6.0"]
+
+[project.scripts]
+dd-analyst-tools = "dd_check.mcp_server:main"
+dd-check = "dd_check.api:main"
+dd-check-mcp = "dd_check.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dd_check*"]
+
+[tool.setuptools.package-data]
+dd_check = ["strategy/templates/*.json", "strategy/templates/*.yaml"]

@@ -1,0 +1,53 @@
+{
+  "default": {
+    "description": "Default due-diligence CHECK strategy",
+    "match": {
+      "busCode": ["*"],
+      "custType": ["PRIVATE", "CORPORATE", "OTHER"],
+      "phase": ["CHECK"]
+    },
+    "dimensions": [
+      "writing",
+      "basic_info_completeness",
+      "id_validity",
+      "address_validity",
+      "checkbox_consistency",
+      "logic_consistency"
+    ],
+    "corporate_extra": ["beneficial_owner"]
+  },
+  "list_screening": {
+    "description": "List / screening style — skip basic KYC fields, focus attachments",
+    "match": {
+      "busCode": ["list", "LIST", "名单", "sanction", "SANCTION"],
+      "custType": ["PRIVATE", "CORPORATE", "OTHER"],
+      "phase": ["CHECK", "RECHECK"]
+    },
+    "dimensions": [
+      "writing",
+      "checkbox_consistency",
+      "logic_consistency",
+      "attachment_presence",
+      "attachment_sanction_geo",
+      "attachment_vs_report"
+    ]
+  },
+  "recheck": {
+    "description": "Post-approval single report recheck",
+    "match": {
+      "busCode": ["*"],
+      "custType": ["PRIVATE", "CORPORATE", "OTHER"],
+      "phase": ["RECHECK"]
+    },
+    "dimensions": [
+      "writing",
+      "basic_info_completeness",
+      "id_validity",
+      "address_validity",
+      "checkbox_consistency",
+      "logic_consistency",
+      "approval_compliance"
+    ],
+    "corporate_extra": ["beneficial_owner"]
+  }
+}

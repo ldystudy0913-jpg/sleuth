@@ -60,6 +60,8 @@ class McpServerConfig:
     environment: Dict[str, str] = field(default_factory=dict)
     disabled: bool = False
     timeout: Dict[str, int] = field(default_factory=dict)
+    # Opt-in: after list_tools, call get_agent_card and register Agent (default False).
+    agent: bool = False
 
 
 @dataclass
@@ -376,6 +378,10 @@ def _parse_mcp_server(name: str, entry: Dict[str, Any]) -> McpServerConfig:
     if not isinstance(timeout, dict):
         timeout = {}
 
+    agent_flag = entry.get("agent", False)
+    if isinstance(agent_flag, str):
+        agent_flag = agent_flag.strip().lower() in {"1", "true", "yes", "on"}
+
     return McpServerConfig(
         name=name,
         type=str(stype),
@@ -385,6 +391,7 @@ def _parse_mcp_server(name: str, entry: Dict[str, Any]) -> McpServerConfig:
         environment={str(k): str(v) for k, v in env.items()},
         disabled=bool(entry.get("disabled", False)),
         timeout={str(k): int(v) for k, v in timeout.items()},
+        agent=bool(agent_flag),
     )
 
 

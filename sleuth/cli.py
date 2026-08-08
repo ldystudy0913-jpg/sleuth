@@ -374,7 +374,9 @@ def _run_session(args, session) -> int:
     if args.prompt:
         _print(f"[session {session.id}] model={session.model_ref()}\n")
         try:
-            text = _expand_command(session, args.prompt)
+            text, new_sess = _expand_command(session, args.prompt, listed_ids=[])
+            if new_sess is not None:
+                session = new_sess
             if text is None:
                 return 1
             session.prompt(text)
@@ -383,10 +385,12 @@ def _run_session(args, session) -> int:
             _print("\n[aborted]\n")
         return 0
 
+    listed_ids: List[str] = []
     _print(
         "sleuth interactive session. Type your prompt; Ctrl+C or 'exit' to quit.\n"
         f"[session {session.id}] title={session.title!r} model={session.model_ref()}\n"
-        "Slash: /model [alias|provider/model]  ·  commands from .opencode/command/*.md\n\n"
+        "Slash: /sessions · /session [n|id] · /model [alias|provider/model]  ·  "
+        "commands from .opencode/command/*.md\n\n"
     )
     try:
         while True:
@@ -400,7 +404,9 @@ def _run_session(args, session) -> int:
             if line in ("exit", "quit", ":q"):
                 break
             try:
-                text = _expand_command(session, line)
+                text, new_sess = _expand_command(session, line, listed_ids=listed_ids)
+                if new_sess is not None:
+                    session = new_sess
                 if text is None:
                     continue
                 session.prompt(text)
@@ -415,32 +421,40 @@ def _run_session(args, session) -> int:
     return 0
 
 
-def _expand_command(session, line: str) -> Optional[str]:
-    """Expand `/command args` using config.commands (opencode command templates).
+def _expand_command(
+    session,
+    line: str,
+    *,
+    listed_ids: Optional[List[str]] = None,
+) -> tuple[Optional[str], Optional["Session"]]:
+    """Expand slash / custom commands.
 
-    Built-in meta-commands (``/model``) are handled first and return None so
-    they do not start an LLM turn.
-
-    Returns the prompt text, or None if the command was a meta-command or
-    unknown (error printed).
+    Returns (prompt_text, new_session). Meta commands return (None, None) or
+    (None, switched_session). Non-slash lines return (line, None).
     """
     if not line.startswith("/"):
-        return line
+        return line, None
     body = line[1:].strip()
     if not body:
-        return line
+        return line, None
     name, _, rest = body.partition(" ")
     name = name.strip()
     rest = rest.strip()
 
     if name == "model":
-        return _handle_model_command(session, rest)
+        _handle_model_command(session, rest)
+        return None, None
+    if name in ("sessions", "session"):
+        new_sess = _handle_session_command(session, name, rest, listed_ids=listed_ids)
+        return None, new_sess
 
     cmd = session.config.commands.get(name)
     if cmd is None:
         known = ", ".join(sorted(session.config.commands)) or "(none)"
-        _print(f"unknown command /{name}. known: /model, {known}\n")
-        return None
+        _print(
+            f"unknown command /{name}. known: /sessions, /session, /model, {known}\n"
+        )
+        return None, None
     template = cmd.template or ""
     # Simple $ARGUMENTS / {{args}} substitution (opencode-style)
     if "$ARGUMENTS" in template:
@@ -453,7 +467,115 @@ def _expand_command(session, line: str) -> Optional[str]:
         text = template
     if cmd.agent:
         session.agent_name = cmd.agent
-    return text
+    return text, None
+
+
+def _handle_session_command(
+    session,
+    name: str,
+    rest: str,
+    *,
+    listed_ids: Optional[List[str]] = None,
+) -> Optional["Session"]:
+    """``/sessions [n]`` list, ``/session`` show current, ``/session n|id`` switch."""
+    from .session_browse import build_session_list_rows, resolve_session_id
+    from .title import format_local_ms
+
+    if session.is_busy():
+        _print("busy: wait for the current turn to finish before switching sessions\n")
+        return None
+
+    store = session.store
+    if store is None:
+        _print("no session store configured; cannot list/switch sessions\n")
+        return None
+
+    user_id = session.user_id or getattr(session.config, "user_id", "local") or "local"
+
+    if name == "sessions" or (name == "session" and rest.startswith("list")):
+        limit = 20
+        arg = rest
+        if name == "session" and rest.startswith("list"):
+            arg = rest[4:].strip()
+        if arg.isdigit():
+            limit = int(arg)
+        rows = build_session_list_rows(store, user_id=user_id, limit=limit)
+        if listed_ids is not None:
+            listed_ids.clear()
+            listed_ids.extend(str(r["id"]) for r in rows)
+        if not rows:
+            _print(f"no sessions for user={user_id!r}\n")
+            return None
+        _print(f"sessions for user={user_id!r} (newest first):\n")
+        for r in rows:
+            short = str(r["id"])[:12]
+            when = r.get("time_updated_local") or "-"
+            title = (r.get("title") or "").replace("\n", " ")
+            preview = r.get("preview") or "(no user message yet)"
+            _print(
+                f"  {r['index']:>2}. [{short}…] {when}\n"
+                f"      title: {title}\n"
+                f"      preview: {preview}\n"
+            )
+        _print("Switch with: /session <n|id>\n")
+        return None
+
+    if name == "session" and not rest:
+        when = ""
+        if store.get_session(session.id):
+            rec = store.get_session(session.id)
+            when = format_local_ms(rec.time_updated) if rec else ""
+        _print(
+            f"current session id={session.id}\n"
+            f"  title={session.title!r}\n"
+            f"  agent={session.agent_name} model={session.model_ref()}\n"
+            f"  updated={when or '-'}\n"
+            f"  tip: /sessions to list, /session <n|id> to switch\n"
+        )
+        return None
+
+    # Build rows from last list or fresh list for index resolution
+    rows = []
+    if listed_ids:
+        for i, sid in enumerate(listed_ids, start=1):
+            rows.append({"index": i, "id": sid})
+    else:
+        rows = build_session_list_rows(store, user_id=user_id, limit=20)
+        if listed_ids is not None:
+            listed_ids.clear()
+            listed_ids.extend(str(r["id"]) for r in rows)
+
+    sid = resolve_session_id(rows, rest, store=store, user_id=user_id)
+    if not sid:
+        _print(
+            f"session not found: {rest!r}. "
+            "Use /sessions then /session <n>, or a full/prefix id.\n"
+        )
+        return None
+    if sid == session.id:
+        _print(f"already on session {sid}\n")
+        return None
+
+    from .session import Session
+
+    new_sess = Session.load(
+        provider=session.provider,
+        registry=session.registry,
+        config=session.config,
+        workdir=session.workdir,
+        permission=session.permission,
+        store=store,
+        session_id_value=sid,
+        agent_name=session.agent_name,
+        model_id=session.model_id,
+        renderer=session.renderer,
+    )
+    _print(
+        f"switched to session {new_sess.id}\n"
+        f"  title={new_sess.title!r} model={new_sess.model_ref()} "
+        f"messages={len(new_sess.messages)}\n"
+    )
+    return new_sess
 
 
 def _handle_model_command(session, rest: str) -> None:
