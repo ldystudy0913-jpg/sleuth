@@ -252,9 +252,9 @@ class CliModelCommandTests(unittest.TestCase):
         )
         fake = MagicMock()
         fake.id = "openai"
-        self.assertIsNone(_expand_command(sess, "/model"))
+        self.assertEqual(_expand_command(sess, "/model"), (None, None))
         with patch("sleuth.provider.factory.build_provider", return_value=fake):
-            self.assertIsNone(_expand_command(sess, "/model fast"))
+            self.assertEqual(_expand_command(sess, "/model fast"), (None, None))
         self.assertEqual(sess.model_id, "gpt-4o-mini")
 
 

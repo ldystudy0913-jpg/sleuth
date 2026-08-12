@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Optional
+from typing import Any, Optional
 
 from .agent_card import load_agent_card
 from .config import Settings, get_settings
@@ -62,22 +62,80 @@ def _req_from_args(
     )
 
 
-def build_mcp_server(settings: Optional[Settings] = None):
-    """注册全部 MCP 工具并返回可 run_streamable_http 的 server。"""
-    from mcp.server.mcpserver.server import MCPServer
+def _mcp_server_cls():
+    """mcp 2.x: MCPServer; mcp 1.x (e.g. 1.26): FastMCP. Same decorator surface."""
+    try:
+        from mcp.server.mcpserver.server import MCPServer as ServerCls
+    except ImportError:
+        from mcp.server.fastmcp import FastMCP as ServerCls
+    return ServerCls
 
+
+async def _run_streamable_http(
+    server: Any,
+    *,
+    host: str,
+    port: int,
+    streamable_http_path: str,
+    stateless_http: bool = True,
+) -> None:
+    """Start Streamable HTTP for mcp 1.x (settings on ctor) or 2.x (kwargs on run)."""
+    try:
+        await server.run_streamable_http_async(
+            host=host,
+            port=port,
+            streamable_http_path=streamable_http_path,
+            stateless_http=stateless_http,
+        )
+    except TypeError:
+        # mcp 1.x FastMCP: run_streamable_http_async() takes no kwargs
+        settings_obj = getattr(server, "settings", None)
+        if settings_obj is not None:
+            settings_obj.host = host
+            settings_obj.port = port
+            settings_obj.streamable_http_path = streamable_http_path
+            settings_obj.stateless_http = stateless_http
+        await server.run_streamable_http_async()
+
+
+def build_mcp_server(
+    settings: Optional[Settings] = None,
+    *,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    streamable_http_path: str = "/mcp",
+    stateless_http: bool = True,
+):
+    """注册全部 MCP 工具并返回可 run_streamable_http 的 server。"""
+    ServerCls = _mcp_server_cls()
     settings = settings or get_settings()
 
-    server = MCPServer(
-        "dd-analyst",
-        instructions=(
+    ctor_kwargs: dict = {
+        "instructions": (
             "Due-diligence report check tools for the dd_analyst agent. "
             "Prefer run_dd_check. When status is awaiting_human, ask the user "
             "then call resume_dd_check with thread_id and decision. "
             "To time-travel: list_dd_checkpoints then rollback_dd_check "
             "(does not roll back Sleuth chat history)."
         ),
-    )
+    }
+    # mcp 1.x FastMCP reads host/port/path from constructor settings
+    if host is not None:
+        ctor_kwargs["host"] = host
+    if port is not None:
+        ctor_kwargs["port"] = port
+    ctor_kwargs["streamable_http_path"] = streamable_http_path
+    ctor_kwargs["stateless_http"] = stateless_http
+
+    try:
+        server = ServerCls("dd-analyst", **ctor_kwargs)
+    except TypeError:
+        # mcp 2.x MCPServer: host/port belong on run_streamable_http_async, not ctor
+        ctor_kwargs.pop("host", None)
+        ctor_kwargs.pop("port", None)
+        ctor_kwargs.pop("streamable_http_path", None)
+        ctor_kwargs.pop("stateless_http", None)
+        server = ServerCls("dd-analyst", **ctor_kwargs)
 
     @server.tool(
         name="get_agent_card",
@@ -273,14 +331,21 @@ def main(argv=None) -> int:
     port = args.port if args.port is not None else settings.mcp_port
     path = args.path if args.path.startswith("/") else f"/{args.path}"
 
-    server = build_mcp_server(settings)
+    server = build_mcp_server(
+        settings,
+        host=host,
+        port=port,
+        streamable_http_path=path,
+        stateless_http=True,
+    )
     print(
         f"dd_analyst tool surface listening on http://{host}:{port}{path} "
         f"(HITL={'on' if settings.hitl_enabled else 'off'}, "
         f"checkpoint={'on' if settings.checkpoint_sqlite_path else 'off'})"
     )
     asyncio.run(
-        server.run_streamable_http_async(
+        _run_streamable_http(
+            server,
             host=host,
             port=port,
             streamable_http_path=path,

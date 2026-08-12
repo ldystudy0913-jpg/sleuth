@@ -33,6 +33,7 @@ from .messages import (
     ToolUseBlock,
 )
 from .permission import Permission, PermissionDenied
+from .privacy import maybe_desensitize
 from .provider.base import Provider, ProviderError, ReasoningDelta, Stop, TextDelta, ToolUse
 from .provider.factory import build_provider
 from .prompts import assemble
@@ -95,6 +96,7 @@ class Session:
     title: str = field(default_factory=default_title)
     parent_id: Optional[str] = None
     user_id: str = "local"
+    yolo: bool = False  # auto-approve tools; CLI default False, server often True
 
     # lifecycle
     status: str = "idle"  # "idle" | "busy" | "retry"
@@ -131,6 +133,8 @@ class Session:
         raw = (ref_or_alias or "").strip()
         if not raw:
             raise ValueError("model ref required (catalog key or provider/model)")
+        # Remember catalog key when caller used an alias (for sticky restore).
+        catalog_key = raw if raw in (self.config.models or {}) else ""
         ref = self.config.prepare_model_ref(raw)
         provider_id, model_id = parse_model_ref(ref)
         if not model_id:
@@ -138,11 +142,51 @@ class Session:
         self.config.model = ref
         self.provider = build_provider(self.config, provider_id)
         self.model_id = model_id
+        self._model_catalog_key = catalog_key or getattr(self, "_model_catalog_key", "") or ""
         try:
             self._update_record()
         except Exception as exc:
             self.renderer.on_error(f"persist model failed: {exc}")
         return ref
+
+    def set_agent(self, name: str, *, yolo: Optional[bool] = None) -> str:
+        """Switch agent for subsequent turns and persist."""
+        from .app import build_permission
+
+        agent = (name or "").strip()
+        if not agent:
+            raise ValueError("agent name required")
+        if yolo is not None:
+            self.yolo = bool(yolo)
+        self.agent_name = agent
+        self.permission = build_permission(self.config, agent, yolo=self.yolo)
+        try:
+            self._update_record()
+        except Exception as exc:
+            self.renderer.on_error(f"persist agent failed: {exc}")
+        return agent
+
+    def set_yolo(self, enabled: bool) -> bool:
+        """Toggle auto-approve and rebuild permission for the current agent."""
+        from .app import build_permission
+
+        self.yolo = bool(enabled)
+        self.permission = build_permission(
+            self.config, self.agent_name, yolo=self.yolo
+        )
+        return self.yolo
+
+    def _model_payload(self) -> dict:
+        pid = getattr(self.provider, "id", "") or ""
+        payload = {
+            "id": self.model_id,
+            "providerID": pid,
+            "ref": self.model_ref(),
+        }
+        key = getattr(self, "_model_catalog_key", "") or ""
+        if key:
+            payload["key"] = key
+        return payload
 
     def prompt(self, user_text: str) -> str:
         """Send a user message and run the loop to completion.
@@ -178,8 +222,25 @@ class Session:
     def last_assistant_text(self) -> str:
         for m in reversed(self.messages):
             if m.role == "assistant":
-                return m.text
+                return self._scrub(m.text)
         return ""
+
+    def _desensitize_on(self) -> bool:
+        return bool(getattr(self.config, "output_desensitize", True))
+
+    def _scrub(self, text: str) -> str:
+        return maybe_desensitize(text, enabled=self._desensitize_on())
+
+    def _scrub_tool_result(self, result: ToolResult) -> ToolResult:
+        if not self._desensitize_on():
+            return result
+        return ToolResult(
+            title=self._scrub(result.title or ""),
+            output=self._scrub(result.output or ""),
+            metadata=dict(result.metadata or {}),
+            is_error=result.is_error,
+            attachments=list(result.attachments or []),
+        )
 
     # ---- title / compaction helpers ----
 
@@ -283,11 +344,13 @@ class Session:
                             aborted = True
                             break
                         if isinstance(event, ReasoningDelta):
-                            reasoning_buf.append(event.text)
-                            self.renderer.on_reasoning(event.text)
+                            chunk = self._scrub(event.text)
+                            reasoning_buf.append(chunk)
+                            self.renderer.on_reasoning(chunk)
                         elif isinstance(event, TextDelta):
-                            text_buf.append(event.text)
-                            self.renderer.on_text(event.text)
+                            chunk = self._scrub(event.text)
+                            text_buf.append(chunk)
+                            self.renderer.on_text(chunk)
                         elif isinstance(event, ToolUse):
                             block = ToolUseBlock(id=event.id, name=event.name, input=event.input)
                             tool_uses.append(block)
@@ -309,7 +372,7 @@ class Session:
                     if callable(on_retry):
                         on_retry(attempt, why, wait)
                     else:
-                        self.renderer.on_error(f"retry {attempt}: {why} (wait {wait:.1f}s)")
+                        self.renderer.on_error(self._scrub(f"retry {attempt}: {why} (wait {wait:.1f}s)"))
                     if not sleep_interruptible(wait, self._abort):
                         aborted = True
                         stream_error = None
@@ -318,9 +381,10 @@ class Session:
                     self._update_record()
 
             if stream_error is not None:
-                self.renderer.on_error(str(stream_error))
+                err_text = self._scrub(str(stream_error))
+                self.renderer.on_error(err_text)
                 err_msg = Message.assistant(
-                    [TextBlock(f"[error] {stream_error}")], error=str(stream_error),
+                    [TextBlock(f"[error] {err_text}")], error=err_text,
                     agent=self.agent_name, model=self.model_id,
                 )
                 self.messages.append(err_msg)
@@ -331,9 +395,9 @@ class Session:
 
             assistant_blocks: List = []
             if reasoning_buf:
-                assistant_blocks.append(ReasoningBlock("".join(reasoning_buf)))
+                assistant_blocks.append(ReasoningBlock(self._scrub("".join(reasoning_buf))))
             if text_buf:
-                assistant_blocks.append(TextBlock("".join(text_buf)))
+                assistant_blocks.append(TextBlock(self._scrub("".join(text_buf))))
             assistant_blocks.extend(tool_uses)
 
             assistant_msg = Message.assistant(
@@ -370,7 +434,7 @@ class Session:
 
             results = []
             for tu in tool_uses:
-                result = self._execute_tool(tu)
+                result = self._scrub_tool_result(self._execute_tool(tu))
                 results.append(
                     ToolResultBlock(
                         tool_use_id=tu.id,
@@ -477,7 +541,7 @@ class Session:
                 title=self.title,
                 agent=self.agent_name,
                 user_id=self.user_id or getattr(self.config, "user_id", "local") or "local",
-                model={"id": self.model_id, "providerID": getattr(self.provider, "id", "")},
+                model=self._model_payload(),
                 metadata=meta,
                 permission=[r.__dict__ for r in self.permission.rules],
             )
@@ -504,10 +568,7 @@ class Session:
         existing.agent = self.agent_name
         existing.title = self.title
         existing.user_id = self.user_id or existing.user_id or "local"
-        existing.model = {
-            "id": self.model_id,
-            "providerID": getattr(self.provider, "id", "") or "",
-        }
+        existing.model = self._model_payload()
         existing.cost = self._session_cost
         existing.tokens_input = self._tokens.get("input", 0)
         existing.tokens_output = self._tokens.get("output", 0)
@@ -522,36 +583,63 @@ class Session:
 
     @classmethod
     def load(cls, *, provider, registry, config, workdir, permission, store,
-             session_id_value, agent_name="build", model_id="", renderer=None) -> "Session":
+             session_id_value, agent_name="build", model_id="", renderer=None,
+             prefer_agent=None) -> "Session":
         """Resume a persisted session by id (port of opencode session load)."""
+        from .config import parse_model_ref
+        from .provider.factory import build_provider
+
         rec = store.get_session(session_id_value)
         messages = store.load_messages(session_id_value) if rec else []
         parent_id = None
         if rec and rec.metadata:
             parent_id = rec.metadata.get("parent_id")
         user_id = (rec.user_id if rec else None) or getattr(config, "user_id", "local") or "local"
-        stored_model_id = (rec.model.get("id") if rec and rec.model else None) or model_id
-        stored_provider = (rec.model.get("providerID") if rec and rec.model else None) or ""
-        if stored_provider and stored_model_id:
-            # Prefer the provider that was last used in this session.
-            from .provider.factory import build_provider
 
-            try:
-                provider = build_provider(config, stored_provider)
-                config.model = f"{stored_provider}/{stored_model_id}"
-            except Exception:
-                pass
+        catalog_key = ""
+        if rec and rec.model:
+            stored = rec.model
+            catalog_key = str(stored.get("key") or "").strip()
+            restore_raw = (
+                catalog_key
+                or str(stored.get("ref") or "").strip()
+                or (
+                    f"{stored.get('providerID')}/{stored.get('id')}"
+                    if stored.get("providerID") and stored.get("id")
+                    else ""
+                )
+                or str(stored.get("id") or "").strip()
+            )
+            if restore_raw:
+                try:
+                    ref = config.prepare_model_ref(restore_raw)
+                    provider_id, mid = parse_model_ref(ref)
+                    if mid:
+                        provider = build_provider(config, provider_id)
+                        config.model = ref
+                        model_id = mid
+                        if not catalog_key and restore_raw in (config.models or {}):
+                            catalog_key = restore_raw
+                except Exception:
+                    pass
+
+        if prefer_agent:
+            resolved_agent = prefer_agent.strip()
+        else:
+            resolved_agent = (rec.agent if rec and rec.agent else agent_name) or agent_name
+
         sess = cls(
             provider=provider, registry=registry, config=config,
             workdir=workdir, permission=permission,
-            agent_name=(rec.agent if rec else agent_name) or agent_name,
-            model_id=stored_model_id or model_id,
+            agent_name=resolved_agent,
+            model_id=model_id,
             id=session_id_value, messages=messages,
             renderer=renderer or NullRenderer(), store=store,
             title=(rec.title if rec else default_title()),
             parent_id=parent_id,
             user_id=user_id,
         )
+        sess._model_catalog_key = catalog_key
         if rec:
             sess._session_cost = float(rec.cost or 0)
             sess._tokens = {

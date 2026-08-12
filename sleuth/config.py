@@ -134,6 +134,8 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     # Product disclosure guardrails (block sleuth internals / secrets).
     guardrails: bool = True
+    # Scrub PII (ID / mobile / bank / password / labeled address) on outputs.
+    output_desensitize: bool = True
 
     def agent(self, name: Optional[str] = None) -> AgentConfig:
         name = name or self.default_agent
@@ -636,6 +638,10 @@ def _apply_env(cfg: Config) -> None:
     if guard is not None:
         cfg.guardrails = guard
 
+    desense = _env_bool("SLEUTH_OUTPUT_DESENSITIZE")
+    if desense is not None:
+        cfg.output_desensitize = desense
+
     for key, attr in (
         ("SLEUTH_MAX_STEPS", "max_steps"),
         ("OPENCODE_MAX_STEPS", "max_steps"),
@@ -724,6 +730,9 @@ def _apply_env(cfg: Config) -> None:
     startup = _env_int("SLEUTH_MCP_TIMEOUT_STARTUP")
     if startup is not None:
         cfg.mcp_timeout["startup"] = startup
+    per_server = _env_int("SLEUTH_MCP_TIMEOUT_PER_SERVER")
+    if per_server is not None:
+        cfg.mcp_timeout["per_server"] = per_server
     request = _env_int("SLEUTH_MCP_TIMEOUT_REQUEST")
     if request is not None:
         cfg.mcp_timeout["request"] = request

@@ -388,9 +388,11 @@ def _run_session(args, session) -> int:
     listed_ids: List[str] = []
     _print(
         "sleuth interactive session. Type your prompt; Ctrl+C or 'exit' to quit.\n"
-        f"[session {session.id}] title={session.title!r} model={session.model_ref()}\n"
-        "Slash: /sessions · /session [n|id] · /model [alias|provider/model]  ·  "
-        "commands from .opencode/command/*.md\n\n"
+        f"[session {session.id}] title={session.title!r} "
+        f"agent={session.agent_name} model={session.model_ref()} "
+        f"yolo={'on' if session.yolo else 'off'}\n"
+        "Slash: /sessions · /session · /model · /agent · /mcp · /skills · "
+        "/usage · /yolo  ·  commands from .opencode/command/*.md\n\n"
     )
     try:
         while True:
@@ -447,12 +449,28 @@ def _expand_command(
     if name in ("sessions", "session"):
         new_sess = _handle_session_command(session, name, rest, listed_ids=listed_ids)
         return None, new_sess
+    if name == "agent":
+        _handle_agent_command(session, rest)
+        return None, None
+    if name == "mcp":
+        _handle_mcp_command(session, rest)
+        return None, None
+    if name == "skills":
+        _handle_skills_command(session, rest)
+        return None, None
+    if name == "usage":
+        _handle_usage_command(session, rest)
+        return None, None
+    if name == "yolo":
+        _handle_yolo_command(session, rest)
+        return None, None
 
     cmd = session.config.commands.get(name)
     if cmd is None:
         known = ", ".join(sorted(session.config.commands)) or "(none)"
         _print(
-            f"unknown command /{name}. known: /sessions, /session, /model, {known}\n"
+            f"unknown command /{name}. known: /sessions, /session, /model, "
+            f"/agent, /mcp, /skills, /usage, /yolo, {known}\n"
         )
         return None, None
     template = cmd.template or ""
@@ -466,7 +484,11 @@ def _expand_command(
     else:
         text = template
     if cmd.agent:
-        session.agent_name = cmd.agent
+        try:
+            session.set_agent(cmd.agent, yolo=session.yolo)
+        except Exception as exc:
+            _print(f"agent switch for /{name} failed: {exc}\n")
+            return None, None
     return text, None
 
 
@@ -570,10 +592,13 @@ def _handle_session_command(
         model_id=session.model_id,
         renderer=session.renderer,
     )
+    new_sess.yolo = session.yolo
+    new_sess._mcp_tool_names = getattr(session, "_mcp_tool_names", set())
+    new_sess._mcp_manager = getattr(session, "_mcp_manager", None)
     _print(
         f"switched to session {new_sess.id}\n"
-        f"  title={new_sess.title!r} model={new_sess.model_ref()} "
-        f"messages={len(new_sess.messages)}\n"
+        f"  title={new_sess.title!r} agent={new_sess.agent_name} "
+        f"model={new_sess.model_ref()} messages={len(new_sess.messages)}\n"
     )
     return new_sess
 
@@ -607,3 +632,200 @@ def _handle_model_command(session, rest: str) -> None:
         return None
     _print(f"model set to {ref}\n")
     return None
+
+
+def _handle_agent_command(session, rest: str) -> None:
+    """``/agent`` list or ``/agent <name>`` sticky switch."""
+    from .catalog import agents_payload
+
+    if session.is_busy():
+        _print("busy: wait for the current turn to finish before /agent\n")
+        return
+    mcp_manager = getattr(session, "_mcp_manager", None)
+    if mcp_manager is None:
+        try:
+            from .mcp import get_manager
+
+            mcp_manager = get_manager(session.config)
+            session._mcp_manager = mcp_manager
+        except Exception:
+            mcp_manager = None
+    payload = agents_payload(
+        session.config, include_hidden=False, mcp_manager=mcp_manager
+    )
+    if not rest:
+        _print(f"current agent: {session.agent_name}\n")
+        _print(f"default: {payload.get('default') or '-'}\n")
+        agents = payload.get("agents") or []
+        if not agents:
+            _print("no agents configured\n")
+            return
+        _print("agents:\n")
+        for a in agents:
+            mark = " *" if a.get("name") == session.agent_name else ""
+            avail = "ok" if a.get("available") else "down"
+            src = a.get("source") or "local"
+            mcp = a.get("mcp_server") or "-"
+            desc = (a.get("description") or "").replace("\n", " ")
+            if len(desc) > 72:
+                desc = desc[:69] + "..."
+            _print(
+                f"  {a.get('name')}{mark}  [{avail}/{src}"
+                f"{'' if src == 'local' else ' @ ' + str(mcp)}]\n"
+                f"      {desc or '(no description)'}\n"
+            )
+        _print("Switch with: /agent <name>\n")
+        return
+    name = rest.strip()
+    entry = next(
+        (a for a in (payload.get("agents") or []) if a.get("name") == name),
+        None,
+    )
+    if entry is not None and not entry.get("available", True):
+        _print(
+            f"warning: agent {name!r} MCP server "
+            f"{entry.get('mcp_server')!r} is not connected; switching anyway\n"
+        )
+    try:
+        resolved = session.set_agent(name, yolo=session.yolo)
+    except Exception as exc:
+        _print(f"agent switch failed: {exc}\n")
+        return
+    _print(f"agent set to {resolved}\n")
+
+
+def _handle_mcp_command(session, rest: str) -> None:
+    """``/mcp`` status or ``/mcp reload``."""
+    from .catalog import mcp_status_dict
+
+    if rest and rest.split()[0].lower() not in ("reload", "status", "list"):
+        _print("usage: /mcp  |  /mcp reload\n")
+        return
+    if rest.lower().startswith("reload"):
+        if session.is_busy():
+            _print("busy: wait for the current turn to finish before /mcp reload\n")
+            return
+        from .app import resync_session_mcp
+
+        try:
+            result = resync_session_mcp(session)
+        except Exception as exc:
+            _print(f"mcp reload failed: {exc}\n")
+            return
+        servers = result.get("servers") or []
+        ok_n = sum(1 for s in servers if s.get("connected"))
+        _print(
+            f"mcp reloaded: {ok_n}/{len(servers)} servers connected, "
+            f"{len(result.get('tools') or [])} tools, "
+            f"{len(result.get('agents') or [])} agents\n"
+        )
+        for err in result.get("errors") or []:
+            _print(f"  error: {err}\n")
+        return
+
+    status = mcp_status_dict(session.config)
+    servers = status.get("servers") or []
+    if not servers:
+        _print("no MCP servers configured\n")
+    else:
+        _print("MCP servers:\n")
+        for s in servers:
+            state = "connected" if s.get("connected") else "down"
+            err = s.get("error") or ""
+            agents = ", ".join(s.get("agents") or []) or "-"
+            _print(
+                f"  {s.get('name')}: {state}"
+                f"{(' — ' + err) if err else ''}\n"
+                f"      url={s.get('url') or '-'}\n"
+                f"      agents={agents}\n"
+            )
+    tools = status.get("tools") or []
+    agents = status.get("agents") or []
+    _print(f"tools ({len(tools)}): {', '.join(tools) or '-'}\n")
+    _print(f"card agents ({len(agents)}): {', '.join(agents) or '-'}\n")
+    for err in status.get("errors") or []:
+        _print(f"error: {err}\n")
+    _print("Reload with: /mcp reload\n")
+
+
+def _handle_skills_command(session, rest: str) -> None:
+    """``/skills`` list or ``/skills reload``."""
+    from .catalog import skills_payload
+
+    if rest and rest.split()[0].lower() not in ("reload", "list", "status"):
+        _print("usage: /skills  |  /skills reload\n")
+        return
+    if rest.lower().startswith("reload"):
+        if session.is_busy():
+            _print("busy: wait for the current turn to finish before /skills reload\n")
+            return
+        from .app import reload_skills
+
+        try:
+            skills = reload_skills(session.config, session.workdir)
+        except Exception as exc:
+            _print(f"skills reload failed: {exc}\n")
+            return
+        _print(f"skills reloaded: {len(skills)} ({', '.join(sorted(skills.keys())) or '-'})\n")
+        return
+
+    rows = skills_payload(session.config, session.workdir)
+    if not rows:
+        _print("no skills loaded\n")
+        return
+    _print(f"skills ({len(rows)}):\n")
+    for s in sorted(rows, key=lambda r: r.get("name") or ""):
+        desc = (s.get("description") or "").replace("\n", " ")
+        if len(desc) > 72:
+            desc = desc[:69] + "..."
+        _print(
+            f"  {s.get('name')}\n"
+            f"      {desc or '(no description)'}\n"
+            f"      {s.get('location') or '-'}\n"
+        )
+    _print("Reload with: /skills reload\n")
+
+
+def _handle_usage_command(session, rest: str) -> None:
+    """``/usage`` — aggregated usage for the current user."""
+    del rest  # unused; keep signature consistent
+    store = session.store
+    if store is None or not hasattr(store, "sum_usage"):
+        _print("no session store configured; cannot show usage\n")
+        return
+    user_id = session.user_id or getattr(session.config, "user_id", "local") or "local"
+    try:
+        u = store.sum_usage(user_id)
+    except Exception as exc:
+        _print(f"usage query failed: {exc}\n")
+        return
+    _print(
+        f"usage for user={user_id!r}\n"
+        f"  events={u.get('events', 0)}\n"
+        f"  tokens_input={u.get('tokens_input', 0)} "
+        f"tokens_output={u.get('tokens_output', 0)} "
+        f"tokens_reasoning={u.get('tokens_reasoning', 0)}\n"
+        f"  cost={float(u.get('cost') or 0):.6f}\n"
+        f"  session_cost_this_process={float(getattr(session, '_session_cost', 0) or 0):.6f}\n"
+    )
+
+
+def _handle_yolo_command(session, rest: str) -> None:
+    """``/yolo`` show or ``/yolo on|off``."""
+    if session.is_busy():
+        _print("busy: wait for the current turn to finish before /yolo\n")
+        return
+    arg = (rest or "").strip().lower()
+    if not arg:
+        _print(f"yolo: {'on' if session.yolo else 'off'}\n")
+        _print("Toggle with: /yolo on | /yolo off\n")
+        return
+    if arg in ("on", "1", "true", "yes"):
+        session.set_yolo(True)
+        _print("yolo on (auto-approve tools)\n")
+        return
+    if arg in ("off", "0", "false", "no"):
+        session.set_yolo(False)
+        _print("yolo off (ask before tools)\n")
+        return
+    _print("usage: /yolo  |  /yolo on  |  /yolo off\n")

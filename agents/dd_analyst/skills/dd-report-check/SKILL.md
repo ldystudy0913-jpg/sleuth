@@ -32,7 +32,7 @@ SLEUTH_MCP_SERVERS={"ddcheck":{"type":"remote","url":"http://127.0.0.1:8791/mcp"
 ## 流程
 
 1. （可选）`ddcheck_health`。
-2. 将用户 JSON 字段传入 `ddcheck_run_dd_check`（`result` 保持字符串）。
+2. 将用户 JSON 字段传入 `ddcheck_run_dd_check`（**`result` 必须是表单 sections 的 JSON 字符串，原样传递，不要改写/抽稀字段；不要把整包 CheckRequest 再塞进 `result`**）。
 3. 看返回 `status`：
    - `completed` / 带 `score` 的最终结果 → 中文归纳。
    - `awaiting_human` → 展示 `interrupt.findings_preview` / score / grade，请用户选择：
@@ -42,6 +42,13 @@ SLEUTH_MCP_SERVERS={"ddcheck":{"type":"remote","url":"http://127.0.0.1:8791/mcp"
      然后 `ddcheck_resume_dd_check(thread_id=..., decision_json=...)`。
 4. 用户要「回到某步重跑」：`list_dd_checkpoints` → 选 `checkpoint_id` → `rollback_dd_check`。
 5. 不要伪造检查结果；MCP 失败如实说明。
+
+## 字段校验语义
+
+- 引擎只校验**报告里已出现的字段的值**。
+- **字段未出现**（该场景表单不含此项）≠ 缺陷，不报「缺少必填」。
+- **字段出现但值为空** → 才记空值 WARN/FAIL。
+- 不同尽调场景字段集合不同时，以当次 `result` 实际 section 为准。
 
 ## 注意
 

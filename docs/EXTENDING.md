@@ -3,6 +3,13 @@
 本文说明如何把能力接进 sleuth：**先选型，再按步骤改代码/配置，最后本地验证**。  
 共享装配入口：[`sleuth/app.py`](../sleuth/app.py)（CLI 与 HTTP 都走这里）。会话循环：[`sleuth/session.py`](../sleuth/session.py)。
 
+专题文档（推荐直接阅读）：
+
+- [MCP 对接（Tool / Agent Card）](MCP_INTEGRATION.md)
+- [Skill 接入与开发规范](SKILL_INTEGRATION.md)
+- [Agent 场景内部流程（dd_analyst / dd_reply）](AGENT_SCENARIOS.md)
+- [HTTP API](API.md)
+
 ---
 
 ## 1. 先选型（不要一上来写代码）
@@ -318,6 +325,22 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
 | 软策略 | `assemble()` 注入 disclosure policy + Public tools + Available skills |
 
 自研 sleuth 源码时：`.env` 设 `SLEUTH_GUARDRAILS=0`。扩展新文件工具时务必调用 `deny_if_protected`。
+
+## 7c. 输出脱敏（PII）
+
+默认 `Config.output_desensitize=True`（`SLEUTH_OUTPUT_DESENSITIZE`）。实现：[`sleuth/privacy.py`](../sleuth/privacy.py)。
+
+在 `Session` 主循环中，助手文本 / 推理 / 工具结果 / 错误信息在**落库与渲染前**脱敏；`GET /v1/sessions/{id}` 再 scrub 一次（兼容历史明文）。
+
+| 规则 | 行为（示意） |
+|------|----------------|
+| 身份证 | 保留前 3 后 2 |
+| 手机 | `138****5678` |
+| 银行卡 | 保留后 4 位 |
+| 密码标签 | `密码：***` |
+| 住址 | 仅当带「家庭住址/住址/地址：」等标签且值较长时掩码为 `***` |
+
+关闭：`.env` 设 `SLEUTH_OUTPUT_DESENSITIZE=0`（仅排障）。无标签的自由地址不做 NER 猜测，避免误伤经营范围等字段。
 
 ## 8. 新增配置项
 

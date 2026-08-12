@@ -1,11 +1,17 @@
 """表单适配：把业务字段 result（JSON 字符串）解析成 ReportFacts。
 
 节点 parse_report 调用 ReportAdapter().parse(req.result)。
+
+字段查找语义（resolve_field）：
+- ABSENT：报告未出现该字段（本场景不涉及）
+- EMPTY：出现但值为空/仅空白（漏填）
+- VALUE：出现且有非空值
 """
 from __future__ import annotations
 
 import json
 import re
+from enum import Enum
 from typing import Any, Dict, List, Tuple
 
 from ..models import ReportFacts, ReportSection
@@ -14,10 +20,20 @@ _HTML_TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
 
 
+class FieldStatus(str, Enum):
+    ABSENT = "absent"
+    EMPTY = "empty"
+    VALUE = "value"
+
+
 def strip_html(text: str) -> str:
     """去掉 HTML 标签并压缩空白。"""
     t = _HTML_TAG.sub("", text or "")
     return _WS.sub(" ", t).strip()
+
+
+def _norm_key(key: str) -> str:
+    return (key or "").strip()
 
 
 def _flatten_value_item(item: Any) -> Dict[str, str]:
@@ -26,10 +42,13 @@ def _flatten_value_item(item: Any) -> Dict[str, str]:
         return {}
     out: Dict[str, str] = {}
     for k, v in item.items():
+        nk = _norm_key(str(k))
+        if not nk:
+            continue
         if isinstance(v, (dict, list)):
-            out[str(k).strip()] = json.dumps(v, ensure_ascii=False)
+            out[nk] = json.dumps(v, ensure_ascii=False)
         else:
-            out[str(k).strip()] = strip_html(str(v) if v is not None else "")
+            out[nk] = strip_html(str(v) if v is not None else "")
     return out
 
 
@@ -59,9 +78,9 @@ class ReportAdapter:
             if not isinstance(raw, dict):
                 continue
             section = ReportSection(
-                label=str(raw.get("label") or ""),
-                code=str(raw.get("code") or ""),
-                type=str(raw.get("type") or ""),
+                label=_norm_key(str(raw.get("label") or "")),
+                code=_norm_key(str(raw.get("code") or "")),
+                type=str(raw.get("type") or "").strip(),
                 value=raw.get("value"),
             )
             facts.sections.append(section)
@@ -103,8 +122,15 @@ class ReportAdapter:
                     flat = _flatten_value_item(item)
                     for k, v in flat.items():
                         facts.fields[f"{code}.{k}"] = v
-                        if not facts.fields.get(code):
+                        # keep first non-empty as section-level value; empty still declares key
+                        if code not in facts.fields:
                             facts.fields[code] = v
+                        elif not facts.fields[code].strip() and v.strip():
+                            facts.fields[code] = v
+            elif value is None:
+                facts.fields[code] = ""
+            else:
+                facts.fields[code] = strip_html(str(value))
             return
 
         if stype in self.TABLE_TYPES or isinstance(value, list):
@@ -125,20 +151,56 @@ class ReportAdapter:
             facts.fields[code] = strip_html(value)
         elif value is not None:
             facts.fields[code] = strip_html(str(value))
+        else:
+            facts.fields[code] = ""
+
+
+def _lookup_key(facts: ReportFacts, *candidates: str) -> str:
+    """稳定查找：精确 → strip → 大小写折叠。不做贪婪子串匹配。"""
+    if not candidates:
+        return ""
+    keys = list(facts.fields.keys())
+    # exact
+    for cand in candidates:
+        c = _norm_key(cand)
+        if not c:
+            continue
+        if c in facts.fields:
+            return c
+    # case-insensitive on stripped keys
+    lower_map = {_norm_key(k).lower(): k for k in keys}
+    for cand in candidates:
+        c = _norm_key(cand)
+        if not c:
+            continue
+        hit = lower_map.get(c.lower())
+        if hit is not None:
+            return hit
+    return ""
+
+
+def resolve_field(facts: ReportFacts, *candidates: str) -> Tuple[FieldStatus, str, str]:
+    """按候选名解析字段存在性与值。
+
+    Returns:
+        (status, matched_key, value) — ABSENT 时 key/value 为空串。
+    """
+    key = _lookup_key(facts, *candidates)
+    if not key:
+        return FieldStatus.ABSENT, "", ""
+    raw = facts.fields.get(key, "")
+    value = raw if isinstance(raw, str) else str(raw or "")
+    if not value.strip():
+        return FieldStatus.EMPTY, key, value
+    return FieldStatus.VALUE, key, value
 
 
 def find_field(facts: ReportFacts, *candidates: str) -> Tuple[str, str]:
-    """按候选名精确/大小写/子串查找字段，返回 (key, value)。"""
-    for cand in candidates:
-        if cand in facts.fields and facts.fields[cand]:
-            return cand, facts.fields[cand]
-    lower_map = {k.lower(): (k, v) for k, v in facts.fields.items()}
-    for cand in candidates:
-        hit = lower_map.get(cand.lower())
-        if hit and hit[1]:
-            return hit
-    for cand in candidates:
-        for k, v in facts.fields.items():
-            if cand in k and v:
-                return k, v
+    """兼容旧接口：仅 VALUE 时返回 (key, value)，否则 ("", "")。
+
+    新代码请使用 resolve_field 以区分 ABSENT / EMPTY。
+    """
+    status, key, value = resolve_field(facts, *candidates)
+    if status is FieldStatus.VALUE:
+        return key, value
     return "", ""

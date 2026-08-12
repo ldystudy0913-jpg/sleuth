@@ -32,7 +32,7 @@ def base64_txt_to_file(source_file, target_file):
 ############################用于将文件转化成base64编码的文本#######################################################################
 
 arr = [
-"C:\\Users\\15385\\myproject\\sleuth\\agents.zip"
+"C:\\Users\\15385\\myproject\\sleuth.zip"
 ]
 for x in arr:
     source_file = x

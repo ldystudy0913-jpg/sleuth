@@ -18,7 +18,7 @@ from ..models import (
     ReportFacts,
     Severity,
 )
-from ..adapter import find_field
+from ..adapter import FieldStatus, find_field, resolve_field
 from ..attachments import AttachmentBundle
 
 
@@ -134,27 +134,30 @@ _REQUIRED_PRIVATE = [
 
 
 def check_basic_info_completeness(ctx: RuleContext) -> List[Finding]:
-    """基本信息必填完整性。"""
+    """基本信息：仅对报告中已出现的字段做空值校验（未出现=场景不涉及）。"""
     findings: List[Finding] = []
     for label, key in _REQUIRED_PRIVATE:
-        k, v = find_field(ctx.facts, key, label)
-        if not v.strip():
+        status, k, _v = resolve_field(ctx.facts, key, label)
+        if status is FieldStatus.ABSENT:
+            continue
+        if status is FieldStatus.EMPTY:
             findings.append(
                 _fail(
                     "basic_info_completeness",
-                    f"缺少必填字段：{label}",
+                    f"字段值为空：{label}",
                     field_code=k or key,
                     suggestion=f"请补全{label}",
                 )
             )
-    # gender / phone soft
     for label in ("性别", "联系方式", "职业", "住所地或者工作单位地址"):
-        k, v = find_field(ctx.facts, label)
-        if not v.strip():
+        status, k, _v = resolve_field(ctx.facts, label)
+        if status is FieldStatus.ABSENT:
+            continue
+        if status is FieldStatus.EMPTY:
             findings.append(
                 _warn(
                     "basic_info_completeness",
-                    f"字段为空：{label}",
+                    f"字段值为空：{label}",
                     field_code=k or label,
                     suggestion=f"建议补全{label}",
                 )
@@ -171,41 +174,67 @@ _DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
 
 
 def check_id_validity(ctx: RuleContext) -> List[Finding]:
-    """证件号码格式/有效期。"""
+    """证件号码格式/有效期：仅校验报告中已出现的相关字段。"""
     findings: List[Finding] = []
-    _, id_type = find_field(ctx.facts, "证件种类")
-    _, id_no = find_field(ctx.facts, "证件号码")
-    _, start = find_field(ctx.facts, "证件有效期起始日")
-    _, end = find_field(ctx.facts, "证件有效期到期日")
+    type_st, type_key, id_type = resolve_field(ctx.facts, "证件种类")
+    no_st, no_key, id_no = resolve_field(ctx.facts, "证件号码")
+    start_st, start_key, start = resolve_field(ctx.facts, "证件有效期起始日")
+    end_st, end_key, end = resolve_field(ctx.facts, "证件有效期到期日")
 
-    if id_type and "身份证" in id_type:
-        if not id_no:
-            findings.append(_fail("id_validity", "身份证号码缺失", field_code="证件号码"))
-        elif not _ID18.match(id_no.strip()):
+    if type_st is FieldStatus.VALUE and "身份证" in id_type:
+        if no_st is FieldStatus.EMPTY:
             findings.append(
-                _fail(
-                    "id_validity",
-                    "居民身份证号码格式不正确（应为18位）",
-                    evidence=id_no,
-                    field_code="证件号码",
-                    suggestion="核对证件号码位数与校验位",
-                )
+                _fail("id_validity", "字段值为空：证件号码", field_code=no_key or "证件号码")
             )
-        elif len(id_no.strip()) == 18:
-            # very rough: birth date segment
-            birth = id_no[6:14]
-            try:
-                datetime.strptime(birth, "%Y%m%d")
-            except ValueError:
+        elif no_st is FieldStatus.VALUE:
+            if not _ID18.match(id_no.strip()):
                 findings.append(
-                    _warn("id_validity", "身份证号码中的出生日期段无效", evidence=birth, field_code="证件号码")
+                    _fail(
+                        "id_validity",
+                        "居民身份证号码格式不正确（应为18位）",
+                        evidence=id_no,
+                        field_code=no_key or "证件号码",
+                        suggestion="核对证件号码位数与校验位",
+                    )
                 )
+            elif len(id_no.strip()) == 18:
+                birth = id_no[6:14]
+                try:
+                    datetime.strptime(birth, "%Y%m%d")
+                except ValueError:
+                    findings.append(
+                        _warn(
+                            "id_validity",
+                            "身份证号码中的出生日期段无效",
+                            evidence=birth,
+                            field_code=no_key or "证件号码",
+                        )
+                    )
+    elif no_st is FieldStatus.EMPTY:
+        findings.append(
+            _fail("id_validity", "字段值为空：证件号码", field_code=no_key or "证件号码")
+        )
+    elif no_st is FieldStatus.VALUE and type_st is FieldStatus.VALUE:
+        # non-ID card types: presence ok; no format check here
+        pass
 
-    if not start.strip():
-        findings.append(_warn("id_validity", "证件有效期起始日为空", field_code="证件有效期起始日"))
-    if not end.strip():
-        findings.append(_fail("id_validity", "证件有效期到期日为空", field_code="证件有效期到期日"))
-    else:
+    if start_st is FieldStatus.EMPTY:
+        findings.append(
+            _warn(
+                "id_validity",
+                "字段值为空：证件有效期起始日",
+                field_code=start_key or "证件有效期起始日",
+            )
+        )
+    if end_st is FieldStatus.EMPTY:
+        findings.append(
+            _fail(
+                "id_validity",
+                "字段值为空：证件有效期到期日",
+                field_code=end_key or "证件有效期到期日",
+            )
+        )
+    elif end_st is FieldStatus.VALUE:
         m = _DATE.match(end.strip())
         if not m:
             findings.append(_warn("id_validity", "证件到期日格式无法解析", evidence=end))
@@ -233,6 +262,11 @@ def check_id_validity(ctx: RuleContext) -> List[Finding]:
             except ValueError:
                 findings.append(_warn("id_validity", "证件到期日非法", evidence=end))
 
+    if type_st is FieldStatus.EMPTY:
+        findings.append(
+            _fail("id_validity", "字段值为空：证件种类", field_code=type_key or "证件种类")
+        )
+
     if not findings:
         findings.append(_pass("id_validity"))
     return findings
@@ -241,11 +275,16 @@ def check_id_validity(ctx: RuleContext) -> List[Finding]:
 # ---- address ----
 
 def check_address_validity(ctx: RuleContext) -> List[Finding]:
-    """地址规范性。"""
+    """地址规范性：未出现地址字段则跳过。"""
     findings: List[Finding] = []
-    k, addr = find_field(ctx.facts, "住所地或者工作单位地址", "住所地", "工作单位地址", "地址")
-    if not addr.strip():
-        findings.append(_fail("address_validity", "地址为空", field_code=k or "地址"))
+    status, k, addr = resolve_field(
+        ctx.facts, "住所地或者工作单位地址", "住所地", "工作单位地址", "地址"
+    )
+    if status is FieldStatus.ABSENT:
+        findings.append(_skip("address_validity", "报告未包含地址相关字段"))
+        return findings
+    if status is FieldStatus.EMPTY:
+        findings.append(_fail("address_validity", "字段值为空：地址", field_code=k or "地址"))
     elif len(addr.strip()) < 6:
         findings.append(_warn("address_validity", "地址过短，可能不完整", evidence=addr, field_code=k))
     elif "*" in addr and addr.count("*") >= 3:
@@ -309,22 +348,37 @@ def check_checkbox_consistency(ctx: RuleContext) -> List[Finding]:
 def check_logic_consistency(ctx: RuleContext) -> List[Finding]:
     """字段间逻辑一致性（如日期先后）。"""
     findings: List[Finding] = []
-    _, prev = find_field(ctx.facts, "客户前一风险等级")
-    _, curr = find_field(ctx.facts, "客户当前风险等级")
-    # narratives empty but risk high
+    _prev_st, _, prev = resolve_field(ctx.facts, "客户前一风险等级")
+    curr_st, _, curr = resolve_field(ctx.facts, "客户当前风险等级")
+    # narratives present-but-empty when risk level filled
     empty_required_narr = []
     for code in ("explainContent1", "explainContent2", "explainContent3"):
-        val = ctx.facts.fields.get(code, "")
-        if code in ctx.facts.narrative_codes or any(code in k for k in ctx.facts.fields):
-            # get best value
-            _, v = find_field(ctx.facts, code)
-            if not (v or val).strip():
+        # section declared as narrative OR field key present
+        if code not in ctx.facts.narrative_codes and code not in ctx.facts.fields:
+            # also allow code.* children as presence
+            if not any(k == code or k.startswith(code + ".") for k in ctx.facts.fields):
+                continue
+        st, _, v = resolve_field(ctx.facts, code)
+        if st is FieldStatus.EMPTY or (
+            st is FieldStatus.ABSENT and code in ctx.facts.narrative_codes
+        ):
+            # narrative_codes means section existed; value may only be under code.subkey
+            if st is FieldStatus.ABSENT and code in ctx.facts.narrative_codes:
+                child_vals = [
+                    ctx.facts.fields[k]
+                    for k in ctx.facts.fields
+                    if k.startswith(code + ".")
+                ]
+                if child_vals and any(x.strip() for x in child_vals):
+                    continue
                 empty_required_narr.append(code)
-    if curr and empty_required_narr:
+            elif st is FieldStatus.EMPTY:
+                empty_required_narr.append(code)
+    if curr_st is FieldStatus.VALUE and empty_required_narr:
         findings.append(
             _fail(
                 "logic_consistency",
-                "当前风险等级已填写，但关键尽调说明字段为空，存在答非所问/漏填",
+                "当前风险等级已填写，但关键尽调说明字段值为空，存在答非所问/漏填",
                 evidence=f"风险等级={curr}; empty={empty_required_narr}",
                 suggestion="按题干补充身份背景、风险成因与评估结论",
             )
@@ -369,33 +423,25 @@ def check_logic_consistency(ctx: RuleContext) -> List[Finding]:
 # ---- beneficial owner (corporate) ----
 
 def check_beneficial_owner(ctx: RuleContext) -> List[Finding]:
-    """受益所有人（对公）。"""
+    """受益所有人（对公）：无相关字段=场景未含该块 → SKIP。"""
     if ctx.cust_type != CustType.CORPORATE:
         return [_skip("beneficial_owner", "非对公客户，跳过受益所有人检查")]
     findings: List[Finding] = []
-    # look for BO related fields / tables
     bo_keys = [k for k in ctx.facts.fields if "受益" in k or "所有人" in k]
     bo_tables = [k for k in ctx.facts.tables if "受益" in k or "beneficial" in k.lower() or "ubo" in k.lower()]
     if not bo_keys and not bo_tables:
-        findings.append(
-            _fail(
-                "beneficial_owner",
-                "对公客户未发现受益所有人相关字段或穿透信息",
-                suggestion="补充受益所有人识别与穿透说明",
-            )
-        )
+        return [_skip("beneficial_owner", "报告未包含受益所有人相关字段，跳过")]
+    empty = True
+    for k in bo_keys:
+        if ctx.facts.fields.get(k, "").strip():
+            empty = False
+    for t in bo_tables:
+        if ctx.facts.tables.get(t):
+            empty = False
+    if empty:
+        findings.append(_fail("beneficial_owner", "受益所有人信息为空，未完成穿透"))
     else:
-        empty = True
-        for k in bo_keys:
-            if ctx.facts.fields.get(k, "").strip():
-                empty = False
-        for t in bo_tables:
-            if ctx.facts.tables.get(t):
-                empty = False
-        if empty:
-            findings.append(_fail("beneficial_owner", "受益所有人信息为空，未完成穿透"))
-        else:
-            findings.append(_pass("beneficial_owner", "已发现受益所有人相关信息（需人工复核穿透完整性）"))
+        findings.append(_pass("beneficial_owner", "已发现受益所有人相关信息（需人工复核穿透完整性）"))
     return findings
 
 

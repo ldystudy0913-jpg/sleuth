@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dd-reply-capability"
+version = "0.1.0"
+description = "KYC due-diligence reply framework generator for Sleuth (Agent + Skill + MCP)."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pydantic>=2.5",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.9", "uvicorn>=0.30", "starlette>=0.37"]
+cos = ["boto3>=1.34"]
+mysql = ["PyMySQL>=1.1"]
+all = ["mcp>=1.9", "uvicorn>=0.30", "starlette>=0.37", "boto3>=1.34", "PyMySQL>=1.1"]
+
+[project.scripts]
+dd-reply-tools = "dd_reply.mcp_server:main"
+dd-reply-mcp = "dd_reply.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dd_reply*"]
+
+[tool.setuptools.package-data]
+dd_reply = ["kb/*.json", "prompts/*.txt"]

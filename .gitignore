@@ -2,7 +2,24 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.sqlite3
+*.db
+
+# Local secrets / runtime config — never commit
 .env
+.env.*
 !.env.example
+!**/.env.example
+*.pem
+credentials.json
+sleuth.jsonc
+.sleuth/
+
 agents.zip
 agents.zip.txt

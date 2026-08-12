@@ -2,6 +2,9 @@
 
 Connect configured servers, list_tools, and call_tool. OAuth and stdio
 local servers are out of MVP scope.
+
+Connections are parallel with per-server timeouts so one dead server cannot
+block the others. Use ``reload()`` to reconnect after servers come online.
 """
 from __future__ import annotations
 
@@ -32,6 +35,15 @@ class McpToolInfo:
     input_schema: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class McpServerStatus:
+    name: str
+    url: str = ""
+    connected: bool = False
+    error: Optional[str] = None
+    agent: bool = False
+
+
 class McpManager:
     """Owns remote MCP sessions on a background asyncio event loop."""
 
@@ -43,9 +55,11 @@ class McpManager:
         self._cm: Dict[str, Any] = {}  # async context managers to exit
         self._tools: Dict[str, McpToolInfo] = {}
         self._errors: List[str] = []
+        self._status: Dict[str, McpServerStatus] = {}
         self._started = False
         self._agent_cards: Dict[str, dict] = {}  # agent name -> card JSON
         self._agent_card_servers: Dict[str, str] = {}  # agent name -> mcp server name
+        self._atexit_registered = False
 
     @property
     def errors(self) -> List[str]:
@@ -63,29 +77,85 @@ class McpManager:
     def agent_card_servers(self) -> Dict[str, str]:
         return dict(self._agent_card_servers)
 
-    def start(self) -> None:
-        if self._started:
-            return
-        servers = [
+    def server_statuses(self) -> List[McpServerStatus]:
+        """Snapshot of configured remote servers and connection state."""
+        out: List[McpServerStatus] = []
+        for s in self.config.enabled_mcp_servers():
+            if s.type != "remote" or not s.url:
+                continue
+            st = self._status.get(s.name)
+            if st is None:
+                out.append(
+                    McpServerStatus(
+                        name=s.name,
+                        url=s.url or "",
+                        connected=s.name in self._sessions,
+                        agent=bool(getattr(s, "agent", False)),
+                    )
+                )
+            else:
+                out.append(st)
+        return out
+
+    def _per_server_timeout_s(self) -> float:
+        raw = self.config.mcp_timeout.get("per_server")
+        if raw is None:
+            raw = self.config.mcp_timeout.get("startup", 30_000)
+        try:
+            ms = int(raw)
+        except (TypeError, ValueError):
+            ms = 30_000
+        # Clamp: at least 3s, at most 60s per server for isolation.
+        return max(3.0, min(60.0, ms / 1000.0))
+
+    def _remote_servers(self) -> List[McpServerConfig]:
+        return [
             s
             for s in self.config.enabled_mcp_servers()
             if s.type == "remote" and s.url
         ]
+
+    def start(self) -> None:
+        if self._started:
+            return
+        servers = self._remote_servers()
         if not servers:
             self._started = True
             return
         self._ensure_loop()
         fut = asyncio.run_coroutine_threadsafe(self._connect_all(servers), self._loop)
         try:
-            startup_ms = int(self.config.mcp_timeout.get("startup", 30_000))
-            fut.result(timeout=max(5.0, startup_ms / 1000.0 + 5.0))
+            # gather already bounds each server; allow n * per_server + slack
+            per = self._per_server_timeout_s()
+            fut.result(timeout=max(10.0, per * max(1, len(servers)) + 5.0))
         except Exception as exc:
             self._errors.append(f"mcp startup failed: {exc}")
         self._started = True
-        atexit.register(self.close)
+        if not self._atexit_registered:
+            atexit.register(self.close)
+            self._atexit_registered = True
+
+    def reload(self, config: Optional[Config] = None) -> None:
+        """Disconnect all MCP servers and reconnect (hot reload)."""
+        if config is not None:
+            self.config = config
+        self._errors = []
+        servers = self._remote_servers()
+        self._ensure_loop()
+        fut = asyncio.run_coroutine_threadsafe(self._reload_all(servers), self._loop)
+        per = self._per_server_timeout_s()
+        try:
+            fut.result(timeout=max(10.0, per * max(1, len(servers)) + 10.0))
+        except Exception as exc:
+            self._errors.append(f"mcp reload failed: {exc}")
+        self._started = True
+        if not self._atexit_registered:
+            atexit.register(self.close)
+            self._atexit_registered = True
 
     def close(self) -> None:
         if not self._loop or not self._thread:
+            self._started = False
             return
         try:
             fut = asyncio.run_coroutine_threadsafe(self._disconnect_all(), self._loop)
@@ -126,6 +196,9 @@ class McpManager:
         except Exception as exc:
             return f"mcp call failed: {exc}", True
 
+    def is_server_connected(self, name: str) -> bool:
+        return name in self._sessions
+
     # ---- internals ----
 
     def _ensure_loop(self) -> None:
@@ -150,12 +223,46 @@ class McpManager:
         self._thread.start()
         ready.wait(timeout=5)
 
+    async def _reload_all(self, servers: List[McpServerConfig]) -> None:
+        await self._disconnect_all()
+        self._tools.clear()
+        self._agent_cards.clear()
+        self._agent_card_servers.clear()
+        self._status.clear()
+        await self._connect_all(servers)
+
     async def _connect_all(self, servers: List[McpServerConfig]) -> None:
-        for srv in servers:
+        """Connect all servers in parallel; each has its own timeout."""
+        if not servers:
+            return
+        await asyncio.gather(*(self._connect_one_guarded(srv) for srv in servers))
+
+    async def _connect_one_guarded(self, srv: McpServerConfig) -> None:
+        per = self._per_server_timeout_s()
+        url = srv.url or ""
+        try:
+            await asyncio.wait_for(self._connect_one(srv), timeout=per)
+            self._status[srv.name] = McpServerStatus(
+                name=srv.name,
+                url=url,
+                connected=True,
+                error=None,
+                agent=bool(getattr(srv, "agent", False)),
+            )
+        except Exception as exc:
+            msg = str(exc) or exc.__class__.__name__
+            self._errors.append(f"mcp[{srv.name}]: {msg}")
             try:
-                await self._connect_one(srv)
-            except Exception as exc:
-                self._errors.append(f"mcp[{srv.name}]: {exc}")
+                await self._disconnect_one(srv.name)
+            except Exception:
+                pass
+            self._status[srv.name] = McpServerStatus(
+                name=srv.name,
+                url=url,
+                connected=False,
+                error=msg,
+                agent=bool(getattr(srv, "agent", False)),
+            )
 
     async def _connect_one(self, srv: McpServerConfig) -> None:
         try:
@@ -288,11 +395,8 @@ class McpManager:
             self._agent_cards.pop(a, None)
         if not pair:
             return
-        if len(pair) == 3:
-            cm, session, http_client = pair
-        else:
-            cm, session = pair
-            http_client = None
+        # Always stored as (cm, session, http_client); http_client may be None.
+        cm, session, http_client = pair
         try:
             await session.__aexit__(None, None, None)
         except Exception:
@@ -320,6 +424,9 @@ def get_manager(config: Config) -> McpManager:
     if _GLOBAL is None:
         _GLOBAL = McpManager(config)
         _GLOBAL.start()
+    else:
+        # Keep singleton config pointer fresh for reload/status reads.
+        _GLOBAL.config = config
     return _GLOBAL
 
 

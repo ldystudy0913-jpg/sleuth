@@ -1,14 +1,17 @@
 """Thin Starlette HTTP API over the shared Session core."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..app import build_session, reload_skills
+from ..app import build_session, reload_mcp, reload_skills
+from ..catalog import agents_payload, mcp_status_dict, models_payload, skills_payload
 from ..config import load
 from ..session import NullRenderer
 from ..storage.factory import create_store
 from ..util.env import load_dotenv
+from .streaming import StreamingRenderer, run_prompt_in_thread, sse_pack
 
 
 def _json_response(data: Any, status: int = 200):
@@ -46,6 +49,7 @@ def _session_model_payload(sess) -> Dict[str, str]:
 def create_app(workdir: Optional[Path] = None):
     from starlette.applications import Starlette
     from starlette.requests import Request
+    from starlette.responses import StreamingResponse
     from starlette.routing import Route
 
     import os
@@ -119,12 +123,15 @@ def create_app(workdir: Optional[Path] = None):
         )
 
     async def get_session(request: Request):
+        from ..privacy import maybe_desensitize
+
         sid = request.path_params["session_id"]
         user_id = _user_id(request)
         rec = store.get_session(sid)
         if rec is None or (rec.user_id and rec.user_id != user_id):
             return _json_response({"error": "not found"}, 404)
         messages = store.load_messages(sid)
+        scrub_on = bool(getattr(config, "output_desensitize", True))
         return _json_response(
             {
                 "id": rec.id,
@@ -144,7 +151,7 @@ def create_app(workdir: Optional[Path] = None):
                     {
                         "id": m.metadata.get("id"),
                         "role": m.role,
-                        "text": m.text,
+                        "text": maybe_desensitize(m.text or "", enabled=scrub_on),
                         "usage": m.metadata.get("usage"),
                         "cost": m.metadata.get("cost"),
                     }
@@ -152,6 +159,13 @@ def create_app(workdir: Optional[Path] = None):
                 ],
             }
         )
+
+    def _parse_message_body(body: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        """Return (prompt, error_message)."""
+        prompt = body.get("prompt") or body.get("text") or ""
+        if not prompt:
+            return None, "prompt required"
+        return str(prompt), None
 
     async def post_message(request: Request):
         sid = request.path_params["session_id"]
@@ -163,15 +177,17 @@ def create_app(workdir: Optional[Path] = None):
             body = await request.json()
         except Exception:
             return _json_response({"error": "invalid json"}, 400)
-        prompt = body.get("prompt") or body.get("text") or ""
-        if not prompt:
-            return _json_response({"error": "prompt required"}, 400)
+        prompt, err = _parse_message_body(body)
+        if err:
+            return _json_response({"error": err}, 400)
 
         cfg = load(workdir)
+        prefer = str(body["agent"]).strip() if body.get("agent") else None
         sess = build_session(
             config=cfg,
             workdir=workdir,
-            agent_name=body.get("agent") or rec.agent,
+            agent_name=prefer or rec.agent,
+            prefer_agent=prefer,
             user_id=user_id,
             session_id=sid,
             yolo=bool(body.get("yolo", True)),
@@ -189,17 +205,93 @@ def create_app(workdir: Optional[Path] = None):
                 "session_id": sess.id,
                 "text": text,
                 "title": sess.title,
+                "agent": sess.agent_name,
                 "model": _session_model_payload(sess),
                 "usage": sess._last_usage,
                 "cost": sess._session_cost,
             }
         )
 
+    async def post_message_stream(request: Request):
+        """SSE stream of one agent turn (text deltas + tool events + done)."""
+        sid = request.path_params["session_id"]
+        user_id = _user_id(request)
+        rec = store.get_session(sid)
+        if rec is None or (rec.user_id and rec.user_id != user_id):
+            return _json_response({"error": "not found"}, 404)
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_response({"error": "invalid json"}, 400)
+        prompt, err = _parse_message_body(body)
+        if err:
+            return _json_response({"error": err}, 400)
+
+        cfg = load(workdir)
+        prefer = str(body["agent"]).strip() if body.get("agent") else None
+        renderer = StreamingRenderer(session_id=sid)
+        sess = build_session(
+            config=cfg,
+            workdir=workdir,
+            agent_name=prefer or rec.agent,
+            prefer_agent=prefer,
+            user_id=user_id,
+            session_id=sid,
+            yolo=bool(body.get("yolo", True)),
+            renderer=renderer,
+            store=store,
+        )
+        if body.get("model"):
+            try:
+                sess.set_model(str(body["model"]))
+            except Exception as exc:
+                return _json_response({"error": f"invalid model: {exc}"}, 400)
+
+        run_prompt_in_thread(sess, str(prompt), renderer)
+
+        async def event_gen():
+            disconnected = False
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        disconnected = True
+                        sess.cancel()
+                        break
+                    event = await asyncio.to_thread(renderer.get_event, timeout=0.4)
+                    if event is None:
+                        break
+                    if event.get("type") == "_poll":
+                        yield b": ping\n\n"
+                        continue
+                    yield sse_pack(event)
+            finally:
+                if disconnected:
+                    sess.cancel()
+                done = {
+                    "type": "done",
+                    "session_id": sess.id,
+                    "text": sess.last_assistant_text(),
+                    "title": sess.title,
+                    "model": _session_model_payload(sess),
+                    "usage": dict(sess._last_usage or {}),
+                    "cost": float(sess._session_cost or 0),
+                }
+                yield sse_pack(done)
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     async def user_usage(request: Request):
         user_id = request.path_params["user_id"]
         header_user = _user_id(request)
         if header_user != user_id and header_user != "anonymous":
-            # allow self-read; admin can read any if token matches
             denied = _check_admin(request, config)
             if denied is not None and header_user != user_id:
                 return denied
@@ -215,15 +307,39 @@ def create_app(workdir: Optional[Path] = None):
         )
 
     async def skills_list(_: Request):
-        from ..skill import ensure_skills_fresh
+        return _json_response(skills_payload(load(workdir), workdir))
 
-        skills = ensure_skills_fresh(load(workdir), workdir)
-        return _json_response(
-            [
-                {"name": s.name, "description": s.description, "location": str(s.location)}
-                for s in skills.values()
-            ]
+    async def models_list(_: Request):
+        return _json_response(models_payload(load(workdir)))
+
+    async def agents_list(request: Request):
+        include_hidden = request.query_params.get("include_hidden", "").lower() in (
+            "1",
+            "true",
+            "yes",
         )
+        cfg = load(workdir)
+        mcp_manager = None
+        try:
+            from ..mcp import get_manager
+
+            mcp_manager = get_manager(cfg)
+        except Exception:
+            mcp_manager = None
+        return _json_response(
+            agents_payload(
+                cfg, include_hidden=include_hidden, mcp_manager=mcp_manager
+            )
+        )
+
+    async def mcp_status(_: Request):
+        return _json_response(mcp_status_dict(load(workdir)))
+
+    async def mcp_reload(request: Request):
+        denied = _check_admin(request, config)
+        if denied is not None:
+            return denied
+        return _json_response(reload_mcp(load(workdir), workdir))
 
     routes = [
         Route("/health", health),
@@ -231,7 +347,16 @@ def create_app(workdir: Optional[Path] = None):
         Route("/v1/sessions", list_sessions, methods=["GET"]),
         Route("/v1/sessions/{session_id}", get_session, methods=["GET"]),
         Route("/v1/sessions/{session_id}/messages", post_message, methods=["POST"]),
+        Route(
+            "/v1/sessions/{session_id}/messages/stream",
+            post_message_stream,
+            methods=["POST"],
+        ),
         Route("/v1/users/{user_id}/usage", user_usage, methods=["GET"]),
+        Route("/v1/models", models_list, methods=["GET"]),
+        Route("/v1/agents", agents_list, methods=["GET"]),
+        Route("/v1/mcp", mcp_status, methods=["GET"]),
+        Route("/v1/mcp/reload", mcp_reload, methods=["POST"]),
         Route("/v1/skills", skills_list, methods=["GET"]),
         Route("/v1/skills/reload", skills_reload, methods=["POST"]),
     ]
@@ -252,14 +377,12 @@ def main(argv=None) -> int:
     cwd = Path.cwd()
     load_dotenv(cwd)
     cfg = load(cwd)
-    # Prefer mysql for server when SLEUTH_STORAGE_BACKEND unset and default_backend=mysql
     if not os.environ.get("SLEUTH_STORAGE_BACKEND") and cfg.server.default_backend:
         cfg.storage.backend = cfg.server.default_backend
 
     host = args.host or cfg.server.host
     port = args.port or cfg.server.port
     app = create_app(cwd)
-    # re-bind store backend after possible default_backend nudge
     uvicorn.run(app, host=host, port=port, log_level="info")
     return 0
 

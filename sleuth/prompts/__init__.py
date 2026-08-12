@@ -102,6 +102,7 @@ def assemble(
                 "- Keep responses short; answer in 1-3 sentences unless detail is requested.",
                 "- For AML conclusions, cite evidence; do not invent regulatory citations.",
                 "- Treat customer/transaction data as sensitive; avoid unnecessary PII in output.",
+                "- Never emit full ID numbers, mobile numbers, bank cards, passwords, or exact home addresses; use masked forms.",
             ]
         )
     )

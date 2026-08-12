@@ -4,6 +4,16 @@ Python 编程 Agent：本机 CLI 与多用户 HTTP 服务。支持远程 MCP 工
 
 整体架构与模块职责见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
+对接与扩展文档：
+
+| 文档 | 内容 |
+|------|------|
+| [docs/API.md](docs/API.md) | HTTP / SSE 前端接口 |
+| [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) | MCP Tool / Agent Card 对接规范 |
+| [docs/SKILL_INTEGRATION.md](docs/SKILL_INTEGRATION.md) | Skill 接入与开发规范 |
+| [docs/AGENT_SCENARIOS.md](docs/AGENT_SCENARIOS.md) | `dd_analyst` / `dd_reply` 内部流程图 |
+| [docs/EXTENDING.md](docs/EXTENDING.md) | 扩展选型与改代码清单 |
+
 要求 **Python ≥ 3.10**。Windows 上若默认 `python` 仍是 3.9，请使用 `py -3.12`。
 
 ## 快速开始
@@ -83,17 +93,30 @@ switched to session sess_abc123...
 current session id=...
 ```
 
-交互中切换模型：
+交互中切换模型 / agent / MCP / skills（与 HTTP 目录同语义，粘滞写入会话）：
 
 ```text
 >>> /model
-current model: deepseek-chat/deepseek-chat
-configured models:
-  deepseek-chat: deepseek-chat @ https://api.deepseek.com *
-  qwen-max: qwen-max @ https://dashscope...
 >>> /model qwen-max
-model set to qwen-max/qwen-max
+>>> /agent
+>>> /agent dd_analyst
+>>> /mcp
+>>> /mcp reload
+>>> /skills
+>>> /skills reload
+>>> /usage
+>>> /yolo on
 ```
+
+| CLI 斜杠 | HTTP 能力 |
+|----------|-----------|
+| `/sessions` `/session` | `GET /v1/sessions`、按 id 续聊 |
+| `/model` | `GET /v1/models` + 消息 body `model` |
+| `/agent` | `GET /v1/agents` + 消息 body `agent` |
+| `/mcp` `/mcp reload` | `GET /v1/mcp` · `POST /v1/mcp/reload` |
+| `/skills` `/skills reload` | `GET /v1/skills` · `POST /v1/skills/reload` |
+| `/usage` | `GET /v1/users/{id}/usage` |
+| `/yolo on\|off` | 消息 body `yolo`（CLI 默认 off，server 默认 on） |
 
 **没有 `deepseek/` 这种 provider 前缀时**（只有 model id，且每套 sk/url 不同），直接在目录里写对象：
 
@@ -106,6 +129,8 @@ SLEUTH_MODELS={"deepseek-chat":{"apiKey":"sk-ds","baseURL":"https://api.deepseek
 
 ## HTTP 服务
 
+完整前端对接说明（入参/出参/错误码/调用流）：见 [docs/API.md](docs/API.md)。
+
 ```powershell
 py -3.12 -m sleuth.server
 # 请求头 X-User-Id；管理接口 X-Admin-Token
@@ -114,9 +139,12 @@ py -3.12 -m sleuth.server
 | 方法 | 路径 |
 |------|------|
 | GET | `/health` |
-| POST/GET | `/v1/sessions`（创建可选 body `model`；响应含 `model`） |
-| GET | `/v1/sessions/{id}`（含 `model`） |
-| POST | `/v1/sessions/{id}/messages`（可选 body `model`，本轮前切换） |
+| POST/GET | `/v1/sessions`（创建可选 body `model`；列表含 `preview` / `time_updated_local`） |
+| GET | `/v1/sessions/{id}`（含 `model`、messages） |
+| POST | `/v1/sessions/{id}/messages`（可选 body `model`，本轮前切换；**同步长耗时**） |
+| POST | `/v1/sessions/{id}/messages/stream`（同上 Body；**SSE**，见 [docs/API.md](docs/API.md) §4.5.1） |
+| GET | `/v1/models` · `/v1/agents`（选择器目录；agents 含 available） |
+| GET | `/v1/mcp` · `POST /v1/mcp/reload`（连接状态 / 热重载） |
 | GET | `/v1/users/{user_id}/usage` |
 | GET/POST | `/v1/skills` · `/v1/skills/reload` |
 
