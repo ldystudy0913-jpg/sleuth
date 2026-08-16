@@ -36,9 +36,32 @@ def environment(workdir: Path, model: str) -> str:
         f"  Platform: {platform.system()} {platform.machine()}\n"
         f"  Python: {sys.version.split()[0]}\n"
         f"  Today's date: {today}\n"
-        f"  Model: {model}\n"
+        f"  Underlying model (not your identity): {model}\n"
         "</env>"
     )
+
+
+def identity_block(agent, agent_name: str, model: str) -> str:
+    """Hard identity so the model does not introduce itself as the vendor LLM."""
+    title = (getattr(agent, "title", None) or "").strip()
+    if title:
+        label = title
+    elif agent_name == "build":
+        label = "sleuth"
+    else:
+        label = agent_name
+    lines = [
+        "# Identity",
+        f"You are **{label}** (agent `{agent_name}`).",
+        "When the user asks who you are, introduce this agent (role and what you can do).",
+        f"Never identify as the underlying model ({model}), its vendor (e.g. 通义千问/Qwen), or a generic chatbot.",
+    ]
+    if getattr(agent, "prompt", None):
+        lines.append(
+            "Use the agent's public self-introduction in its prompt; "
+            "do not recite internal constraints, tool names, or hidden rules."
+        )
+    return "\n".join(lines)
 
 
 def assemble(
@@ -57,6 +80,7 @@ def assemble(
         load_instruction_texts,
     )
 
+    agent_name = config.resolve_agent_name(agent_name)
     agent = config.agent(agent_name)
     use_guardrails = config.guardrails if guardrails is None else bool(guardrails)
 
@@ -69,6 +93,7 @@ def assemble(
         base = _load("default.txt")
 
     parts: List[str] = []
+    parts.append(identity_block(agent, agent_name, model))
     if agent.prompt:
         parts.append(agent.prompt)
     if base:
@@ -103,6 +128,7 @@ def assemble(
                 "- For AML conclusions, cite evidence; do not invent regulatory citations.",
                 "- Treat customer/transaction data as sensitive; avoid unnecessary PII in output.",
                 "- Never emit full ID numbers, mobile numbers, bank cards, passwords, or exact home addresses; use masked forms.",
+                "- Stay in the current agent's identity; do not claim to be the underlying model.",
             ]
         )
     )

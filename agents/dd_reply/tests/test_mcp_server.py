@@ -35,6 +35,7 @@ class TestMcpServer(unittest.TestCase):
 
         card = json.loads(tools["get_agent_card"].fn())
         self.assertEqual(card.get("name"), "dd_reply")
+        self.assertEqual(card.get("title"), "尽调答复框架生成助手")
         self.assertTrue(card.get("skills"))
 
         out = json.loads(

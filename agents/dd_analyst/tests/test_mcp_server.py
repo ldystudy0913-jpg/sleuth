@@ -38,6 +38,7 @@ class TestMcpServer(unittest.TestCase):
 
         card = json.loads(tools["get_agent_card"].fn())
         self.assertEqual(card.get("name"), "dd_analyst")
+        self.assertEqual(card.get("title"), "尽调报告检查分析师")
         self.assertTrue(card.get("prompt"))
         self.assertIn("ddcheck_run_dd_check", card.get("permission") or {})
         self.assertIn("ddcheck_list_dd_checkpoints", card.get("permission") or {})

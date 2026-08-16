@@ -12,7 +12,7 @@
 |--|-------|------------|
 | 本质 | Markdown 知识 / SOP | 可执行副作用 |
 | 进系统提示 | **仅目录**：name + 短 description | 工具名 + schema |
-| 正文何时进入上下文 | 模型调用内置工具 **`skill`** 之后 | 每次 `tools/call` |
+| 正文何时进入上下文 | 会话 pinned skill，或模型调用内置工具 **`skill`** 之后 | 每次 `tools/call` |
 | 典型用途 | 检查步骤、答复框架写法、排查手册 | 跑检查、写文件、查库 |
 
 配合方式（推荐）：
@@ -60,8 +60,10 @@ SLEUTH_SKILLS_REFRESH_SECONDS=300
 
 - `GET /v1/skills` → `[{ name, description, location }, …]`
 - `POST /v1/skills/reload` → 强制重载
+- 创建 / 发消息 body 带 `skill`：默认 agent 下非空名会把 SKILL.md 注入系统提示；`""` 表示不绑定。
+- **Skill 选择器仅当 `agent === GET /v1/agents` 的 `default` 时可用**。专用 agent 必须传 `skill: ""`，否则 `400`。
 
-前端：**只读展示能力**即可；不要做成「每轮勾选 Skill」控件（当前无会话级 skill 绑定 API）。产品入口应选 **Agent**。
+前端：每轮带 `agent` / `model` / `skill`。未选 skill 用默认 agent 正常对话。
 
 ---
 

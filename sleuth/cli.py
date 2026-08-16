@@ -319,6 +319,8 @@ def _parse_args(argv=None):
                         help="user id for session/usage isolation (or SLEUTH_USER_ID)")
     parser.add_argument("--refresh-skills", action="store_true",
                         help="force reload skills from paths/urls/s3 before starting")
+    parser.add_argument("--skill", default=None,
+                        help="pin a skill (only valid with the default agent)")
     return parser.parse_args(argv)
 
 
@@ -366,6 +368,14 @@ def _run_session(args, session) -> int:
             _print(f"error: invalid --model: {exc}\n")
             return 1
 
+    if getattr(args, "skill", None):
+        try:
+            name = session.set_skill(args.skill)
+            _print(f"skill: {name}\n")
+        except Exception as exc:
+            _print(f"error: invalid --skill: {exc}\n")
+            return 1
+
     if getattr(args, "revert_message_id", None):
         ok = session.revert_to(args.revert_message_id)
         _print("reverted\n" if ok else "revert failed (no snapshot)\n")
@@ -390,9 +400,10 @@ def _run_session(args, session) -> int:
         "sleuth interactive session. Type your prompt; Ctrl+C or 'exit' to quit.\n"
         f"[session {session.id}] title={session.title!r} "
         f"agent={session.agent_name} model={session.model_ref()} "
+        f"skill={session.skill_name or '-'} "
         f"yolo={'on' if session.yolo else 'off'}\n"
-        "Slash: /sessions · /session · /model · /agent · /mcp · /skills · "
-        "/usage · /yolo  ·  commands from .opencode/command/*.md\n\n"
+        "Slash: /sessions · /session · /model · /agent · /mcp · /skill · "
+        "/skills · /usage · /yolo  ·  commands from .opencode/command/*.md\n\n"
     )
     try:
         while True:
@@ -455,7 +466,7 @@ def _expand_command(
     if name == "mcp":
         _handle_mcp_command(session, rest)
         return None, None
-    if name == "skills":
+    if name in ("skill", "skills"):
         _handle_skills_command(session, rest)
         return None, None
     if name == "usage":
@@ -470,7 +481,7 @@ def _expand_command(
         known = ", ".join(sorted(session.config.commands)) or "(none)"
         _print(
             f"unknown command /{name}. known: /sessions, /session, /model, "
-            f"/agent, /mcp, /skills, /usage, /yolo, {known}\n"
+            f"/agent, /mcp, /skill, /skills, /usage, /yolo, {known}\n"
         )
         return None, None
     template = cmd.template or ""
@@ -551,6 +562,7 @@ def _handle_session_command(
             f"current session id={session.id}\n"
             f"  title={session.title!r}\n"
             f"  agent={session.agent_name} model={session.model_ref()}\n"
+            f"  skill={session.skill_name or '-'}\n"
             f"  updated={when or '-'}\n"
             f"  tip: /sessions to list, /session <n|id> to switch\n"
         )
@@ -594,11 +606,13 @@ def _handle_session_command(
     )
     new_sess.yolo = session.yolo
     new_sess._mcp_tool_names = getattr(session, "_mcp_tool_names", set())
+    new_sess._mcp_card_names = getattr(session, "_mcp_card_names", set())
     new_sess._mcp_manager = getattr(session, "_mcp_manager", None)
     _print(
         f"switched to session {new_sess.id}\n"
         f"  title={new_sess.title!r} agent={new_sess.agent_name} "
-        f"model={new_sess.model_ref()} messages={len(new_sess.messages)}\n"
+        f"model={new_sess.model_ref()} skill={new_sess.skill_name or '-'} "
+        f"messages={len(new_sess.messages)}\n"
     )
     return new_sess
 
@@ -670,15 +684,22 @@ def _handle_agent_command(session, rest: str) -> None:
             if len(desc) > 72:
                 desc = desc[:69] + "..."
             _print(
-                f"  {a.get('name')}{mark}  [{avail}/{src}"
+                f"  {a.get('name')}{mark}  {a.get('title') or a.get('name')}"
+                f"  [{avail}/{src}"
                 f"{'' if src == 'local' else ' @ ' + str(mcp)}]\n"
                 f"      {desc or '(no description)'}\n"
             )
         _print("Switch with: /agent <name>\n")
         return
     name = rest.strip()
+    resolved_name = session.config.resolve_agent_name(name)
     entry = next(
-        (a for a in (payload.get("agents") or []) if a.get("name") == name),
+        (
+            a
+            for a in (payload.get("agents") or [])
+            if a.get("name") in (name, resolved_name)
+            or name in (a.get("aliases") or [])
+        ),
         None,
     )
     if entry is not None and not entry.get("available", True):
@@ -686,12 +707,18 @@ def _handle_agent_command(session, rest: str) -> None:
             f"warning: agent {name!r} MCP server "
             f"{entry.get('mcp_server')!r} is not connected; switching anyway\n"
         )
+    prev_skill = session.skill_name
     try:
         resolved = session.set_agent(name, yolo=session.yolo)
     except Exception as exc:
         _print(f"agent switch failed: {exc}\n")
         return
     _print(f"agent set to {resolved}\n")
+    if prev_skill and not session.skill_name:
+        _print(
+            f"(cleared skill {prev_skill!r}; skill is only selectable "
+            "on the default agent)\n"
+        )
 
 
 def _handle_mcp_command(session, rest: str) -> None:
@@ -745,17 +772,15 @@ def _handle_mcp_command(session, rest: str) -> None:
     _print(f"card agents ({len(agents)}): {', '.join(agents) or '-'}\n")
     for err in status.get("errors") or []:
         _print(f"error: {err}\n")
-    _print("Reload with: /mcp reload\n")
+    _print("Disconnected servers retry in the background; /mcp reload to reconnect now.\n")
 
 
 def _handle_skills_command(session, rest: str) -> None:
-    """``/skills`` list or ``/skills reload``."""
+    """``/skill`` list/switch or ``/skills reload``."""
     from .catalog import skills_payload
 
-    if rest and rest.split()[0].lower() not in ("reload", "list", "status"):
-        _print("usage: /skills  |  /skills reload\n")
-        return
-    if rest.lower().startswith("reload"):
+    token = rest.split()[0].lower() if rest else ""
+    if token == "reload":
         if session.is_busy():
             _print("busy: wait for the current turn to finish before /skills reload\n")
             return
@@ -769,7 +794,36 @@ def _handle_skills_command(session, rest: str) -> None:
         _print(f"skills reloaded: {len(skills)} ({', '.join(sorted(skills.keys())) or '-'})\n")
         return
 
+    if token in ("off", "none", "default"):
+        if session.is_busy():
+            _print("busy: wait for the current turn to finish before /skill\n")
+            return
+        session.set_skill("")
+        _print("skill cleared\n")
+        return
+
+    if token and token not in ("list", "status"):
+        if session.is_busy():
+            _print("busy: wait for the current turn to finish before /skill\n")
+            return
+        try:
+            name = session.set_skill(rest.strip())
+        except ValueError as exc:
+            _print(f"skill switch failed: {exc}\n")
+            return
+        _print(f"skill set to {name}\n")
+        return
+
     rows = skills_payload(session.config, session.workdir)
+    current = session.skill_name or ""
+    default = (getattr(session.config, "default_agent", None) or "build").strip()
+    _print(f"current skill: {current or '-'}\n")
+    _print(f"default agent (skill selectable): {default}\n")
+    if not session.is_default_agent():
+        _print(
+            f"skill pinning disabled: current agent is {session.agent_name!r}; "
+            f"switch to {default!r} first\n"
+        )
     if not rows:
         _print("no skills loaded\n")
         return
@@ -778,12 +832,13 @@ def _handle_skills_command(session, rest: str) -> None:
         desc = (s.get("description") or "").replace("\n", " ")
         if len(desc) > 72:
             desc = desc[:69] + "..."
+        mark = " *" if s.get("name") == current else ""
         _print(
-            f"  {s.get('name')}\n"
+            f"  {s.get('name')}{mark}\n"
             f"      {desc or '(no description)'}\n"
             f"      {s.get('location') or '-'}\n"
         )
-    _print("Reload with: /skills reload\n")
+    _print("Switch with: /skill <name>  |  /skill off  |  /skills reload\n")
 
 
 def _handle_usage_command(session, rest: str) -> None:

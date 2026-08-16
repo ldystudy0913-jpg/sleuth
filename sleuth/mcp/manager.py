@@ -4,12 +4,14 @@ Connect configured servers, list_tools, and call_tool. OAuth and stdio
 local servers are out of MVP scope.
 
 Connections are parallel with per-server timeouts so one dead server cannot
-block the others. Use ``reload()`` to reconnect after servers come online.
+block the others. Down servers retry in the background (``mcp_retry_seconds``).
+Use ``reload()`` to reconnect immediately.
 """
 from __future__ import annotations
 
 import asyncio
 import atexit
+import concurrent.futures
 import json
 import re
 import threading
@@ -18,12 +20,63 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import Config, McpServerConfig
 
+# Wait this long at start() for servers that are already up; the rest retry in background.
+_START_WAIT_S = 2.0
+
 
 def sanitize_name(name: str) -> str:
     """Make a safe tool-name fragment for MCP catalog entries."""
     s = re.sub(r"[^a-zA-Z0-9_-]+", "_", name.strip())
     s = re.sub(r"_+", "_", s).strip("_")
     return s.lower() or "mcp"
+
+
+def _is_cancel_scope_error(exc: BaseException) -> bool:
+    return isinstance(exc, RuntimeError) and "cancel scope" in str(exc)
+
+
+def _iter_excs(exc: BaseException):
+    """Flatten ExceptionGroup-like objects without requiring 3.11+ builtins."""
+    sub = getattr(exc, "exceptions", None)
+    if (
+        isinstance(sub, (list, tuple))
+        and sub
+        and all(isinstance(e, BaseException) for e in sub)
+    ):
+        for e in sub:
+            yield from _iter_excs(e)
+        return
+    yield exc
+
+
+def _exc_message(exc: BaseException) -> str:
+    """Human-readable connect error; skip anyio cancel-scope cleanup noise."""
+    found = [e for e in _iter_excs(exc) if not _is_cancel_scope_error(e)]
+    if not found:
+        found = list(_iter_excs(exc))
+    chosen = found[0] if found else exc
+    msg = str(chosen).strip()
+    if isinstance(chosen, asyncio.TimeoutError) or type(chosen).__name__ in (
+        "TimeoutError",
+        "CancelledError",
+    ):
+        return msg or "timed out"
+    if not msg:
+        return type(chosen).__name__
+    if len(msg) > 400:
+        return msg[:400] + "..."
+    return msg
+
+
+def _mcp_loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """Drop detached anyio athrow tasks after a failed MCP HTTP connect."""
+    exc = context.get("exception")
+    if exc is not None and any(_is_cancel_scope_error(e) for e in _iter_excs(exc)):
+        return
+    msg = str(context.get("message") or "")
+    if "cancel scope" in msg:
+        return
+    loop.default_exception_handler(context)
 
 
 @dataclass
@@ -52,7 +105,9 @@ class McpManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._sessions: Dict[str, Any] = {}
-        self._cm: Dict[str, Any] = {}  # async context managers to exit
+        # Per-server lifetime task owns the MCP async context (anyio cancel scope).
+        self._tasks: Dict[str, asyncio.Task] = {}
+        self._stop: Dict[str, asyncio.Event] = {}
         self._tools: Dict[str, McpToolInfo] = {}
         self._errors: List[str] = []
         self._status: Dict[str, McpServerStatus] = {}
@@ -60,6 +115,9 @@ class McpManager:
         self._agent_cards: Dict[str, dict] = {}  # agent name -> card JSON
         self._agent_card_servers: Dict[str, str] = {}  # agent name -> mcp server name
         self._atexit_registered = False
+        self._connecting: set[str] = set()
+        self._retry_task: Optional[asyncio.Task] = None
+        self._closing = False
 
     @property
     def errors(self) -> List[str]:
@@ -108,6 +166,19 @@ class McpManager:
         # Clamp: at least 3s, at most 60s per server for isolation.
         return max(3.0, min(60.0, ms / 1000.0))
 
+    def _retry_interval_s(self) -> float:
+        try:
+            raw = int(getattr(self.config, "mcp_retry_seconds", 15) or 0)
+        except (TypeError, ValueError):
+            raw = 15
+        return max(0.0, float(raw))
+
+    def _set_server_error(self, name: str, msg: Optional[str]) -> None:
+        prefix = f"mcp[{name}]:"
+        self._errors = [e for e in self._errors if not str(e).startswith(prefix)]
+        if msg:
+            self._errors.append(f"{prefix} {msg}")
+
     def _remote_servers(self) -> List[McpServerConfig]:
         return [
             s
@@ -118,22 +189,23 @@ class McpManager:
     def start(self) -> None:
         if self._started:
             return
+        self._closing = False
         servers = self._remote_servers()
-        if not servers:
-            self._started = True
-            return
-        self._ensure_loop()
-        fut = asyncio.run_coroutine_threadsafe(self._connect_all(servers), self._loop)
-        try:
-            # gather already bounds each server; allow n * per_server + slack
-            per = self._per_server_timeout_s()
-            fut.result(timeout=max(10.0, per * max(1, len(servers)) + 5.0))
-        except Exception as exc:
-            self._errors.append(f"mcp startup failed: {exc}")
         self._started = True
         if not self._atexit_registered:
             atexit.register(self.close)
             self._atexit_registered = True
+        if not servers:
+            return
+        self._ensure_loop()
+        fut = asyncio.run_coroutine_threadsafe(self._connect_all(servers), self._loop)
+        try:
+            fut.result(timeout=_START_WAIT_S)
+        except concurrent.futures.TimeoutError:
+            pass
+        except Exception as exc:
+            self._errors.append(f"mcp startup failed: {_exc_message(exc)}")
+        self._start_retry_loop()
 
     def reload(self, config: Optional[Config] = None) -> None:
         """Disconnect all MCP servers and reconnect (hot reload)."""
@@ -147,18 +219,21 @@ class McpManager:
         try:
             fut.result(timeout=max(10.0, per * max(1, len(servers)) + 10.0))
         except Exception as exc:
-            self._errors.append(f"mcp reload failed: {exc}")
+            self._errors.append(f"mcp reload failed: {_exc_message(exc)}")
         self._started = True
+        self._closing = False
         if not self._atexit_registered:
             atexit.register(self.close)
             self._atexit_registered = True
+        self._start_retry_loop()
 
     def close(self) -> None:
+        self._closing = True
         if not self._loop or not self._thread:
             self._started = False
             return
         try:
-            fut = asyncio.run_coroutine_threadsafe(self._disconnect_all(), self._loop)
+            fut = asyncio.run_coroutine_threadsafe(self._shutdown_loop(), self._loop)
             fut.result(timeout=10)
         except Exception:
             pass
@@ -170,6 +245,7 @@ class McpManager:
         self._loop = None
         self._thread = None
         self._started = False
+        self._retry_task = None
 
     def call_tool(self, qualified_name: str, arguments: Dict[str, Any]) -> Tuple[str, bool]:
         """Call a tool by qualified name. Returns (text, is_error)."""
@@ -209,6 +285,7 @@ class McpManager:
         def _run() -> None:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            loop.set_exception_handler(_mcp_loop_exception_handler)
             self._loop = loop
             ready.set()
             loop.run_forever()
@@ -225,10 +302,65 @@ class McpManager:
 
     async def _reload_all(self, servers: List[McpServerConfig]) -> None:
         await self._disconnect_all()
+        self._connecting.clear()
         self._tools.clear()
         self._agent_cards.clear()
         self._agent_card_servers.clear()
         self._status.clear()
+        await self._connect_all(servers)
+
+    async def _shutdown_loop(self) -> None:
+        task = self._retry_task
+        self._retry_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await self._disconnect_all()
+
+    def _start_retry_loop(self) -> None:
+        if self._loop is None or self._closing:
+            return
+        if self._retry_interval_s() <= 0:
+            return
+        asyncio.run_coroutine_threadsafe(self._ensure_retry_loop(), self._loop)
+
+    async def _ensure_retry_loop(self) -> None:
+        if self._retry_task is not None and not self._retry_task.done():
+            return
+        if self._retry_interval_s() <= 0 or self._closing:
+            return
+        self._retry_task = asyncio.create_task(self._retry_loop(), name="mcp-retry")
+
+    async def _retry_loop(self) -> None:
+        """Reconnect servers that were down; leave healthy sessions alone."""
+        while not self._closing:
+            interval = self._retry_interval_s()
+            if interval <= 0:
+                return
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            if self._closing:
+                return
+            try:
+                await self._retry_disconnected()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    async def _retry_disconnected(self) -> None:
+        servers = [
+            s
+            for s in self._remote_servers()
+            if s.name not in self._sessions and s.name not in self._connecting
+        ]
+        if not servers:
+            return
         await self._connect_all(servers)
 
     async def _connect_all(self, servers: List[McpServerConfig]) -> None:
@@ -238,10 +370,14 @@ class McpManager:
         await asyncio.gather(*(self._connect_one_guarded(srv) for srv in servers))
 
     async def _connect_one_guarded(self, srv: McpServerConfig) -> None:
+        if srv.name in self._sessions or srv.name in self._connecting:
+            return
+        self._connecting.add(srv.name)
         per = self._per_server_timeout_s()
         url = srv.url or ""
         try:
             await asyncio.wait_for(self._connect_one(srv), timeout=per)
+            self._set_server_error(srv.name, None)
             self._status[srv.name] = McpServerStatus(
                 name=srv.name,
                 url=url,
@@ -249,9 +385,9 @@ class McpManager:
                 error=None,
                 agent=bool(getattr(srv, "agent", False)),
             )
-        except Exception as exc:
-            msg = str(exc) or exc.__class__.__name__
-            self._errors.append(f"mcp[{srv.name}]: {msg}")
+        except asyncio.TimeoutError:
+            msg = f"timed out after {per:.0f}s connecting to {url}"
+            self._set_server_error(srv.name, msg)
             try:
                 await self._disconnect_one(srv.name)
             except Exception:
@@ -263,15 +399,69 @@ class McpManager:
                 error=msg,
                 agent=bool(getattr(srv, "agent", False)),
             )
+        except Exception as exc:
+            msg = _exc_message(exc)
+            self._set_server_error(srv.name, msg)
+            try:
+                await self._disconnect_one(srv.name)
+            except Exception:
+                pass
+            self._status[srv.name] = McpServerStatus(
+                name=srv.name,
+                url=url,
+                connected=False,
+                error=msg,
+                agent=bool(getattr(srv, "agent", False)),
+            )
+        finally:
+            self._connecting.discard(srv.name)
 
     async def _connect_one(self, srv: McpServerConfig) -> None:
-        try:
-            from mcp import ClientSession
+        """Start a dedicated lifetime task so anyio cancel scopes stay on one task.
+
+        ``asyncio.wait_for`` wraps this coroutine in a *different* task. Entering
+        the MCP HTTP context manager here and exiting it from the waiter (or from
+        ``_disconnect_one``) triggers: Attempted to exit cancel scope in a
+        different task than it was entered in.
+        """
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future = loop.create_future()
+        stop = asyncio.Event()
+        self._stop[srv.name] = stop
+
+        async def lifetime() -> None:
             try:
-                # mcp >= 2.0
+                await self._session_lifetime(srv, ready, stop)
+            except BaseException as exc:
+                if not ready.done():
+                    ready.set_exception(exc)
+            finally:
+                if not ready.done():
+                    ready.set_exception(RuntimeError("mcp session ended before initialize"))
+
+        task = asyncio.create_task(lifetime(), name=f"mcp-{srv.name}")
+        self._tasks[srv.name] = task
+        try:
+            await ready
+        except BaseException:
+            stopper = asyncio.create_task(self._stop_lifetime(srv.name, cancel=True))
+            try:
+                await asyncio.shield(stopper)
+            except (asyncio.CancelledError, Exception):
+                pass
+            raise
+
+    async def _session_lifetime(
+        self,
+        srv: McpServerConfig,
+        ready: asyncio.Future,
+        stop: asyncio.Event,
+    ) -> None:
+        try:
+            import mcp  # noqa: F401
+            try:
                 from mcp.client.streamable_http import streamable_http_client as streamable_client
             except ImportError:
-                # mcp 1.x
                 from mcp.client.streamable_http import streamablehttp_client as streamable_client
         except ImportError as exc:
             raise RuntimeError(
@@ -280,69 +470,93 @@ class McpManager:
 
         url = srv.url
         assert url
-        headers = dict(srv.headers)
-
-        # Prefer Streamable HTTP; fall back to SSE on failure.
-        last_err: Optional[Exception] = None
+        last_err: Optional[BaseException] = None
         for attempt in ("streamable", "sse"):
-            http_client: Any = None
             try:
                 if attempt == "streamable":
-                    try:
-                        # mcp 1.x accepts headers=; mcp 2.0 wants http_client=
-                        cm = streamable_client(url, headers=headers or None)
-                    except TypeError:
-                        from mcp.shared._httpx_utils import create_mcp_http_client
-
-                        http_client = create_mcp_http_client(headers=headers or None)
-                        await http_client.__aenter__()
-                        cm = streamable_client(url, http_client=http_client)
-                    streams = await cm.__aenter__()
-                    read, write = streams[0], streams[1]
+                    await self._hold_streamable(srv, streamable_client, ready, stop)
                 else:
-                    from mcp.client.sse import sse_client
-
-                    cm = sse_client(url, headers=headers or None)
-                    read, write = await cm.__aenter__()
-
-                session = ClientSession(read, write)
-                await session.__aenter__()
-                await session.initialize()
-                self._sessions[srv.name] = session
-                self._cm[srv.name] = (cm, session, http_client)
-
-                listed = await session.list_tools()
-                for tool in listed.tools:
-                    q = f"{sanitize_name(srv.name)}_{sanitize_name(tool.name)}"
-                    schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
-                    if not isinstance(schema, dict):
-                        schema = {"type": "object", "properties": {}}
-                    self._tools[q] = McpToolInfo(
-                        server=srv.name,
-                        name=tool.name,
-                        qualified=q,
-                        description=tool.description or f"MCP tool {tool.name} from {srv.name}",
-                        input_schema=schema,
-                    )
-                # Opt-in Agent Card (does not affect default tool-only MCP)
-                if getattr(srv, "agent", False):
-                    await self._maybe_fetch_agent_card(srv, session, listed.tools)
+                    await self._hold_sse(srv, ready, stop)
                 return
             except Exception as exc:
                 last_err = exc
-                # clean partial
-                if srv.name in self._cm:
-                    try:
-                        await self._disconnect_one(srv.name)
-                    except Exception:
-                        pass
-                elif http_client is not None:
-                    try:
-                        await http_client.__aexit__(None, None, None)
-                    except Exception:
-                        pass
                 continue
-        raise RuntimeError(f"could not connect to {url}: {last_err}")
+        raise RuntimeError(
+            f"could not connect to {url}: {_exc_message(last_err) if last_err else 'unknown'}"
+        )
+
+    async def _hold_streamable(
+        self,
+        srv: McpServerConfig,
+        streamable_client: Any,
+        ready: asyncio.Future,
+        stop: asyncio.Event,
+    ) -> None:
+        url = srv.url
+        headers = dict(srv.headers)
+        try:
+            cm = streamable_client(url, headers=headers or None)
+        except TypeError:
+            cm = None
+        if cm is not None:
+            async with cm as streams:
+                await self._hold_session(srv, streams, ready, stop)
+            return
+
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        http_client = create_mcp_http_client(headers=headers or None)
+        await http_client.__aenter__()
+        try:
+            async with streamable_client(url, http_client=http_client) as streams:
+                await self._hold_session(srv, streams, ready, stop)
+        finally:
+            try:
+                await http_client.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+    async def _hold_sse(
+        self, srv: McpServerConfig, ready: asyncio.Future, stop: asyncio.Event
+    ) -> None:
+        from mcp.client.sse import sse_client
+
+        async with sse_client(srv.url, headers=dict(srv.headers) or None) as streams:
+            await self._hold_session(srv, streams, ready, stop)
+
+    async def _hold_session(
+        self,
+        srv: McpServerConfig,
+        streams: Any,
+        ready: asyncio.Future,
+        stop: asyncio.Event,
+    ) -> None:
+        from mcp import ClientSession
+
+        read, write = streams[0], streams[1]
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+            for tool in listed.tools:
+                q = f"{sanitize_name(srv.name)}_{sanitize_name(tool.name)}"
+                schema = getattr(tool, "inputSchema", None) or getattr(
+                    tool, "input_schema", None
+                )
+                if not isinstance(schema, dict):
+                    schema = {"type": "object", "properties": {}}
+                self._tools[q] = McpToolInfo(
+                    server=srv.name,
+                    name=tool.name,
+                    qualified=q,
+                    description=tool.description or f"MCP tool {tool.name} from {srv.name}",
+                    input_schema=schema,
+                )
+            self._sessions[srv.name] = session
+            if getattr(srv, "agent", False):
+                await self._maybe_fetch_agent_card(srv, session, listed.tools)
+            if not ready.done():
+                ready.set_result(True)
+            await stop.wait()
 
     async def _maybe_fetch_agent_card(self, srv: McpServerConfig, session: Any, tools: Any) -> None:
         """Call get_agent_card when present; failures are recorded, tools stay registered."""
@@ -382,37 +596,35 @@ class McpManager:
         body = "\n".join(parts).strip() or "(empty mcp result)"
         return body, is_error
 
+    async def _stop_lifetime(self, name: str, *, cancel: bool = False) -> None:
+        """Ask the server's lifetime task to exit; never __aexit__ from here."""
+        stop = self._stop.pop(name, None)
+        task = self._tasks.pop(name, None)
+        if stop is not None:
+            stop.set()
+        if task is None:
+            return
+        if cancel and not task.done():
+            task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
     async def _disconnect_one(self, name: str) -> None:
-        pair = self._cm.pop(name, None)
         self._sessions.pop(name, None)
         drop = [k for k, v in self._tools.items() if v.server == name]
         for k in drop:
             del self._tools[k]
-        # Drop agent cards registered from this server
         drop_agents = [a for a, s in self._agent_card_servers.items() if s == name]
         for a in drop_agents:
             self._agent_card_servers.pop(a, None)
             self._agent_cards.pop(a, None)
-        if not pair:
-            return
-        # Always stored as (cm, session, http_client); http_client may be None.
-        cm, session, http_client = pair
-        try:
-            await session.__aexit__(None, None, None)
-        except Exception:
-            pass
-        try:
-            await cm.__aexit__(None, None, None)
-        except Exception:
-            pass
-        if http_client is not None:
-            try:
-                await http_client.__aexit__(None, None, None)
-            except Exception:
-                pass
+        await self._stop_lifetime(name, cancel=True)
 
     async def _disconnect_all(self) -> None:
-        for name in list(self._cm.keys()):
+        names = set(self._tasks) | set(self._sessions) | set(self._stop)
+        for name in list(names):
             await self._disconnect_one(name)
 
 

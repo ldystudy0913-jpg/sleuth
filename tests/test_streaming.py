@@ -168,12 +168,25 @@ class StreamRouteTests(unittest.TestCase):
                     self._renderer = renderer
                     self._text = ""
                     self.cancelled = False
+                    self.skill_name = None
 
                 def model_ref(self):
                     return "p/m"
 
                 def set_model(self, _m):
                     return None
+
+                def set_agent(self, name, yolo=False):
+                    self.agent_name = name
+                    return name
+
+                def set_skill(self, name):
+                    raw = (name or "").strip()
+                    self.skill_name = raw or None
+                    return self.skill_name
+
+                def reset_model(self):
+                    return "p/m"
 
                 def cancel(self):
                     self.cancelled = True
@@ -284,7 +297,11 @@ class StreamRouteTests(unittest.TestCase):
                 models={"qwen-max": {"model": "qwen-max", "apiKey": "sk-x"}},
                 agents={
                     "build": AgentConfig(name="build"),
-                    "dd_analyst": AgentConfig(name="dd_analyst", description="尽调"),
+                    "dd_analyst": AgentConfig(
+                        name="dd_analyst",
+                        title="尽调报告检查分析师",
+                        description="尽调",
+                    ),
                 },
             )
             with patch("sleuth.server.app.create_store", return_value=store), patch(
@@ -307,6 +324,9 @@ class StreamRouteTests(unittest.TestCase):
                     {x["name"] for x in agents["agents"]},
                     {"build", "dd_analyst"},
                 )
+                by_name = {x["name"]: x for x in agents["agents"]}
+                self.assertEqual(by_name["dd_analyst"]["title"], "尽调报告检查分析师")
+                self.assertEqual(by_name["build"]["title"], "通用助手")
 
 
 if __name__ == "__main__":

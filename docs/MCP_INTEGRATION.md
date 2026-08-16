@@ -32,8 +32,9 @@ flowchart LR
 要点：
 
 - MVP **只连 remote URL**（Streamable HTTP，失败再试 SSE）；stdio local 配置可解析但不连接。
+- **不必先起齐 MCP**：Sleuth 先启动；已在线的服务约 2s 内连上，未在线的按 `SLEUTH_MCP_RETRY_SECONDS`（默认 15s）后台重试。下一轮对话自动挂上工具 / Agent Card。
 - 多服务 **并行连接、单服务限时**：一个挂起/失败不影响其它已配置服务（`SLEUTH_MCP_TIMEOUT_PER_SERVER`）。
-- 运行中可用 `POST /v1/mcp/reload`（Admin）热重连并刷新 Agent Card；`GET /v1/mcp` 查看状态。
+- 立即重连：CLI `/mcp reload`，或 `POST /v1/mcp/reload`（Admin）；`GET /v1/mcp` / `/mcp` 查看状态。
 - 工具名对模型可见形式：`{sanitize(server)}_{sanitize(tool)}`。
 - `agent: true` 时额外调用 `get_agent_card`，用卡片 **fill-empty** 注册 Agent + Skill（本地已有同名则不覆盖）。
 
@@ -49,6 +50,8 @@ SLEUTH_MCP_SERVERS={"ddcheck":{"type":"remote","url":"http://127.0.0.1:8791/mcp"
 
 SLEUTH_MCP_TIMEOUT_STARTUP=30000
 SLEUTH_MCP_TIMEOUT_REQUEST=120000
+# 未连上的服务后台重试间隔（秒）；0 = 关闭自动重试
+SLEUTH_MCP_RETRY_SECONDS=15
 # Agent Card 里对 bash/edit/write/task 写 allow 时，默认降级为 ask
 SLEUTH_MCP_AGENT_TRUST_PERMISSIONS=0
 ```
@@ -166,14 +169,15 @@ sleuth --agent <card.name>
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `name` | string | Agent 名（`--agent` / HTTP `agent`） |
+| `name` | string | Agent id（`--agent` / HTTP `agent`） |
 
 **常用可选**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
+| `title` | string | 展示名称（前端列表用；缺省则回退为 `name`） |
 | `prompt` | string | 系统人设 / 行为约束 |
-| `description` | string | 列表展示 |
+| `description` | string | 列表副文案 / 能力说明 |
 | `mode` | string | 建议 `primary` |
 | `permission` | object | 工具名 → `allow` \| `ask` \| `deny`（用 **合格名**） |
 | `steps` | int | 默认 50 |
@@ -206,7 +210,8 @@ sleuth --agent <card.name>
 ```json
 {
   "name": "dd_analyst",
-  "description": "尽调报告检查分析师",
+  "title": "尽调报告检查分析师",
+  "description": "对银行尽职调查报告做确定性检查与中文研判。",
   "mode": "primary",
   "prompt": "你是尽调报告检查分析师……优先调用 ddcheck_run_dd_check……",
   "permission": {
@@ -233,7 +238,7 @@ sleuth --agent <card.name>
 
 ### 4.6 Agent 开发检查清单
 
-- [ ] 实现 `get_agent_card`，返回合法 JSON 且含 `name`  
+- [ ] 实现 `get_agent_card`，返回合法 JSON 且含 `name`；建议带 `title` 供前端展示  
 - [ ] 配置 `agent: true` 后 `sleuth --agent <name>` 可用  
 - [ ] `permission` 使用 `server_tool` 合格名  
 - [ ] Skill `content` 非空；与本地 Skill 同名时确认优先级符合预期  

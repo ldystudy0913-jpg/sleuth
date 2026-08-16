@@ -1,4 +1,5 @@
 ---
+title: 尽调答复框架生成助手
 description: 尽调答复框架生成助手。针对上游命中的风险点与 10 个 KYC 字段，生成供客户经理使用的四段式答复框架；最终判定由人工作出。
 mode: primary
 permission:

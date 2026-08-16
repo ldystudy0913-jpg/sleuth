@@ -4,6 +4,44 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .config import normalize_agent_key
+
+
+def _apply_live_mcp_cards(cfg, mcp_manager) -> None:
+    """Fill config + skill catalog from cards the manager already fetched."""
+    cards = getattr(mcp_manager, "agent_cards", None) or {}
+    if not cards:
+        return
+    from .mcp import apply_agent_cards_to_config
+    from .skill import get_skills, set_skills
+
+    card_skills = apply_agent_cards_to_config(
+        cfg,
+        cards,
+        server_by_agent=getattr(mcp_manager, "agent_card_servers", None) or {},
+    )
+    if not card_skills:
+        return
+    merged = dict(get_skills())
+    for sk in card_skills:
+        if sk.name not in merged:
+            merged[sk.name] = sk
+    set_skills(merged)
+
+
+# Built-in agent ids → UI title when agent.md / jsonc did not set one.
+_BUILTIN_TITLES = {
+    "build": "通用助手",
+}
+
+
+def _agent_title(ag, name: str) -> str:
+    custom = (getattr(ag, "title", None) or "").strip()
+    if custom:
+        return custom
+    key = (getattr(ag, "name", None) or name or "").strip()
+    return _BUILTIN_TITLES.get(key) or key or name
+
 
 def catalog_model_ref(cfg, alias: str) -> str:
     """Resolve catalog alias to provider/model without seeding credentials."""
@@ -43,30 +81,55 @@ def agents_payload(
     card_servers = {}
     if mcp_manager is not None:
         card_servers = dict(getattr(mcp_manager, "agent_card_servers", {}) or {})
-        for n in getattr(mcp_manager, "agent_cards", {}) or {}:
+        cards = getattr(mcp_manager, "agent_cards", {}) or {}
+        for n in cards:
             names.add(n)
+        if cards:
+            _apply_live_mcp_cards(cfg, mcp_manager)
 
     agents = []
+    seen = set()
     for name in sorted(names):
         ag = cfg.agent(name)
         if ag.hidden and not include_hidden:
             continue
-        mcp_server = card_servers.get(name) or ""
+        canon = ag.name or name
+        if canon in seen:
+            continue
+        seen.add(canon)
+        mcp_server = card_servers.get(name) or card_servers.get(ag.name or name) or ""
+        if not mcp_server:
+            for alias, canon in (getattr(cfg, "agent_aliases", None) or {}).items():
+                if canon == (ag.name or name) and alias in (getattr(cfg, "mcp_servers", None) or {}):
+                    mcp_server = alias
+                    break
         if mcp_server and mcp_manager is not None:
             available = bool(mcp_manager.is_server_connected(mcp_server))
             source = "mcp"
         else:
             available = True
             source = "local"
+        canon = ag.name or name
+        aliases = sorted(
+            {
+                a
+                for a, c in (getattr(cfg, "agent_aliases", None) or {}).items()
+                if c == canon and a != canon and a != normalize_agent_key(canon)
+            }
+        )
+        if mcp_server and mcp_server not in aliases and mcp_server != canon:
+            aliases.append(mcp_server)
         agents.append(
             {
-                "name": ag.name or name,
+                "name": canon,
+                "title": _agent_title(ag, name),
                 "description": ag.description,
                 "mode": ag.mode,
                 "hidden": bool(ag.hidden),
                 "model": ag.model,
                 "source": source,
                 "mcp_server": mcp_server or None,
+                "aliases": aliases,
                 "available": available,
             }
         )

@@ -54,6 +54,10 @@ def parse_agent_card(
     if not name:
         raise ValueError("agent card missing name")
 
+    title = data.get("title") or data.get("label")
+    if title is not None:
+        title = str(title).strip() or None
+
     prompt = data.get("prompt")
     if prompt is not None:
         prompt = str(prompt)
@@ -71,6 +75,7 @@ def parse_agent_card(
     steps = data.get("steps")
     agent = AgentConfig(
         name=name,
+        title=title,
         prompt=prompt,
         description=description,
         mode=mode,
@@ -122,6 +127,8 @@ def merge_agent_fill_empty(existing: AgentConfig, incoming: AgentConfig) -> Agen
     """Fill only unset fields on existing from incoming (local wins)."""
     if existing.prompt is None and incoming.prompt is not None:
         existing.prompt = incoming.prompt
+    if existing.title is None and incoming.title is not None:
+        existing.title = incoming.title
     if existing.description is None and incoming.description is not None:
         existing.description = incoming.description
     if existing.model is None and incoming.model is not None:
@@ -154,9 +161,13 @@ def apply_agent_cards_to_config(
             agent_cfg, skills = parse_agent_card(raw, server_name=server)
         except Exception:
             continue
-        if agent_name not in config.agents:
-            config.agents[agent_name] = agent_cfg
+        canonical = (agent_cfg.name or agent_name).strip() or agent_name
+        if canonical not in config.agents:
+            config.agents[canonical] = agent_cfg
         else:
-            merge_agent_fill_empty(config.agents[agent_name], agent_cfg)
+            merge_agent_fill_empty(config.agents[canonical], agent_cfg)
+        config.register_agent_alias(canonical, canonical)
+        config.register_agent_alias(agent_name, canonical)
+        config.register_agent_alias(server, canonical)
         all_skills.extend(skills)
     return all_skills

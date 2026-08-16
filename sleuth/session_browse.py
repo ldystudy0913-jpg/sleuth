@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence
 
 from .messages import Message
+from .session_select import skill_from_metadata
 from .title import format_local_ms
 
 _DEFAULT_PREVIEW_CHARS = 80
@@ -66,6 +67,7 @@ def build_session_list_rows(
                 "time_updated_local": format_local_ms(rec.time_updated),
                 "preview": preview,
                 "model": getattr(rec, "model", None),
+                "skill": skill_from_metadata(getattr(rec, "metadata", None)),
                 "cost": getattr(rec, "cost", 0),
                 "tokens_input": getattr(rec, "tokens_input", 0),
                 "tokens_output": getattr(rec, "tokens_output", 0),

@@ -15,7 +15,7 @@ def _parse_agent_md(text: str) -> Dict[str, Any]:
     """解析 agent.md 的 YAML frontmatter + 正文 prompt（不依赖 sleuth）。"""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
-        return {"prompt": text.strip(), "permission": {}, "description": "", "mode": "primary"}
+        return {"prompt": text.strip(), "permission": {}, "description": "", "title": "", "mode": "primary"}
     data: Dict[str, Any] = {}
     i = 1
     perm_lines: List[str] = []
@@ -48,6 +48,7 @@ def _parse_agent_md(text: str) -> Dict[str, Any]:
         permission[pk.strip()] = pv.strip()
     return {
         "description": data.get("description", ""),
+        "title": data.get("title", ""),
         "mode": data.get("mode", "primary") or "primary",
         "permission": permission,
         "prompt": prompt,
@@ -91,6 +92,7 @@ def load_agent_card(*, server_name: str = "ddcheck") -> Dict[str, Any]:
     # agent.md already uses ddcheck_* qualified names
     return {
         "name": "dd_analyst",
+        "title": parsed.get("title") or "尽调报告检查分析师",
         "description": parsed.get("description") or "尽调报告检查分析师",
         "mode": parsed.get("mode") or "primary",
         "prompt": parsed.get("prompt") or "",

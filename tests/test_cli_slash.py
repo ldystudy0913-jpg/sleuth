@@ -59,9 +59,37 @@ class CatalogPayloadTests(unittest.TestCase):
         by_name = {a["name"]: a for a in payload["agents"]}
         self.assertTrue(by_name["build"]["available"])
         self.assertEqual(by_name["build"]["source"], "local")
+        self.assertEqual(by_name["build"]["title"], "通用助手")
+        self.assertEqual(by_name["dd_analyst"]["title"], "dd_analyst")
         self.assertFalse(by_name["dd_analyst"]["available"])
         self.assertEqual(by_name["dd_analyst"]["source"], "mcp")
         self.assertEqual(by_name["dd_analyst"]["mcp_server"], "dd")
+
+    def test_agents_payload_fills_card_after_hot_connect(self):
+        cfg = Config(
+            agents={"build": AgentConfig(name="build")},
+            default_agent="build",
+        )
+        mgr = MagicMock()
+        mgr.agent_cards = {
+            "dd_analyst": {
+                "name": "dd_analyst",
+                "title": "尽调报告检查分析师",
+                "description": "尽调报告检查",
+                "mode": "primary",
+                "prompt": "you are dd analyst",
+            }
+        }
+        mgr.agent_card_servers = {"dd_analyst": "ddcheck"}
+        mgr.is_server_connected.return_value = True
+        payload = agents_payload(cfg, mcp_manager=mgr)
+        row = {a["name"]: a for a in payload["agents"]}["dd_analyst"]
+        self.assertTrue(row["available"])
+        self.assertEqual(row["source"], "mcp")
+        self.assertEqual(row["description"], "尽调报告检查")
+        self.assertEqual(row["title"], "尽调报告检查分析师")
+        self.assertEqual(cfg.agents["dd_analyst"].description, "尽调报告检查")
+        self.assertEqual(cfg.agents["dd_analyst"].title, "尽调报告检查分析师")
 
     def test_mcp_status_dict_on_error(self):
         with patch("sleuth.catalog.get_manager", side_effect=RuntimeError("boom"), create=True):

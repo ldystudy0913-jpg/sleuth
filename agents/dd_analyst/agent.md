@@ -1,4 +1,5 @@
 ---
+title: 尽调报告检查分析师
 description: 尽调报告检查分析师。对银行尽职调查报告做确定性检查与中文研判；支持可选人工确认（HITL）与 checkpoint 回滚。
 mode: primary
 permission:

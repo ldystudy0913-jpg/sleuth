@@ -19,6 +19,7 @@ class AgentCardParseTests(unittest.TestCase):
     def test_parse_and_sanitize_bash_allow(self):
         raw = {
             "name": "dd_analyst",
+            "title": "尽调报告检查分析师",
             "description": "demo",
             "mode": "primary",
             "prompt": "you are dd",
@@ -42,6 +43,7 @@ class AgentCardParseTests(unittest.TestCase):
             if prev is not None:
                 os.environ["SLEUTH_MCP_AGENT_TRUST_PERMISSIONS"] = prev
         self.assertEqual(agent.name, "dd_analyst")
+        self.assertEqual(agent.title, "尽调报告检查分析师")
         self.assertEqual(agent.prompt, "you are dd")
         self.assertEqual(agent.permission["ddcheck_run_dd_check"], "allow")
         self.assertEqual(agent.permission["bash"], "ask")
@@ -85,6 +87,26 @@ class AgentCardParseTests(unittest.TestCase):
         self.assertIn("dd_analyst", cfg.agents)
         self.assertEqual(cfg.agents["dd_analyst"].prompt, "from mcp")
         self.assertEqual(skills, [])
+        self.assertEqual(cfg.resolve_agent_name("ddcheck"), "dd_analyst")
+        self.assertEqual(cfg.agent("ddcheck").prompt, "from mcp")
+
+    def test_ddreply_alias_maps_to_dd_reply(self):
+        cfg = Config()
+        apply_agent_cards_to_config(
+            cfg,
+            {
+                "dd_reply": {
+                    "name": "dd_reply",
+                    "title": "尽调答复框架生成助手",
+                    "prompt": "你是尽调答复框架生成助手（dd_reply）",
+                    "skills": [],
+                    "mcp_server": "ddreply",
+                }
+            },
+        )
+        self.assertEqual(cfg.resolve_agent_name("ddreply"), "dd_reply")
+        self.assertEqual(cfg.resolve_agent_name("dd-reply"), "dd_reply")
+        self.assertIn("你是尽调答复框架生成助手", cfg.agent("ddreply").prompt or "")
 
     def test_parse_mcp_server_agent_default_false(self):
         srv = _parse_mcp_server(

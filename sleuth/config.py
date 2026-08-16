@@ -13,9 +13,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+def normalize_agent_key(name: str) -> str:
+    """Collapse separators so ``ddreply``, ``dd_reply``, ``dd-reply`` match."""
+    return "".join(c for c in (name or "").strip().lower() if c not in "-_")
+
+
 @dataclass
 class AgentConfig:
     name: str = "build"
+    title: Optional[str] = None
     prompt: Optional[str] = None
     model: Optional[str] = None
     steps: int = 50
@@ -25,6 +31,10 @@ class AgentConfig:
     hidden: bool = False
 
     def merge(self, other: Dict[str, Any]) -> "AgentConfig":
+        if "title" in other and other["title"] is not None:
+            title = str(other["title"]).strip()
+            if title:
+                self.title = title
         if "prompt" in other and other["prompt"] is not None:
             self.prompt = other["prompt"]
         if "model" in other and other["model"] is not None:
@@ -115,6 +125,8 @@ class Config:
     default_agent: str = "build"
     user_id: str = "local"
     agents: Dict[str, AgentConfig] = field(default_factory=dict)
+    # Extra lookup keys → canonical agent name (MCP server id, punctuation variants).
+    agent_aliases: Dict[str, str] = field(default_factory=dict)
     providers: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     permission: Dict[str, Any] = field(default_factory=dict)
     instructions: List[str] = field(default_factory=list)
@@ -129,6 +141,8 @@ class Config:
     mcp_timeout: Dict[str, int] = field(
         default_factory=lambda: {"startup": 30_000, "request": 120_000}
     )
+    # Background retry for servers that were down at startup. 0 = off (manual /mcp reload only).
+    mcp_retry_seconds: int = 15
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -137,9 +151,47 @@ class Config:
     # Scrub PII (ID / mobile / bank / password / labeled address) on outputs.
     output_desensitize: bool = True
 
+    def resolve_agent_name(self, name: Optional[str] = None) -> str:
+        """Map a request/CLI name to the registered agent id.
+
+        Accepts MCP server keys (``ddreply`` → ``dd_reply``) and punctuation
+        variants. Unknown names are returned unchanged.
+        """
+        raw = (name or self.default_agent or "build").strip()
+        if not raw:
+            return (self.default_agent or "build").strip() or "build"
+        if raw in self.agents:
+            return raw
+        aliases = self.agent_aliases or {}
+        nkey = normalize_agent_key(raw)
+        for candidate in (raw, nkey):
+            if candidate and candidate in aliases:
+                canon = aliases[candidate]
+                if canon in self.agents:
+                    return canon
+        for key in self.agents:
+            if normalize_agent_key(key) == nkey:
+                return key
+        if raw in aliases:
+            return aliases[raw]
+        return raw
+
     def agent(self, name: Optional[str] = None) -> AgentConfig:
-        name = name or self.default_agent
-        return self.agents.get(name, AgentConfig(name=name))
+        resolved = self.resolve_agent_name(name)
+        found = self.agents.get(resolved)
+        if found is not None:
+            return found
+        return AgentConfig(name=resolved)
+
+    def register_agent_alias(self, alias: str, canonical: str) -> None:
+        alias = (alias or "").strip()
+        canonical = (canonical or "").strip()
+        if not alias or not canonical:
+            return
+        self.agent_aliases[alias] = canonical
+        nkey = normalize_agent_key(alias)
+        if nkey:
+            self.agent_aliases[nkey] = canonical
 
     def provider_options(self, provider_id: str) -> Dict[str, Any]:
         return self.providers.get(provider_id, {}).get("options", {})
@@ -311,6 +363,8 @@ class Config:
             for name, entry in servers.items():
                 if isinstance(entry, dict):
                     self.mcp_servers[name] = _parse_mcp_server(name, entry)
+        if block.get("retry_seconds") is not None:
+            self.mcp_retry_seconds = int(block["retry_seconds"])
 
     def _merge_skills(self, raw: Dict[str, Any]) -> None:
         block = raw.get("skills")
@@ -736,6 +790,9 @@ def _apply_env(cfg: Config) -> None:
     request = _env_int("SLEUTH_MCP_TIMEOUT_REQUEST")
     if request is not None:
         cfg.mcp_timeout["request"] = request
+    retry_s = _env_int("SLEUTH_MCP_RETRY_SECONDS")
+    if retry_s is not None:
+        cfg.mcp_retry_seconds = retry_s
 
     # Multi-provider credentials: SLEUTH_PROVIDERS JSON
     # {"deepseek":{"apiKey":"sk-...","baseURL":"https://..."}, "qwen":{...}}

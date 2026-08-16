@@ -11,6 +11,8 @@
   "subagent_depth": 1,
   "default_agent": "build",
   "max_steps": 50,
+  // MCP Agent 的展示名写在各包 agent.md（get_agent_card.title），不必在此重复。
+  // 未配 title 时，内置 build 对外显示为「通用助手」。
   "agent": {
     "build": {
       "prompt": "You are a senior software engineer working in the user's codebase.",
@@ -28,6 +30,7 @@
   },
   "mcp": {
     "timeout": { "startup": 30000, "request": 120000 },
+    "retry_seconds": 15,
     "servers": {
       // "mytools": {
       //   "type": "remote",

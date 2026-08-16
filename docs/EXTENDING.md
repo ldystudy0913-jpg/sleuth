@@ -267,7 +267,8 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
 {
   "agent": {
     "reviewer": {
-      "description": "只读评审",
+      "title": "只读评审",
+      "description": "只读评审代码，不改文件",
       "mode": "primary",
       "permission": {
         "edit": "deny",

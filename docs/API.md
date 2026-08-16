@@ -4,7 +4,7 @@
 > 默认基址：`http://127.0.0.1:8787`（`SLEUTH_SERVER_HOST` / `SLEUTH_SERVER_PORT`）  
 > Content-Type：除非另有说明，请求/响应均为 `application/json; charset=utf-8`
 
-CLI 交互与下列能力对齐（斜杠命令）：`/sessions` `/session` `/model` `/agent` `/mcp` `/skills` `/usage` `/yolo` — 目录字段与 `GET /v1/models|agents|mcp|skills` 同源（[`sleuth/catalog.py`](../sleuth/catalog.py)）。
+CLI 交互与下列能力对齐（斜杠命令）：`/sessions` `/session` `/model` `/agent` `/mcp` `/skill` `/skills` `/usage` `/yolo` — 目录字段与 `GET /v1/models|agents|mcp|skills` 同源（[`sleuth/catalog.py`](../sleuth/catalog.py)）。
 
 ---
 
@@ -72,7 +72,7 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 - **会话主键**：创建/列表/详情响应字段名为 **`id`**；发消息回包与 SSE 事件字段名为 **`session_id`**。二者是**同一值**（如 `sess_a1b2…`），前端统一存成 `sessionId` 即可。多会话时所有读写必须带该 id（URL 路径），并固定 `X-User-Id`。
 - **同步发消息**：`POST .../messages` 会阻塞到整轮 Agent（含工具调用）跑完再返回整包 JSON。前端需设足够长的超时（建议 ≥ 5–15 分钟），并做好 loading。
 - **流式发消息**：`POST .../messages/stream` 使用 **SSE**（`text/event-stream`），边跑边推 `text` / 工具事件，最后以 `done` 收尾。**每条 `data` 事件均含 `session_id`**。原生 `EventSource` 只支持 GET，请用 `fetch` + `ReadableStream`。
-- **模型 / Agent 选择**：用 `GET /v1/models`、`GET /v1/agents` 拉目录；切换时在创建或发消息 body 带 `model` / `agent`（**粘滞**：写入会话后，后续轮次可不带，继续沿用）。MCP 晚启动时先 `POST /v1/mcp/reload` 再拉 agents。
+- **模型 / Agent / Skill 选择**：每次创建会话和发消息都应带 `agent`、`model`、`skill`。未选 agent / model 时传 `GET /v1/agents`、`GET /v1/models` 的 `default`；未选 skill、或当前不是默认 agent 时传 `skill: ""`。Skill **仅当 `agent` 等于默认 agent** 时可选并注入 SKILL.md；专用 agent 带非空 `skill` 返回 `400`。字段省略时兼容旧客户端（沿用会话已存值），前端主路径不要依赖省略。MCP 可晚于 Sleuth 启动，后台会重试；也可 `POST /v1/mcp/reload` 立即重连后再拉 agents。
 - **无 CORS 中间件**：浏览器跨域需自行在网关加 CORS，或同域反代。
 - **会话 id** 形如：`sess_` + 24 位 hex（例：`sess_a1b2c3d4e5f678901234abcd`）。
 - 时间字段：
@@ -122,7 +122,7 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `GET` | `/v1/mcp` | 无 | MCP 服务连接状态 |
 | `POST` | `/v1/mcp/reload` | Admin | 热重载 MCP（重连 + 刷新 Agent Card） |
 | `GET` | `/v1/users/{user_id}/usage` | 本人或 Admin | 用量汇总 |
-| `GET` | `/v1/skills` | 无 | Skill 列表（只读展示） |
+| `GET` | `/v1/skills` | 无 | Skill 目录（默认 agent 下发消息 body 的 `skill` 用此 `name`） |
 | `POST` | `/v1/skills/reload` | Admin | 强制重载 Skill |
 
 ---
@@ -159,9 +159,10 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
 | `user_id` | string | 否 | 见 §2.1 | 覆盖 header 中的用户 |
-| `agent` | string | 否 | 服务端 `default_agent`（常为 `build`） | Agent 名，如 `dd_analyst` |
+| `agent` | string | 否 | 服务端 `default_agent`（常为 `build`） | Agent **id**（`GET /v1/agents` 的 `name`）。未选时传该接口的 `default` |
 | `yolo` | boolean | 否 | `true` | `true` 时自动批准工具调用 |
-| `model` | string | 否 | 配置默认模型 | 创建时切换模型 |
+| `model` | string | 否 | 配置默认模型 | 未选时传 `GET /v1/models` 的 `default` |
+| `skill` | string | 否 | `""`（无绑定） | 仅默认 agent 可非空；未选或专用 agent 时传 `""` |
 
 **请求示例**
 
@@ -172,9 +173,10 @@ Content-Type: application/json
 X-User-Id: alice
 
 {
-  "agent": "dd_analyst",
+  "agent": "build",
   "yolo": true,
-  "model": "qwen-max"
+  "model": "qwen-max",
+  "skill": ""
 }
 ```
 
@@ -185,12 +187,13 @@ X-User-Id: alice
   "id": "sess_a1b2c3d4e5f678901234abcd",
   "user_id": "alice",
   "title": "New session - 2026-08-08 18:09:12",
-  "agent": "dd_analyst",
+  "agent": "build",
   "model": {
     "ref": "qwen-max/qwen-max",
     "id": "qwen-max",
     "providerID": "qwen-max"
-  }
+  },
+  "skill": null
 }
 ```
 
@@ -201,6 +204,8 @@ X-User-Id: alice
 | 状态 | body |
 |------|------|
 | `400` | `{ "error": "invalid model: ..." }` |
+| `400` | `{ "error": "invalid skill: ..." }` |
+| `400` | `{ "error": "skill only allowed when agent is the default agent" }` |
 
 ---
 
@@ -232,7 +237,7 @@ X-User-Id: alice
     "title": "尽调报告检查 - XX银行",
     "agent": "dd_analyst",
     "model": { "id": "qwen-max", "providerID": "qwen-max" },
-    "cost": 0.0123,
+    "skill": null,
     "tokens_input": 1200,
     "tokens_output": 340,
     "time_updated": 1723123456789,
@@ -267,6 +272,7 @@ X-User-Id: alice
   "title": "尽调报告检查 - XX银行",
   "agent": "dd_analyst",
   "model": { "id": "qwen-max", "providerID": "qwen-max" },
+  "skill": null,
   "cost": 0.045,
   "tokens": {
     "input": 5000,
@@ -327,9 +333,10 @@ X-User-Id: alice
 |------|------|------|------|------|
 | `prompt` | string | 二选一 | — | 用户输入（推荐） |
 | `text` | string | 二选一 | — | 与 `prompt` 等价，兼容字段 |
-| `agent` | string | 否 | 会话原 agent | 本轮可覆盖 |
+| `agent` | string | 否 | 未选时传默认 agent | 每轮带当前选择器值 |
 | `yolo` | boolean | 否 | `true` | 是否自动批准工具 |
-| `model` | string | 否 | 会话当前模型 | 本轮前切换模型并持久化 |
+| `model` | string | 否 | 未选时传默认模型 | 每轮带当前选择器值 |
+| `skill` | string | 否 | `""` | 仅默认 agent 可非空；否则传 `""` |
 
 **请求示例**
 
@@ -340,6 +347,9 @@ X-User-Id: alice
 
 {
   "prompt": "请检查下面这份尽调报告：\n{...}",
+  "agent": "build",
+  "model": "qwen-max",
+  "skill": "dd-report-check",
   "yolo": true
 }
 ```
@@ -351,11 +361,13 @@ X-User-Id: alice
   "session_id": "sess_a1b2c3d4e5f678901234abcd",
   "text": "综合得分 72（等级 C）；主要问题：…",
   "title": "尽调报告检查 - XX银行",
+  "agent": "build",
   "model": {
     "ref": "qwen-max/qwen-max",
     "id": "qwen-max",
     "providerID": "qwen-max"
   },
+  "skill": "dd-report-check",
   "usage": {
     "input": 1200,
     "output": 400,
@@ -373,6 +385,7 @@ X-User-Id: alice
 | `usage` | **本轮最后一次**模型调用用量（非整会话累加） |
 | `cost` | 会话累计费用估算 |
 | `title` | 可能在首轮后更新为语义标题 |
+| `skill` | 当前绑定的 skill 名；未选为 `null` |
 
 **错误**
 
@@ -381,6 +394,8 @@ X-User-Id: alice
 | `400` | `{ "error": "invalid json" }` |
 | `400` | `{ "error": "prompt required" }` |
 | `400` | `{ "error": "invalid model: ..." }` |
+| `400` | `{ "error": "invalid skill: ..." }` |
+| `400` | `{ "error": "skill only allowed when agent is the default agent" }` |
 | `404` | `{ "error": "not found" }` |
 
 ---
@@ -399,7 +414,7 @@ X-User-Id: alice
 | `X-User-Id` | 是 | 须与会话用户一致 |
 | `Accept: text/event-stream` | 建议 | |
 
-**Body**：同 §4.5（`prompt` / `text` / `agent` / `yolo` / `model`）。
+**Body**：同 §4.5（每轮带 `prompt` / `agent` / `model` / `skill`）。
 
 **成功时 HTTP `200`**，`Content-Type: text/event-stream`。
 
@@ -439,11 +454,13 @@ data: {"type":"text","delta":"你好","session_id":"sess_a1b2c3d4e5f678901234abc
   "session_id": "sess_a1b2c3d4e5f678901234abcd",
   "text": "综合得分 72（等级 C）；主要问题：…",
   "title": "尽调报告检查 - XX银行",
+  "agent": "build",
   "model": {
     "ref": "qwen-max/qwen-max",
     "id": "qwen-max",
     "providerID": "qwen-max"
   },
+  "skill": "dd-report-check",
   "usage": {
     "input": 1200,
     "output": 400,
@@ -455,7 +472,7 @@ data: {"type":"text","delta":"你好","session_id":"sess_a1b2c3d4e5f678901234abc
 }
 ```
 
-与同步接口字段对齐：`text` / `title` / `model` / `usage` / `cost`。
+与同步接口字段对齐：`text` / `title` / `agent` / `model` / `skill` / `usage` / `cost`。
 
 #### 示例事件流（示意）
 
@@ -579,7 +596,7 @@ async function streamMessage(base, sessionId, userId, prompt) {
 |------|------|------|
 | `include_hidden` | `false` | `1` / `true` / `yes` 时包含 `hidden` agent |
 
-**说明**：枚举本地 + MCP Agent Card 注册的 agent。发消息 body 带 `agent` 会**切换并粘滞**到会话；不带则沿用会话当前 agent。
+**说明**：枚举本地 + MCP Agent Card 注册的 agent。列表用 `title` 展示、用 `name` 切换。`default` 即主 agent；**仅该 agent 允许非空 `skill`**。每轮发消息应带当前 `agent`。`ddreply` 这类 MCP 配置键会解析为 Card 上的规范名（如 `dd_reply`），切过去后系统提示词用该 agent 的人格，而不是默认 sleuth。
 
 **响应 `200`**
 
@@ -589,6 +606,7 @@ async function streamMessage(base, sessionId, userId, prompt) {
   "agents": [
     {
       "name": "build",
+      "title": "通用助手",
       "description": null,
       "mode": "all",
       "hidden": false,
@@ -599,12 +617,14 @@ async function streamMessage(base, sessionId, userId, prompt) {
     },
     {
       "name": "dd_analyst",
-      "description": "银行尽调报告智能检查",
+      "title": "尽调报告检查分析师",
+      "description": "对银行尽职调查报告做确定性检查与中文研判。",
       "mode": "primary",
       "hidden": false,
       "model": null,
       "source": "mcp",
       "mcp_server": "ddcheck",
+      "aliases": ["ddcheck"],
       "available": true
     }
   ]
@@ -613,8 +633,12 @@ async function streamMessage(base, sessionId, userId, prompt) {
 
 | 字段 | 说明 |
 |------|------|
+| `name` | Agent id；创建会话 / 发消息 body 的 `agent` 用此值 |
+| `title` | 展示名称。MCP Agent 来自 `agent.md` / Agent Card；未配置时 `build` 为「通用助手」，其它回退为 `name` |
+| `description` | 列表副文案 / 能力说明 |
 | `source` | `local` 或 `mcp` |
 | `mcp_server` | 来自哪个 MCP 配置键；本地为 null |
+| `aliases` | 也可用于 body `agent` 的别名（通常含 MCP 配置键） |
 | `available` | MCP 源取决于该 server 当前是否已连接；本地恒 `true` |
 
 ---
@@ -647,7 +671,7 @@ async function streamMessage(base, sessionId, userId, prompt) {
 
 **Headers**：`X-Admin-Token`（若配置了 admin token）。
 
-并行重连所有 remote MCP，刷新工具与 Agent Card。某个服务晚启动时：先 reload，再 `GET /v1/agents`。
+并行重连所有 remote MCP，刷新工具与 Agent Card。未连上的服务会按 `SLEUTH_MCP_RETRY_SECONDS` 后台重试；也可随时 reload 立即重连。
 
 单服务连接超时可由 `SLEUTH_MCP_TIMEOUT_PER_SERVER`（ms）控制；一个挂起不会阻塞其它服务。
 
@@ -695,6 +719,8 @@ async function streamMessage(base, sessionId, userId, prompt) {
 
 触发懒惰刷新逻辑（受 `SLEUTH_SKILLS_REFRESH_SECONDS` 影响）。
 
+默认 agent 下发消息 / 创建会话时，`skill` 填这里的 `name`；未选传 `""`。
+
 ---
 
 ### 4.10 强制重载 Skill
@@ -725,7 +751,8 @@ sequenceDiagram
   participant API as Sleuth_HTTP
   FE->>API: GET /v1/models
   FE->>API: GET /v1/agents
-  FE->>API: POST /v1/sessions (X-User-Id agent model)
+  FE->>API: GET /v1/skills
+  FE->>API: POST /v1/sessions (X-User-Id agent model skill)
   API-->>FE: id equals sess_xxx
   FE->>API: GET /v1/sessions (列表页)
   API-->>FE: id title preview time_updated_local
@@ -737,11 +764,11 @@ sequenceDiagram
 ```
 
 1. 登录后固定 `X-User-Id`。
-2. 拉 `GET /v1/models`、`GET /v1/agents` 做新建会话选择器（Skill 用 `GET /v1/skills` 只读展示即可）。
-3. 新对话：`POST /v1/sessions`（可选 `agent` / `model`）→ 存返回的 **`id`**（即后续的 `session_id`）。
+2. 拉 `GET /v1/models`、`GET /v1/agents`、`GET /v1/skills` 做选择器。Skill 选择器仅在当前 agent 等于 `GET /v1/agents` 的 `default` 时启用。
+3. 新对话：`POST /v1/sessions`，body 带 `agent` / `model` / `skill`（未选 skill 传 `""`）→ 存返回的 **`id`**。
 4. 历史列表：`GET /v1/sessions`；详情：`GET /v1/sessions/{id}`。
-5. 发消息（推荐流式）：`POST .../messages/stream`；按 `session_id` 写入对应会话状态；拼 `text.delta`，以 `done.text` 对齐。
-6. 中途切模型 / agent：发消息 body 带 `model` / `agent` **一次**即可（写入会话后粘滞）；MCP 新上线时先 `POST /v1/mcp/reload`。
+5. 发消息（推荐流式）：`POST .../messages/stream`，**每轮仍带**当前 `agent` / `model` / `skill`；拼 `text.delta`，以 `done.text` 对齐。
+6. 切到专用 agent 时禁用 skill 并传 `skill: ""`。MCP 晚启动会自动重试；也可 `POST /v1/mcp/reload` 立即重连。
 
 ---
 
@@ -755,11 +782,11 @@ $h = @{ "X-User-Id" = "alice"; "Content-Type" = "application/json" }
 Invoke-RestMethod "$base/health"
 
 # 创建
-$s = Invoke-RestMethod -Method POST "$base/v1/sessions" -Headers $h -Body '{"agent":"build","yolo":true}'
+$s = Invoke-RestMethod -Method POST "$base/v1/sessions" -Headers $h -Body '{"agent":"build","model":"qwen-max","skill":"","yolo":true}'
 $sid = $s.id
 
 # 发消息
-$body = @{ prompt = "用一句话介绍你自己" } | ConvertTo-Json
+$body = @{ prompt = "用一句话介绍你自己"; agent = "build"; model = "qwen-max"; skill = "" } | ConvertTo-Json
 Invoke-RestMethod -Method POST "$base/v1/sessions/$sid/messages" -Headers $h -Body $body
 
 # 列表

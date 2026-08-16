@@ -84,18 +84,47 @@ def reload_mcp(config: Optional[Config] = None, workdir: Optional[Path] = None) 
 
 def resync_session_mcp(session: Session) -> Dict[str, Any]:
     """Reload MCP and refresh tools on a live Session (CLI long-lived process)."""
-    from .mcp import bridge_tools, get_manager
+    from .mcp import get_manager
 
     result = reload_mcp(session.config, session.workdir)
     mgr = get_manager(session.config)
+    _bind_session_mcp(session, mgr)
+    return result
+
+
+def sync_session_mcp(session: Session) -> bool:
+    """If background retry connected new servers, attach tools/cards to this session."""
+    from .mcp import get_manager
+
+    mgr = getattr(session, "_mcp_manager", None)
+    if mgr is None:
+        try:
+            mgr = get_manager(session.config)
+        except Exception:
+            return False
+        session._mcp_manager = mgr
+    names = set(mgr.tools.keys())
+    prev = getattr(session, "_mcp_tool_names", set()) or set()
+    cards = set(mgr.agent_cards.keys())
+    prev_cards = getattr(session, "_mcp_card_names", set()) or set()
+    if names == prev and cards == prev_cards:
+        return False
+    _bind_session_mcp(session, mgr)
+    return True
+
+
+def _bind_session_mcp(session: Session, mgr) -> None:
+    from .mcp import bridge_tools
+
     prev = getattr(session, "_mcp_tool_names", set()) or set()
     for name in prev:
         session.registry._tools.pop(name, None)
     tools = bridge_tools(mgr)
     session.registry.register_many(tools)
     session._mcp_tool_names = {t.name for t in tools}
+    session._mcp_card_names = set(mgr.agent_cards.keys())
     session._mcp_manager = mgr
-    return result
+    _apply_mcp_cards(session.config, mgr)
 
 
 def build_permission(config: Config, agent_name: str, *, yolo: bool = False) -> Permission:
@@ -127,14 +156,16 @@ def build_session(
     config = config or load(workdir)
     if user_id:
         config.user_id = user_id
-    requested_agent = (prefer_agent or agent_name or config.default_agent or "build").strip()
-    provider, model_id = resolve_model(config, requested_agent)
-
+    renderer = renderer or NullRenderer()
     if store is None:
         store = create_store(config)
-    renderer = renderer or NullRenderer()
     registry, mcp_manager = build_registry(config, workdir=workdir, renderer=renderer)
 
+    raw_prefer = (prefer_agent or "").strip() or None
+    requested_agent = config.resolve_agent_name(
+        raw_prefer or agent_name or config.default_agent or "build"
+    )
+    provider, model_id = resolve_model(config, requested_agent)
     permission = build_permission(config, requested_agent, yolo=yolo)
 
     def _attach(sess: Session) -> Session:
@@ -143,8 +174,10 @@ def build_session(
         sess.yolo = bool(yolo)
         if mcp_manager is not None:
             sess._mcp_tool_names = set(mcp_manager.tools.keys())
+            sess._mcp_card_names = set(mcp_manager.agent_cards.keys())
         else:
             sess._mcp_tool_names = set()
+            sess._mcp_card_names = set()
         return sess
 
     if session_id:
@@ -160,14 +193,14 @@ def build_session(
                 agent_name=requested_agent,
                 model_id=model_id,
                 renderer=renderer,
-                prefer_agent=prefer_agent,
+                prefer_agent=raw_prefer,
             )
         )
-        if prefer_agent:
-            if sess.agent_name != prefer_agent:
-                sess.set_agent(prefer_agent, yolo=yolo)
+        if raw_prefer:
+            if sess.agent_name != requested_agent:
+                sess.set_agent(requested_agent, yolo=yolo)
             else:
-                sess.permission = build_permission(config, prefer_agent, yolo=yolo)
+                sess.permission = build_permission(config, requested_agent, yolo=yolo)
                 try:
                     sess._update_record()
                 except Exception:
@@ -191,7 +224,7 @@ def build_session(
                     agent_name=requested_agent,
                     model_id=model_id,
                     renderer=renderer,
-                    prefer_agent=prefer_agent,
+                    prefer_agent=raw_prefer,
                 )
             )
 

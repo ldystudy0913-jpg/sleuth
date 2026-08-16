@@ -10,7 +10,7 @@ _PACK_ROOT = Path(__file__).resolve().parents[1]
 def _parse_agent_md(text: str) -> Dict[str, Any]:
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
-        return {"prompt": text.strip(), "permission": {}, "description": "", "mode": "primary"}
+        return {"prompt": text.strip(), "permission": {}, "description": "", "title": "", "mode": "primary"}
     data: Dict[str, Any] = {}
     i = 1
     perm_lines: List[str] = []
@@ -43,6 +43,7 @@ def _parse_agent_md(text: str) -> Dict[str, Any]:
         permission[pk.strip()] = pv.strip()
     return {
         "description": data.get("description", ""),
+        "title": data.get("title", ""),
         "mode": data.get("mode", "primary") or "primary",
         "permission": permission,
         "prompt": prompt,
@@ -80,6 +81,7 @@ def load_agent_card(*, server_name: str = "ddreply") -> Dict[str, Any]:
         )
     return {
         "name": "dd_reply",
+        "title": parsed.get("title") or "尽调答复框架生成助手",
         "description": parsed.get("description") or "尽调答复框架生成助手",
         "mode": parsed.get("mode") or "primary",
         "prompt": parsed.get("prompt") or "",

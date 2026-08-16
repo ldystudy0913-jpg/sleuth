@@ -97,6 +97,7 @@ class Session:
     parent_id: Optional[str] = None
     user_id: str = "local"
     yolo: bool = False  # auto-approve tools; CLI default False, server often True
+    skill_name: Optional[str] = None  # session-pinned skill; only for default agent
 
     # lifecycle
     status: str = "idle"  # "idle" | "busy" | "retry"
@@ -153,18 +154,74 @@ class Session:
         """Switch agent for subsequent turns and persist."""
         from .app import build_permission
 
-        agent = (name or "").strip()
+        agent = self.config.resolve_agent_name(name)
         if not agent:
             raise ValueError("agent name required")
         if yolo is not None:
             self.yolo = bool(yolo)
         self.agent_name = agent
         self.permission = build_permission(self.config, agent, yolo=self.yolo)
+        if not self.is_default_agent():
+            self.skill_name = None
         try:
             self._update_record()
         except Exception as exc:
             self.renderer.on_error(f"persist agent failed: {exc}")
         return agent
+
+    def is_default_agent(self) -> bool:
+        default = (getattr(self.config, "default_agent", None) or "build").strip()
+        return (self.agent_name or "").strip() == default
+
+    def reset_model(self) -> str:
+        """Restore the current agent's default model (not the sticky override)."""
+        import os
+
+        from .config import parse_model_ref
+        from .provider.factory import build_provider
+
+        agent = self.config.agent(self.agent_name)
+        raw = agent.model or os.environ.get("SLEUTH_MODEL") or os.environ.get("OPENCODE_MODEL")
+        if not raw:
+            raise ValueError("no default model configured")
+        ref = self.config.prepare_model_ref(str(raw))
+        provider_id, model_id = parse_model_ref(ref)
+        if not model_id:
+            raise ValueError(f"invalid model ref: {ref!r}")
+        self.config.model = ref
+        self.provider = build_provider(self.config, provider_id)
+        self.model_id = model_id
+        self._model_catalog_key = ""
+        try:
+            self._update_record()
+        except Exception as exc:
+            self.renderer.on_error(f"persist model failed: {exc}")
+        return ref
+
+    def set_skill(self, name: Optional[str]) -> Optional[str]:
+        """Pin or clear a session skill. Non-empty pins require the default agent."""
+        raw = (name or "").strip()
+        if raw.lower() in ("", "off", "none", "default"):
+            self.skill_name = None
+            try:
+                self._update_record()
+            except Exception as exc:
+                self.renderer.on_error(f"persist skill failed: {exc}")
+            return None
+        if not self.is_default_agent():
+            raise ValueError("skill only allowed when agent is the default agent")
+        from .skill import get_skill, get_skills
+
+        info = get_skill(raw)
+        if info is None:
+            available = ", ".join(sorted(get_skills())) or "none"
+            raise ValueError(f"unknown skill: {raw!r}. available: {available}")
+        self.skill_name = info.name
+        try:
+            self._update_record()
+        except Exception as exc:
+            self.renderer.on_error(f"persist skill failed: {exc}")
+        return self.skill_name
 
     def set_yolo(self, enabled: bool) -> bool:
         """Toggle auto-approve and rebuild permission for the current agent."""
@@ -196,8 +253,10 @@ class Session:
         self._abort.clear()
         # Lazy TTL skill refresh once per user turn; catalog stays frozen for this loop.
         from .skill import ensure_skills_fresh
+        from .app import sync_session_mcp
 
         ensure_skills_fresh(self.config, self.workdir)
+        sync_session_mcp(self)
         self._ensure_persisted()
         user_msg = Message.user_text(user_text, agent=self.agent_name)
         self.messages.append(user_msg)
@@ -255,6 +314,13 @@ class Session:
                 pass
         return self.provider, resolve_title_model(self.config, self.model_id)
 
+    def _pinned_skill_prompt(self) -> str:
+        if not self.skill_name or not self.is_default_agent():
+            return ""
+        from .tools.skill_tool import pinned_skill_system_block
+
+        return pinned_skill_system_block(self.skill_name, session=self)
+
     def _maybe_title(self) -> None:
         if self.parent_id:
             return
@@ -309,6 +375,9 @@ class Session:
             tool_specs=tools,
             guardrails=self.config.guardrails,
         )
+        pinned = self._pinned_skill_prompt()
+        if pinned:
+            system = system + "\n\n" + pinned
 
         for step in range(1, max_steps + 1):
             self.renderer.on_step(step, max_steps)
@@ -535,6 +604,8 @@ class Session:
             meta = {"version": "0.1.0"}
             if self.parent_id:
                 meta["parent_id"] = self.parent_id
+            if self.skill_name:
+                meta["skill"] = self.skill_name
             rec = SessionRecord(
                 id=self.id,
                 directory=str(self.workdir),
@@ -579,6 +650,10 @@ class Session:
         existing.metadata["status"] = self.status
         if self.parent_id:
             existing.metadata["parent_id"] = self.parent_id
+        if self.skill_name:
+            existing.metadata["skill"] = self.skill_name
+        else:
+            existing.metadata.pop("skill", None)
         self.store.update_session(existing)
 
     @classmethod
@@ -592,8 +667,12 @@ class Session:
         rec = store.get_session(session_id_value)
         messages = store.load_messages(session_id_value) if rec else []
         parent_id = None
+        stored_skill = None
         if rec and rec.metadata:
             parent_id = rec.metadata.get("parent_id")
+            raw_sk = rec.metadata.get("skill")
+            if isinstance(raw_sk, str) and raw_sk.strip():
+                stored_skill = raw_sk.strip()
         user_id = (rec.user_id if rec else None) or getattr(config, "user_id", "local") or "local"
 
         catalog_key = ""
@@ -624,9 +703,14 @@ class Session:
                     pass
 
         if prefer_agent:
-            resolved_agent = prefer_agent.strip()
+            resolved_agent = config.resolve_agent_name(prefer_agent)
         else:
-            resolved_agent = (rec.agent if rec and rec.agent else agent_name) or agent_name
+            stored = (rec.agent if rec and rec.agent else agent_name) or agent_name
+            resolved_agent = config.resolve_agent_name(stored)
+
+        default_agent = (getattr(config, "default_agent", None) or "build").strip()
+        if stored_skill and resolved_agent != default_agent:
+            stored_skill = None
 
         sess = cls(
             provider=provider, registry=registry, config=config,
@@ -638,6 +722,7 @@ class Session:
             title=(rec.title if rec else default_title()),
             parent_id=parent_id,
             user_id=user_id,
+            skill_name=stored_skill,
         )
         sess._model_catalog_key = catalog_key
         if rec:

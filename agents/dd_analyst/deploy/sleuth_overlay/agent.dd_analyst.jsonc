@@ -3,6 +3,7 @@
   // Usage: py -3.12 -m sleuth --agent dd_analyst
   "agent": {
     "dd_analyst": {
+      "title": "尽调报告检查分析师",
       "description": "尽调报告检查分析师：优先调用 MCP ddcheck_run_dd_check，再中文归纳。",
       "mode": "primary",
       "permission": {

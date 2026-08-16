@@ -9,6 +9,7 @@ from ..app import build_session, reload_mcp, reload_skills
 from ..catalog import agents_payload, mcp_status_dict, models_payload, skills_payload
 from ..config import load
 from ..session import NullRenderer
+from ..session_select import apply_session_selectors, skill_from_metadata
 from ..storage.factory import create_store
 from ..util.env import load_dotenv
 from .streaming import StreamingRenderer, run_prompt_in_thread, sse_pack
@@ -46,6 +47,13 @@ def _session_model_payload(sess) -> Dict[str, str]:
     }
 
 
+def _session_skill_payload(sess) -> Optional[str]:
+    name = getattr(sess, "skill_name", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
 def create_app(workdir: Optional[Path] = None):
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -71,21 +79,19 @@ def create_app(workdir: Optional[Path] = None):
         except Exception:
             body = {}
         user_id = body.get("user_id") or _user_id(request)
-        agent = body.get("agent") or config.default_agent
+        cfg = load(workdir)
         sess = build_session(
-            config=load(workdir),
+            config=cfg,
             workdir=workdir,
-            agent_name=agent,
+            agent_name=cfg.default_agent,
             user_id=user_id,
             yolo=bool(body.get("yolo", True)),
             renderer=NullRenderer(),
             store=store,
         )
-        if body.get("model"):
-            try:
-                sess.set_model(str(body["model"]))
-            except Exception as exc:
-                return _json_response({"error": f"invalid model: {exc}"}, 400)
+        err = apply_session_selectors(sess, body, cfg)
+        if err:
+            return _json_response({"error": err}, 400)
         sess._ensure_persisted()
         return _json_response(
             {
@@ -94,6 +100,7 @@ def create_app(workdir: Optional[Path] = None):
                 "title": sess.title,
                 "agent": sess.agent_name,
                 "model": _session_model_payload(sess),
+                "skill": _session_skill_payload(sess),
             }
         )
 
@@ -111,6 +118,7 @@ def create_app(workdir: Optional[Path] = None):
                     "title": r["title"],
                     "agent": r["agent"],
                     "model": r["model"],
+                    "skill": r.get("skill"),
                     "cost": r["cost"],
                     "tokens_input": r["tokens_input"],
                     "tokens_output": r["tokens_output"],
@@ -139,6 +147,7 @@ def create_app(workdir: Optional[Path] = None):
                 "title": rec.title,
                 "agent": rec.agent,
                 "model": rec.model,
+                "skill": skill_from_metadata(rec.metadata),
                 "cost": rec.cost,
                 "tokens": {
                     "input": rec.tokens_input,
@@ -182,23 +191,19 @@ def create_app(workdir: Optional[Path] = None):
             return _json_response({"error": err}, 400)
 
         cfg = load(workdir)
-        prefer = str(body["agent"]).strip() if body.get("agent") else None
         sess = build_session(
             config=cfg,
             workdir=workdir,
-            agent_name=prefer or rec.agent,
-            prefer_agent=prefer,
+            agent_name=rec.agent or cfg.default_agent,
             user_id=user_id,
             session_id=sid,
             yolo=bool(body.get("yolo", True)),
             renderer=NullRenderer(),
             store=store,
         )
-        if body.get("model"):
-            try:
-                sess.set_model(str(body["model"]))
-            except Exception as exc:
-                return _json_response({"error": f"invalid model: {exc}"}, 400)
+        err = apply_session_selectors(sess, body, cfg)
+        if err:
+            return _json_response({"error": err}, 400)
         text = sess.prompt(str(prompt))
         return _json_response(
             {
@@ -207,6 +212,7 @@ def create_app(workdir: Optional[Path] = None):
                 "title": sess.title,
                 "agent": sess.agent_name,
                 "model": _session_model_payload(sess),
+                "skill": _session_skill_payload(sess),
                 "usage": sess._last_usage,
                 "cost": sess._session_cost,
             }
@@ -228,24 +234,20 @@ def create_app(workdir: Optional[Path] = None):
             return _json_response({"error": err}, 400)
 
         cfg = load(workdir)
-        prefer = str(body["agent"]).strip() if body.get("agent") else None
         renderer = StreamingRenderer(session_id=sid)
         sess = build_session(
             config=cfg,
             workdir=workdir,
-            agent_name=prefer or rec.agent,
-            prefer_agent=prefer,
+            agent_name=rec.agent or cfg.default_agent,
             user_id=user_id,
             session_id=sid,
             yolo=bool(body.get("yolo", True)),
             renderer=renderer,
             store=store,
         )
-        if body.get("model"):
-            try:
-                sess.set_model(str(body["model"]))
-            except Exception as exc:
-                return _json_response({"error": f"invalid model: {exc}"}, 400)
+        err = apply_session_selectors(sess, body, cfg)
+        if err:
+            return _json_response({"error": err}, 400)
 
         run_prompt_in_thread(sess, str(prompt), renderer)
 
@@ -272,7 +274,9 @@ def create_app(workdir: Optional[Path] = None):
                     "session_id": sess.id,
                     "text": sess.last_assistant_text(),
                     "title": sess.title,
+                    "agent": sess.agent_name,
                     "model": _session_model_payload(sess),
+                    "skill": _session_skill_payload(sess),
                     "usage": dict(sess._last_usage or {}),
                     "cost": float(sess._session_cost or 0),
                 }

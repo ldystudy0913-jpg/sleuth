@@ -154,7 +154,7 @@ py -3.12 -m sleuth.server
 SLEUTH_MCP_SERVERS={"docs":{"type":"remote","url":"https://mcp.example.com/mcp"}}
 ```
 
-工具名：`{server}_{tool}`。
+工具名：`{server}_{tool}`。不必先起齐 MCP：Sleuth 先启动，未连上的服务按 `SLEUTH_MCP_RETRY_SECONDS`（默认 15）后台重试；下一轮对话自动挂上工具。立即重连用 `/mcp reload`。
 
 ## 测试
 
