@@ -45,6 +45,13 @@ def _print(text: str) -> None:
         print(text, end="")
 
 
+def _skill_label(session) -> str:
+    names = [n for n in (getattr(session, "skill_names", None) or []) if n]
+    if names:
+        return ",".join(names)
+    return session.skill_name or "-"
+
+
 def _markdown(text: str) -> None:
     if _HAS_RICH:
         _console.print(Markdown(text))
@@ -89,17 +96,17 @@ class RichRenderer:
         self._reasoning_status_drawn = False
         self._pending_full_reasoning: Optional[str] = None
 
-    def on_step(self, step: int, max_steps: int) -> None:
+    def on_step(self, step: int, max_steps: int, **kwargs) -> None:
         pass
 
-    def on_text(self, text: str) -> None:
+    def on_text(self, text: str, **kwargs) -> None:
         self._finalize_reasoning(allow_expand=True)
         if not self._text_open:
             _print("\n")
         _print(text)
         self._text_open = True
 
-    def on_reasoning(self, text: str) -> None:
+    def on_reasoning(self, text: str, **kwargs) -> None:
         """Buffer thinking; show a live line counter, collapse when finished."""
         import sys
 
@@ -119,7 +126,7 @@ class RichRenderer:
         sys.stdout.flush()
         self._reasoning_status_drawn = True
 
-    def on_tool_start(self, name: str, args: dict) -> None:
+    def on_tool_start(self, name: str, args: dict, **kwargs) -> None:
         # Mid-tool-loop: collapse without blocking for expand.
         self._finalize_reasoning(allow_expand=False)
         if not self.show_tools:
@@ -128,7 +135,7 @@ class RichRenderer:
         arg_str = ", ".join(f"{k}={v!r}" for k, v in list(args.items())[:4])
         _print(f"\n⚙ {name}({arg_str})\n")
 
-    def on_tool_result(self, name: str, result: ToolResult) -> None:
+    def on_tool_result(self, name: str, result: ToolResult, **kwargs) -> None:
         if not self.show_tools:
             return
         self._newline_if_open()
@@ -138,7 +145,7 @@ class RichRenderer:
         mark = "✗" if result.is_error else "✓"
         _print(f"  {mark} {result.title}\n")
 
-    def on_stop(self, reason: str, usage: dict) -> None:
+    def on_stop(self, reason: str, usage: dict, **kwargs) -> None:
         self._finalize_reasoning(allow_expand=True)
         self._offer_pending_expand()
         self._newline_if_open()
@@ -319,8 +326,8 @@ def _parse_args(argv=None):
                         help="user id for session/usage isolation (or SLEUTH_USER_ID)")
     parser.add_argument("--refresh-skills", action="store_true",
                         help="force reload skills from paths/urls/s3 before starting")
-    parser.add_argument("--skill", default=None,
-                        help="pin a skill (only valid with the default agent)")
+    parser.add_argument("--skill", action="append", default=None,
+                        help="pin skill(s); repeat or comma-separate (default agent only)")
     return parser.parse_args(argv)
 
 
@@ -370,8 +377,8 @@ def _run_session(args, session) -> int:
 
     if getattr(args, "skill", None):
         try:
-            name = session.set_skill(args.skill)
-            _print(f"skill: {name}\n")
+            names = session.set_skills(args.skill)
+            _print(f"skill: {', '.join(names) or '-'}\n")
         except Exception as exc:
             _print(f"error: invalid --skill: {exc}\n")
             return 1
@@ -400,7 +407,7 @@ def _run_session(args, session) -> int:
         "sleuth interactive session. Type your prompt; Ctrl+C or 'exit' to quit.\n"
         f"[session {session.id}] title={session.title!r} "
         f"agent={session.agent_name} model={session.model_ref()} "
-        f"skill={session.skill_name or '-'} "
+        f"skill={_skill_label(session)} "
         f"yolo={'on' if session.yolo else 'off'}\n"
         "Slash: /sessions · /session · /model · /agent · /mcp · /skill · "
         "/skills · /usage · /yolo  ·  commands from .opencode/command/*.md\n\n"
@@ -562,7 +569,7 @@ def _handle_session_command(
             f"current session id={session.id}\n"
             f"  title={session.title!r}\n"
             f"  agent={session.agent_name} model={session.model_ref()}\n"
-            f"  skill={session.skill_name or '-'}\n"
+            f"  skill={_skill_label(session)}\n"
             f"  updated={when or '-'}\n"
             f"  tip: /sessions to list, /session <n|id> to switch\n"
         )
@@ -611,7 +618,7 @@ def _handle_session_command(
     _print(
         f"switched to session {new_sess.id}\n"
         f"  title={new_sess.title!r} agent={new_sess.agent_name} "
-        f"model={new_sess.model_ref()} skill={new_sess.skill_name or '-'} "
+        f"model={new_sess.model_ref()} skill={_skill_label(new_sess)} "
         f"messages={len(new_sess.messages)}\n"
     )
     return new_sess
@@ -707,16 +714,17 @@ def _handle_agent_command(session, rest: str) -> None:
             f"warning: agent {name!r} MCP server "
             f"{entry.get('mcp_server')!r} is not connected; switching anyway\n"
         )
-    prev_skill = session.skill_name
+    prev_skills = list(getattr(session, "skill_names", None) or [])
     try:
         resolved = session.set_agent(name, yolo=session.yolo)
     except Exception as exc:
         _print(f"agent switch failed: {exc}\n")
         return
     _print(f"agent set to {resolved}\n")
-    if prev_skill and not session.skill_name:
+    if prev_skills and not (getattr(session, "skill_names", None) or []):
+        shown = ", ".join(prev_skills)
         _print(
-            f"(cleared skill {prev_skill!r}; skill is only selectable "
+            f"(cleared skill {shown!r}; skill is only selectable "
             "on the default agent)\n"
         )
 
@@ -778,6 +786,7 @@ def _handle_mcp_command(session, rest: str) -> None:
 def _handle_skills_command(session, rest: str) -> None:
     """``/skill`` list/switch or ``/skills reload``."""
     from .catalog import skills_payload
+    from .session_select import parse_skill_names
 
     token = rest.split()[0].lower() if rest else ""
     if token == "reload":
@@ -798,7 +807,7 @@ def _handle_skills_command(session, rest: str) -> None:
         if session.is_busy():
             _print("busy: wait for the current turn to finish before /skill\n")
             return
-        session.set_skill("")
+        session.set_skills([])
         _print("skill cleared\n")
         return
 
@@ -807,15 +816,28 @@ def _handle_skills_command(session, rest: str) -> None:
             _print("busy: wait for the current turn to finish before /skill\n")
             return
         try:
-            name = session.set_skill(rest.strip())
+            if token.startswith("+") and len(token) > 1:
+                names = session.add_skill(token[1:])
+            elif token.startswith("-") and len(token) > 1:
+                names = session.remove_skill(token[1:])
+            else:
+                names = session.set_skills(parse_skill_names(rest))
         except ValueError as exc:
             _print(f"skill switch failed: {exc}\n")
             return
-        _print(f"skill set to {name}\n")
+        if names:
+            label = ", ".join(names)
+            if len(names) == 1:
+                _print(f"skill set to {label}\n")
+            else:
+                _print(f"skills set to {label}\n")
+        else:
+            _print("skill cleared\n")
         return
 
     rows = skills_payload(session.config, session.workdir)
-    current = session.skill_name or ""
+    current_names = [n for n in (getattr(session, "skill_names", None) or []) if n]
+    current = ", ".join(current_names)
     default = (getattr(session.config, "default_agent", None) or "build").strip()
     _print(f"current skill: {current or '-'}\n")
     _print(f"default agent (skill selectable): {default}\n")
@@ -828,17 +850,21 @@ def _handle_skills_command(session, rest: str) -> None:
         _print("no skills loaded\n")
         return
     _print(f"skills ({len(rows)}):\n")
+    selected = set(current_names)
     for s in sorted(rows, key=lambda r: r.get("name") or ""):
         desc = (s.get("description") or "").replace("\n", " ")
         if len(desc) > 72:
             desc = desc[:69] + "..."
-        mark = " *" if s.get("name") == current else ""
+        mark = " *" if s.get("name") in selected else ""
         _print(
             f"  {s.get('name')}{mark}\n"
             f"      {desc or '(no description)'}\n"
             f"      {s.get('location') or '-'}\n"
         )
-    _print("Switch with: /skill <name>  |  /skill off  |  /skills reload\n")
+    _print(
+        "Switch with: /skill <name> [name...]  |  /skill +name  |  "
+        "/skill -name  |  /skill off  |  /skills reload\n"
+    )
 
 
 def _handle_usage_command(session, rest: str) -> None:

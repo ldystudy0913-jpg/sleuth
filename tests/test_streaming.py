@@ -22,16 +22,36 @@ class StreamingRendererTests(unittest.TestCase):
         r = StreamingRenderer(
             session_id=sid, args_max_chars=20, output_max_chars=20
         )
-        r.on_step(1, 30)
-        r.on_text("Hello")
+        r.on_step(1, 30, started_at=100)
+        r.on_text("Hello", first_token_at=110)
         r.on_text(" world")
-        r.on_tool_start("bash", {"cmd": "echo " + ("x" * 100)})
+        r.on_tool_start(
+            "bash",
+            {"cmd": "echo " + ("x" * 100)},
+            call_id="call_1",
+            step=1,
+            started_at=120,
+        )
         r.on_tool_result(
             "bash",
             ToolResult(title="ok", output="y" * 100, is_error=False),
+            call_id="call_1",
+            step=1,
+            started_at=200,
+            duration_ms=50,
+            ended_at=250,
         )
         r.on_reasoning("think")
         r.on_error("boom")
+        r.on_stop(
+            "tool_use",
+            {"input": 1, "output": 2},
+            step=1,
+            started_at=100,
+            first_token_at=110,
+            completed_at=300,
+            duration_ms=200,
+        )
         r.close()
 
         types = []
@@ -46,9 +66,26 @@ class StreamingRendererTests(unittest.TestCase):
             if ev["type"] == "tool_start":
                 self.assertLessEqual(len(ev["args_preview"]), 20)
                 self.assertTrue(ev["args_preview"].endswith("..."))
+                self.assertEqual(ev.get("id"), "call_1")
+                self.assertEqual(ev.get("started_at"), 120)
             if ev["type"] == "tool_result":
                 self.assertFalse(ev["is_error"])
                 self.assertLessEqual(len(ev["output_preview"]), 20)
+                self.assertEqual(ev.get("id"), "call_1")
+                self.assertEqual(ev.get("duration_ms"), 50)
+                self.assertEqual(ev.get("ended_at"), 250)
+            if ev["type"] == "step":
+                self.assertEqual(ev.get("started_at"), 100)
+            if ev["type"] == "text" and ev["delta"] == "Hello":
+                self.assertEqual(ev.get("first_token_at"), 110)
+            if ev["type"] == "text" and ev["delta"] == " world":
+                self.assertNotIn("first_token_at", ev)
+            if ev["type"] == "stop":
+                self.assertEqual(ev.get("step"), 1)
+                self.assertEqual(ev.get("started_at"), 100)
+                self.assertEqual(ev.get("first_token_at"), 110)
+                self.assertEqual(ev.get("completed_at"), 300)
+                self.assertEqual(ev.get("duration_ms"), 200)
 
         self.assertEqual(
             types,
@@ -60,6 +97,7 @@ class StreamingRendererTests(unittest.TestCase):
                 "tool_result",
                 "reasoning",
                 "error",
+                "stop",
             ],
         )
 

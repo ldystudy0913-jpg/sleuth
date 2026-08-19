@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -88,9 +88,12 @@ def format_skill_content(info, *, warnings: Optional[list] = None) -> str:
 
 def pinned_skill_system_block(name: str, session=None) -> str:
     """System-prompt block for a session-pinned skill (already loaded)."""
-    info = get_skill(name)
-    if info is None:
-        return ""
+    return pinned_skills_system_block([name], session=session)
+
+
+def pinned_skills_system_block(names: List[str], session=None) -> str:
+    """System-prompt blocks for one or more session-pinned skills."""
+    bodies: List[str] = []
     tool_names: list = []
     mcp_manager = None
     if session is not None:
@@ -98,13 +101,26 @@ def pinned_skill_system_block(name: str, session=None) -> str:
         if reg is not None:
             tool_names = list(reg.names())
         mcp_manager = getattr(session, "_mcp_manager", None)
-    warnings = check_skill_deps(info, tool_names=tool_names, mcp_manager=mcp_manager)
-    body = format_skill_content(info, warnings=warnings)
-    return (
-        "# Pinned skill (already loaded; do not call the skill tool for this name)\n"
-        "The user selected this skill for the session. Follow its instructions.\n\n"
-        + body
-    )
+    for name in names or []:
+        info = get_skill(name)
+        if info is None:
+            continue
+        warnings = check_skill_deps(info, tool_names=tool_names, mcp_manager=mcp_manager)
+        bodies.append(format_skill_content(info, warnings=warnings))
+    if not bodies:
+        return ""
+    if len(bodies) == 1:
+        header = (
+            "# Pinned skill (already loaded; do not call the skill tool for this name)\n"
+            "The user selected this skill for the session. Follow its instructions.\n\n"
+        )
+    else:
+        header = (
+            "# Pinned skill (already loaded; do not call the skill tool for these names)\n"
+            "The user selected these skills for the session. Follow their instructions. "
+            "If they conflict, prefer the user's current request.\n\n"
+        )
+    return header + "\n\n".join(bodies)
 
 
 def _sample_files(dir_path: Path, limit: int = 10) -> str:

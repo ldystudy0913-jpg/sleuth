@@ -77,6 +77,7 @@ py -3.12 -m sleuth --session sess_xxx
 py -3.12 -m sleuth --refresh-skills --yolo "..."
 py -3.12 -m sleuth --agent plan "..."
 py -3.12 -m sleuth --model openai/gpt-4o-mini
+py -3.12 -m sleuth --skill dd-report-check --skill dd-reply-framework
 ```
 
 交互中浏览 / 切换会话（不必查库）：
@@ -103,6 +104,9 @@ current session id=...
 >>> /mcp
 >>> /mcp reload
 >>> /skills
+>>> /skill dd-report-check dd-reply-framework
+>>> /skill +other-skill
+>>> /skill -dd-reply-framework
 >>> /skills reload
 >>> /usage
 >>> /yolo on
@@ -114,7 +118,7 @@ current session id=...
 | `/model` | `GET /v1/models` + 消息 body `model` |
 | `/agent` | `GET /v1/agents` + 消息 body `agent` |
 | `/mcp` `/mcp reload` | `GET /v1/mcp` · `POST /v1/mcp/reload` |
-| `/skills` `/skills reload` | `GET /v1/skills` · `POST /v1/skills/reload` |
+| `/skill` `/skills` `/skills reload` | 会话 pin 多个 skill · `GET /v1/skills` · `POST /v1/skills/reload` |
 | `/usage` | `GET /v1/users/{id}/usage` |
 | `/yolo on\|off` | 消息 body `yolo`（CLI 默认 off，server 默认 on） |
 
@@ -140,7 +144,8 @@ py -3.12 -m sleuth.server
 |------|------|
 | GET | `/health` |
 | POST/GET | `/v1/sessions`（创建可选 body `model`；列表含 `preview` / `time_updated_local`） |
-| GET | `/v1/sessions/{id}`（含 `model`、messages） |
+| GET | `/v1/sessions/{id}`（含 `model`、messages、计时字段） |
+| GET | `/v1/sessions/{id}/trace`（执行台账；见 [docs/API.md](docs/API.md) §4.4.1） |
 | POST | `/v1/sessions/{id}/messages`（可选 body `model`，本轮前切换；**同步长耗时**） |
 | POST | `/v1/sessions/{id}/messages/stream`（同上 Body；**SSE**，见 [docs/API.md](docs/API.md) §4.5.1） |
 | GET | `/v1/models` · `/v1/agents`（选择器目录；agents 含 available） |

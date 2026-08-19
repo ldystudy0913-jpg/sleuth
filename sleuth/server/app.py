@@ -9,7 +9,8 @@ from ..app import build_session, reload_mcp, reload_skills
 from ..catalog import agents_payload, mcp_status_dict, models_payload, skills_payload
 from ..config import load
 from ..session import NullRenderer
-from ..session_select import apply_session_selectors, skill_from_metadata
+from ..session_select import apply_session_selectors, skill_from_metadata, skills_from_metadata
+from ..trace import message_timing_fields, project_session_trace
 from ..storage.factory import create_store
 from ..util.env import load_dotenv
 from .streaming import StreamingRenderer, run_prompt_in_thread, sse_pack
@@ -47,11 +48,19 @@ def _session_model_payload(sess) -> Dict[str, str]:
     }
 
 
-def _session_skill_payload(sess) -> Optional[str]:
+def _session_skills_payload(sess) -> list:
+    names = getattr(sess, "skill_names", None)
+    if isinstance(names, (list, tuple)):
+        return [str(n).strip() for n in names if str(n).strip()]
     name = getattr(sess, "skill_name", None)
     if isinstance(name, str) and name.strip():
-        return name.strip()
-    return None
+        return [name.strip()]
+    return []
+
+
+def _skill_fields(sess) -> Dict[str, Any]:
+    names = _session_skills_payload(sess)
+    return {"skill": names[0] if names else None, "skills": names}
 
 
 def create_app(workdir: Optional[Path] = None):
@@ -100,7 +109,7 @@ def create_app(workdir: Optional[Path] = None):
                 "title": sess.title,
                 "agent": sess.agent_name,
                 "model": _session_model_payload(sess),
-                "skill": _session_skill_payload(sess),
+                **_skill_fields(sess),
             }
         )
 
@@ -119,6 +128,7 @@ def create_app(workdir: Optional[Path] = None):
                     "agent": r["agent"],
                     "model": r["model"],
                     "skill": r.get("skill"),
+                    "skills": r.get("skills") or [],
                     "cost": r["cost"],
                     "tokens_input": r["tokens_input"],
                     "tokens_output": r["tokens_output"],
@@ -148,6 +158,7 @@ def create_app(workdir: Optional[Path] = None):
                 "agent": rec.agent,
                 "model": rec.model,
                 "skill": skill_from_metadata(rec.metadata),
+                "skills": skills_from_metadata(rec.metadata),
                 "cost": rec.cost,
                 "tokens": {
                     "input": rec.tokens_input,
@@ -163,11 +174,31 @@ def create_app(workdir: Optional[Path] = None):
                         "text": maybe_desensitize(m.text or "", enabled=scrub_on),
                         "usage": m.metadata.get("usage"),
                         "cost": m.metadata.get("cost"),
+                        **message_timing_fields(m.metadata),
                     }
                     for m in messages
                 ],
             }
         )
+
+    async def get_session_trace(request: Request):
+        from ..privacy import maybe_desensitize
+
+        sid = request.path_params["session_id"]
+        user_id = _user_id(request)
+        rec = store.get_session(sid)
+        if rec is None or (rec.user_id and rec.user_id != user_id):
+            return _json_response({"error": "not found"}, 404)
+        messages = store.load_messages(sid)
+        payload = project_session_trace(messages, session_id=rec.id)
+        scrub_on = bool(getattr(config, "output_desensitize", True))
+        if scrub_on:
+            for row in payload.get("records") or []:
+                if isinstance(row, dict) and "preview" in row:
+                    row["preview"] = maybe_desensitize(
+                        row.get("preview") or "", enabled=True
+                    )
+        return _json_response(payload)
 
     def _parse_message_body(body: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
         """Return (prompt, error_message)."""
@@ -212,7 +243,7 @@ def create_app(workdir: Optional[Path] = None):
                 "title": sess.title,
                 "agent": sess.agent_name,
                 "model": _session_model_payload(sess),
-                "skill": _session_skill_payload(sess),
+                **_skill_fields(sess),
                 "usage": sess._last_usage,
                 "cost": sess._session_cost,
             }
@@ -276,7 +307,7 @@ def create_app(workdir: Optional[Path] = None):
                     "title": sess.title,
                     "agent": sess.agent_name,
                     "model": _session_model_payload(sess),
-                    "skill": _session_skill_payload(sess),
+                    **_skill_fields(sess),
                     "usage": dict(sess._last_usage or {}),
                     "cost": float(sess._session_cost or 0),
                 }
@@ -350,6 +381,7 @@ def create_app(workdir: Optional[Path] = None):
         Route("/v1/sessions", create_session, methods=["POST"]),
         Route("/v1/sessions", list_sessions, methods=["GET"]),
         Route("/v1/sessions/{session_id}", get_session, methods=["GET"]),
+        Route("/v1/sessions/{session_id}/trace", get_session_trace, methods=["GET"]),
         Route("/v1/sessions/{session_id}/messages", post_message, methods=["POST"]),
         Route(
             "/v1/sessions/{session_id}/messages/stream",

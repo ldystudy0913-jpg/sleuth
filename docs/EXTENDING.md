@@ -375,7 +375,7 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
    curl http://127.0.0.1:8787/health
    ```
 
-现有路由：`/v1/sessions`、`.../messages`、`/v1/users/{id}/usage`、`/v1/skills`、`/v1/skills/reload`。
+现有路由：`/v1/sessions`、`.../trace`、`.../messages`、`/v1/users/{id}/usage`、`/v1/skills`、`/v1/skills/reload`。
 
 ---
 

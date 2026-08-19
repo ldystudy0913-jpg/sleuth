@@ -1,4 +1,4 @@
-"""知识库：本地 lexicon +（可选）本地 risk_points 种子；生产风险点走 remote 检索。"""
+"""知识库：本地 lexicon（禁用词）；风险点只走远程 KB API。"""
 from __future__ import annotations
 
 import json
@@ -143,7 +143,7 @@ def load_lexicon(kb_path: Optional[Path] = None) -> List[LexiconRule]:
 
 
 def load_local_risk_points(kb_path: Optional[Path] = None) -> Dict[str, RiskPoint]:
-    """加载本地 risk_points.json（离线种子 / 可选回退）。"""
+    """加载本地 risk_points.json（仅测试/开发种子，生产流水线不使用）。"""
     root = resolve_kb_root(kb_path)
     risk_file = root / "risk_points.json"
     if not risk_file.is_file():
@@ -163,7 +163,7 @@ def load_local_risk_points(kb_path: Optional[Path] = None) -> Dict[str, RiskPoin
 
 
 def load_kb(kb_path: Optional[Path] = None) -> KnowledgeBase:
-    """加载本地 risk_points.json + lexicon.json（无远程 URL 时的默认知识源）。"""
+    """测试辅助：本地 risk_points.json + lexicon.json。生产风险点请走 remote API。"""
     root = resolve_kb_root(kb_path)
     return KnowledgeBase(
         risk_points=load_local_risk_points(kb_path),

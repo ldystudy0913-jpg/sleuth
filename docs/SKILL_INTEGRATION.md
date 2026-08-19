@@ -12,7 +12,7 @@
 |--|-------|------------|
 | 本质 | Markdown 知识 / SOP | 可执行副作用 |
 | 进系统提示 | **仅目录**：name + 短 description | 工具名 + schema |
-| 正文何时进入上下文 | 会话 pinned skill，或模型调用内置工具 **`skill`** 之后 | 每次 `tools/call` |
+| 正文何时进入上下文 | 会话 pinned skill（可多个，按序注入全文），或模型调用内置工具 **`skill`** 之后 | 每次 `tools/call` |
 | 典型用途 | 检查步骤、答复框架写法、排查手册 | 跑检查、写文件、查库 |
 
 配合方式（推荐）：
@@ -60,10 +60,10 @@ SLEUTH_SKILLS_REFRESH_SECONDS=300
 
 - `GET /v1/skills` → `[{ name, description, location }, …]`
 - `POST /v1/skills/reload` → 强制重载
-- 创建 / 发消息 body 带 `skill`：默认 agent 下非空名会把 SKILL.md 注入系统提示；`""` 表示不绑定。
-- **Skill 选择器仅当 `agent === GET /v1/agents` 的 `default` 时可用**。专用 agent 必须传 `skill: ""`，否则 `400`。
+- 创建 / 发消息 body 带 `skills`（推荐）或旧字段 `skill`：默认 agent 下非空名会把对应 SKILL.md **按顺序全部**注入系统提示；`[]` / `""` 表示不绑定。两个字段都出现时以 `skills` 为准。
+- **Skill 选择器仅当 `agent === GET /v1/agents` 的 `default` 时可用**。专用 agent 必须传 `skills: []`（及 `skill: ""`），否则 `400`。
 
-前端：每轮带 `agent` / `model` / `skill`。未选 skill 用默认 agent 正常对话。
+前端：每轮带 `agent` / `model` / `skills`。未选 skill 用默认 agent 正常对话。多选会增加系统提示长度。
 
 ---
 

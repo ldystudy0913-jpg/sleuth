@@ -97,14 +97,12 @@ class Settings:
                 _env("DD_REPLY_KB_KNOWLEDGE_ID", "") or "",
             )
         ).strip()
-        # When remote search fails / empty: use local risk_points.json (default off).
-        self.kb_fallback_local: bool = bool(
-            overrides.get(
-                "kb_fallback_local",
-                (_env("DD_REPLY_KB_FALLBACK_LOCAL", "0") or "0").strip().lower()
-                in {"1", "true", "yes", "on"},
-            )
+        # How many KB hits to keep per risk code (API topK + local slice). 0 = no local cap.
+        self.kb_top_k: int = int(
+            overrides.get("kb_top_k", _env_int("DD_REPLY_KB_TOP_K", 8))
         )
+        if self.kb_top_k < 0:
+            self.kb_top_k = 0
 
         self.llm_base_url: str = str(
             overrides.get("llm_base_url", _env("DD_REPLY_LLM_BASE_URL", "") or "")

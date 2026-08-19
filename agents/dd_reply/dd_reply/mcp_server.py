@@ -7,9 +7,48 @@ from typing import Any, Optional
 
 from .agent_card import load_agent_card
 from .config import Settings, get_settings
-from .kb import list_lexicon, list_risk_codes, load_kb
+from .kb import list_lexicon, load_kb_lexicon_only
+from .kb.remote import retrieve_risk_codes
 from .models import FrameworkRequest
 from .pipeline import generate_framework
+
+
+def health_payload(settings: Settings) -> dict[str, Any]:
+    """Shared liveness JSON for GET /health and the MCP ``health`` tool."""
+    kb_ok = True
+    kb_err = ""
+    n_lex = 0
+    try:
+        lex_kb = load_kb_lexicon_only(settings.kb_path)
+        n_lex = len(lex_kb.lexicon)
+    except Exception as exc:  # noqa: BLE001
+        kb_ok = False
+        kb_err = str(exc)
+    return {
+        "ok": kb_ok,
+        "service": "dd-reply-tools",
+        "kb_ok": kb_ok,
+        "kb_error": kb_err,
+        "lexicon_rule_count": n_lex,
+        "kb_api_configured": settings.kb_api_configured(),
+        "kb_top_k": int(getattr(settings, "kb_top_k", 8) or 0),
+        "llm_configured": settings.llm_configured(),
+        "cos_configured": settings.cos_configured(),
+        "agent_card": True,
+    }
+
+
+def _register_http_health(server: Any, settings: Settings) -> None:
+    """Expose GET /health on the Streamable HTTP app (Docker / k8s probes)."""
+    register = getattr(server, "custom_route", None)
+    if not callable(register):
+        return
+
+    @register("/health", methods=["GET"])
+    async def health_http(_request: Any) -> Any:
+        from starlette.responses import JSONResponse
+
+        return JSONResponse(health_payload(settings))
 
 
 def _mcp_server_cls():
@@ -77,6 +116,8 @@ def build_mcp_server(
             ctor_kwargs.pop(k, None)
         server = ServerCls("dd-reply", **ctor_kwargs)
 
+    _register_http_health(server, settings)
+
     @server.tool(
         name="get_agent_card",
         description=(
@@ -90,15 +131,17 @@ def build_mcp_server(
     @server.tool(
         name="generate_reply_framework",
         description=(
-            "Generate a 4-part KYC reply framework for one or more risk codes. "
-            "Pass risk_codes_json (JSON array of codes like [\"C001\",\"C003\"]), "
-            "the 10 KYC field strings, optional local_paths_json (JSON array of file paths "
-            "for tests), and optional invest_id for COS attachments. "
+            "Generate a 4-part KYC reply framework. "
+            "Pass risk_codes_json (JSON array of codes like [\"C001\"]) and/or "
+            "risk_names_json (JSON array of names like [\"行政处罚记录\"]). "
+            "Each item is used as the KB search question. Also pass the 10 KYC field "
+            "strings, optional local_paths_json, optional invest_id. "
             "Returns JSON with markdown + structured sections. For human reference only."
         ),
     )
     def generate_reply_framework(
         risk_codes_json: str = "[]",
+        risk_names_json: str = "[]",
         customer_name: str = "",
         established_at: str = "",
         business_scope: str = "",
@@ -119,6 +162,10 @@ def build_mcp_server(
         except json.JSONDecodeError:
             codes = [c.strip() for c in risk_codes_json.split(",") if c.strip()]
         try:
+            names = json.loads(risk_names_json) if risk_names_json else []
+        except json.JSONDecodeError:
+            names = [c.strip() for c in risk_names_json.split(",") if c.strip()]
+        try:
             paths = json.loads(local_paths_json) if local_paths_json else []
         except json.JSONDecodeError:
             paths = []
@@ -126,6 +173,7 @@ def build_mcp_server(
             paths = []
         req = FrameworkRequest(
             risk_codes=codes if isinstance(codes, list) else [str(codes)],
+            risk_names=names if isinstance(names, list) else [str(names)],
             customer_name=customer_name,
             established_at=established_at,
             business_scope=business_scope,
@@ -141,12 +189,15 @@ def build_mcp_server(
             report_id=report_id,
             bank_id=bank_id,
         )
-        result = generate_framework(req, settings=settings)
+        try:
+            result = generate_framework(req, settings=settings)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
         return result.model_dump_json(ensure_ascii=False)
 
     @server.tool(
         name="lookup_risk_kb",
-        description="Lookup risk point knowledge by codes_json JSON array; exact match.",
+        description="Lookup risk-point knowledge via the remote KB API. codes_json may contain codes (C001) and/or names.",
     )
     def lookup_risk_kb(codes_json: str = "[]") -> str:
         try:
@@ -155,40 +206,53 @@ def build_mcp_server(
             codes = [c.strip() for c in codes_json.split(",") if c.strip()]
         if not isinstance(codes, list):
             codes = [str(codes)]
-        kb = load_kb(settings.kb_path)
-        found, missing = kb.lookup_risks([str(c) for c in codes])
-        payload = {
-            "found": [
+        if not settings.kb_api_configured():
+            return json.dumps(
                 {
-                    "code": r.code,
-                    "name": r.name,
-                    "category": r.category,
-                    "questions": r.questions,
-                    "answer_logic": r.answer_logic,
-                    "materials": r.materials,
-                    "conclusion_hints": r.conclusion_hints,
-                }
-                for r in found
-            ],
-            "missing": missing,
-        }
-        return json.dumps(payload, ensure_ascii=False)
+                    "error": "DD_REPLY_KB_API_URL is required; risk-point knowledge is remote-only",
+                    "found": [],
+                    "missing": [str(c).strip().upper() for c in codes if str(c).strip()],
+                },
+                ensure_ascii=False,
+            )
+        retrievals = retrieve_risk_codes([str(c) for c in codes], settings)
+        found = []
+        missing = []
+        for r in retrievals:
+            if r.ok:
+                found.append(
+                    {
+                        "code": r.code,
+                        "hit_count": len(r.hits),
+                        "sources": [h.source_cite() for h in r.hits],
+                        "hits": [
+                            {
+                                "title": h.title,
+                                "file_name": h.file_name,
+                                "url": h.source_url(),
+                                "knowledge_id": h.knowledge_id,
+                                "rank_score": h.rank_score,
+                                "paragraph": h.paragraph,
+                            }
+                            for h in r.hits
+                        ],
+                    }
+                )
+            else:
+                missing.append({"code": r.code, "error": r.error or "empty_hits"})
+        return json.dumps({"found": found, "missing": missing}, ensure_ascii=False)
 
-    @server.tool(name="list_risk_codes", description="List supported risk point codes in local seed KB (offline catalog).")
+    @server.tool(
+        name="list_risk_codes",
+        description="Risk codes are not listed locally; production knowledge is searched via KB API.",
+    )
     def list_risk_codes_tool() -> str:
-        try:
-            kb = load_kb(settings.kb_path)
-            codes = list_risk_codes(kb)
-            note = "local_seed"
-        except Exception as exc:  # noqa: BLE001
-            codes = []
-            note = str(exc)
         return json.dumps(
             {
-                "codes": codes,
-                "source": note,
+                "codes": [],
+                "source": "remote_api",
                 "kb_api_configured": settings.kb_api_configured(),
-                "hint": "Production risk knowledge comes from DD_REPLY_KB_API_URL search by question=risk code.",
+                "hint": "Risk knowledge is searched per code via DD_REPLY_KB_API_URL; there is no local catalog.",
             },
             ensure_ascii=False,
         )
@@ -198,46 +262,12 @@ def build_mcp_server(
         description="List language-guard lexicon rules from local lexicon.json.",
     )
     def list_lexicon_tool() -> str:
-        from .kb import load_kb_lexicon_only
-
         kb = load_kb_lexicon_only(settings.kb_path)
         return json.dumps({"items": list_lexicon(kb)}, ensure_ascii=False)
 
     @server.tool(name="health", description="dd_reply tool-surface health probe.")
     def health() -> str:
-        from .kb import load_kb_lexicon_only, load_local_risk_points
-
-        kb_ok = True
-        kb_err = ""
-        n_risk = 0
-        n_lex = 0
-        try:
-            lex_kb = load_kb_lexicon_only(settings.kb_path)
-            n_lex = len(lex_kb.lexicon)
-            try:
-                n_risk = len(load_local_risk_points(settings.kb_path))
-            except Exception:  # noqa: BLE001
-                n_risk = 0
-        except Exception as exc:  # noqa: BLE001
-            kb_ok = False
-            kb_err = str(exc)
-        return json.dumps(
-            {
-                "ok": kb_ok,
-                "service": "dd-reply-tools",
-                "kb_ok": kb_ok,
-                "kb_error": kb_err,
-                "risk_point_count": n_risk,
-                "local_risk_point_count": n_risk,
-                "lexicon_rule_count": n_lex,
-                "kb_api_configured": settings.kb_api_configured(),
-                "kb_fallback_local": settings.kb_fallback_local,
-                "llm_configured": settings.llm_configured(),
-                "cos_configured": settings.cos_configured(),
-                "agent_card": True,
-            },
-            ensure_ascii=False,
-        )
+        return json.dumps(health_payload(settings), ensure_ascii=False)
 
     return server
 
@@ -265,7 +295,8 @@ def main(argv=None) -> int:
     )
     print(
         f"dd_reply tool surface listening on http://{host}:{port}{path} "
-        f"(llm={'on' if settings.llm_configured() else 'off/fallback'})"
+        f"(health GET http://{host}:{port}/health; "
+        f"llm={'on' if settings.llm_configured() else 'off/fallback'})"
     )
     asyncio.run(
         _run_streamable_http(

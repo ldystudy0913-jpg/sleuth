@@ -8,7 +8,7 @@ py -3.12 -m pip install -e ".[mcp]"
 py -3.12 -m dd_reply.mcp_server
 ```
 
-默认监听 `http://127.0.0.1:8792/mcp`。
+默认监听 `http://127.0.0.1:8792/mcp`。探活：`GET http://127.0.0.1:8792/health`（HTTP 200）。
 
 ## 2. 配置 Sleuth
 
@@ -26,13 +26,13 @@ SLEUTH_MCP_SERVERS={"ddreply":{"type":"remote","url":"http://127.0.0.1:8792/mcp"
 DD_REPLY_KB_API_URL=http://your-intranet-kb/api/search
 DD_REPLY_KB_API_TOKEN=your-token
 # DD_REPLY_KB_KNOWLEDGE_ID=
-# DD_REPLY_KB_FALLBACK_LOCAL=0
+# DD_REPLY_KB_TOP_K=8
 
-# 仅禁用词 / 离线种子目录（默认包内 kb/）
+# 仅禁用词目录（默认包内 kb/lexicon.json）
 # DD_REPLY_KB_PATH=D:/kb/dd_reply
 ```
 
-未配置 `DD_REPLY_KB_API_URL` 时，风险点仍读本地 `risk_points.json`；禁用词始终用本地 `lexicon.json`。
+必须配置 `DD_REPLY_KB_API_URL`：风险点只从知识库 API 取；连不上或无结果会标缺失，不会回退本地 JSON。禁用词始终用本地 `lexicon.json`。
 
 ## 3. 运行
 

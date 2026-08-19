@@ -24,6 +24,9 @@ def _sample_body() -> Dict[str, Any]:
                 "title": "行政处罚记录",
                 "paragraph": "C011 对应尽调问题：请核实行政处罚事由与整改。判断要点：①核对决定书 ②整改证明 ③结论。对应材料：处罚决定书、整改证明。",
                 "fileName": "风险点手册.pdf",
+                "fileUrl": "https://kb.example/files/risk-manual.pdf",
+                "knowledgeId": "10752",
+                "sourceName": "尽调知识库",
                 "rankScore": 0.9,
                 "comprehended": 1,
                 "finalResponse": 1,
@@ -56,6 +59,12 @@ class TestRemoteKbClient(unittest.TestCase):
         self.assertIsInstance(hits[0], KbHit)
         self.assertIn("行政处罚", hits[0].paragraph)
         self.assertEqual(hits[0].final_response, 1)
+        cite = hits[0].source_cite()
+        self.assertIn("风险点手册.pdf", cite)
+        self.assertIn("https://kb.example/files/risk-manual.pdf", cite)
+        prompt = hits[0].text_for_prompt()
+        self.assertIn("来源:", prompt)
+        self.assertIn("风险点手册.pdf", prompt)
 
     def test_search_rejects_bad_return_code(self) -> None:
         settings = Settings(kb_api_url="http://kb.test/search")
@@ -78,8 +87,9 @@ class TestRemoteKbClient(unittest.TestCase):
         settings = Settings(
             kb_api_url="http://kb.test/search",
             kb_api_token="secret",
-            kb_api_extra_body='{"topK": 5}',
+            kb_api_extra_body='{"foo": 1}',
             kb_knowledge_id="10752",
+            kb_top_k=5,
         )
         with httpx.Client(transport=httpx.MockTransport(handler)) as client:
             search_knowledge("C011", settings, client=client)
@@ -87,8 +97,38 @@ class TestRemoteKbClient(unittest.TestCase):
         self.assertEqual(captured[0].headers.get("Authorization"), "Bearer secret")
         payload = json.loads(captured[0].content.decode("utf-8"))
         self.assertEqual(payload["question"], "C011")
+        self.assertEqual(payload["foo"], 1)
         self.assertEqual(payload["topK"], 5)
         self.assertEqual(payload["knowledgeId"], "10752")
+
+    def test_top_k_slices_hits(self) -> None:
+        body = {
+            "returnCode": "SUC0000",
+            "body": [
+                {
+                    "id": str(i),
+                    "title": f"t{i}",
+                    "paragraph": f"p{i}",
+                    "fileName": f"f{i}.pdf",
+                    "rankScore": float(i),
+                    "comprehended": 0,
+                    "finalResponse": 0,
+                }
+                for i in range(12)
+            ],
+        }
+        settings = Settings(kb_api_url="http://kb.test/search", kb_top_k=3)
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, json=body))
+        with httpx.Client(transport=transport) as client:
+            hits = search_knowledge("C011", settings, client=client)
+        self.assertEqual(len(hits), 3)
+        self.assertEqual(hits[0].id, "11")
+
+    def test_name_query_not_uppercased(self) -> None:
+        from dd_reply.models import normalize_risk_query
+
+        self.assertEqual(normalize_risk_query("c011"), "C011")
+        self.assertEqual(normalize_risk_query("行政处罚记录"), "行政处罚记录")
 
 
 class TestPipelineRemote(unittest.TestCase):
@@ -96,7 +136,6 @@ class TestPipelineRemote(unittest.TestCase):
         settings = Settings(
             kb_api_url="http://kb.test/search",
             kb_api_token="t",
-            kb_fallback_local=False,
         )
         transport = httpx.MockTransport(
             lambda req: httpx.Response(200, json=_sample_body())
@@ -122,6 +161,8 @@ class TestPipelineRemote(unittest.TestCase):
                 customer_name="某某公司",
             )
             result = generate_framework(req, settings=settings, use_llm=False)
+            self.assertIn("知识来源", result.markdown)
+            self.assertIn("风险点手册.pdf", result.markdown)
             self.assertEqual(result.meta.get("kb", {}).get("mode"), "remote")
             self.assertIn("C011", result.meta.get("found_codes", []))
             self.assertIn("C011", result.markdown)
@@ -135,7 +176,6 @@ class TestPipelineRemote(unittest.TestCase):
 
         settings = Settings(
             kb_api_url="http://kb.test/search",
-            kb_fallback_local=False,
         )
 
         def fake_retrieve(codes, settings, **kwargs):

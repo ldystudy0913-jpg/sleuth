@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..config import Settings
+from ..models import normalize_risk_query
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ class KbHit:
     comprehended: int = 0
     final_response: int = 0
     tool_url: str = ""
+    url: str = ""
+    source_name: str = ""
     title_path: List[str] = field(default_factory=list)
     tag_value_names: List[str] = field(default_factory=list)
     split_contents: List[SplitContent] = field(default_factory=list)
@@ -69,28 +72,75 @@ class KbHit:
             score = float(d.get("rankScore") or 0)
         except (TypeError, ValueError):
             score = 0.0
+        split_url = ""
+        for sc in splits:
+            if sc.url:
+                split_url = sc.url
+                break
         return cls(
             id=str(d.get("id") or ""),
             title=str(d.get("title") or ""),
             paragraph=str(d.get("paragraph") or ""),
-            file_name=str(d.get("fileName") or ""),
-            knowledge_id=str(d.get("knowledgeId") or ""),
+            file_name=str(d.get("fileName") or d.get("file_name") or ""),
+            knowledge_id=str(d.get("knowledgeId") or d.get("knowledge_id") or ""),
             paragraph_id=d.get("paragraphId"),
             rank_score=score,
             comprehended=int(d.get("comprehended") or 0),
             final_response=int(d.get("finalResponse") or 0),
-            tool_url=str(d.get("toolUrl") or ""),
+            tool_url=str(d.get("toolUrl") or d.get("tool_url") or ""),
+            url=str(
+                d.get("url")
+                or d.get("fileUrl")
+                or d.get("file_url")
+                or split_url
+                or ""
+            ),
+            source_name=str(
+                d.get("source")
+                or d.get("sourceName")
+                or d.get("origin")
+                or d.get("docName")
+                or d.get("documentName")
+                or ""
+            ),
             title_path=[str(x) for x in title_path],
             tag_value_names=[str(x) for x in tags],
             split_contents=splits,
             raw=d,
         )
 
+    def source_url(self) -> str:
+        return (self.tool_url or self.url or "").strip()
+
+    def source_cite(self) -> str:
+        """One-line citation for prompts and the 知识来源 section."""
+        name = (
+            self.file_name
+            or self.source_name
+            or self.title
+            or self.id
+            or "未命名知识条目"
+        )
+        bits = [name]
+        if self.source_name and self.source_name != name:
+            bits.append(self.source_name)
+        if self.knowledge_id:
+            bits.append(f"knowledgeId={self.knowledge_id}")
+        if self.id:
+            bits.append(f"id={self.id}")
+        url = self.source_url()
+        if url:
+            bits.append(url)
+        if self.title_path:
+            bits.append("path=" + " > ".join(self.title_path))
+        return "；".join(bits)
+
     def text_for_prompt(self, *, max_chars: int = 4000) -> str:
         parts: List[str] = []
         head = self.title or self.file_name or self.id or "hit"
         meta = f"score={self.rank_score:.4f} comprehended={self.comprehended} finalResponse={self.final_response}"
         parts.append(f"- [{head}] ({meta})")
+        parts.append(f"  来源: {self.source_cite()}")
         if self.file_name:
             parts.append(f"  fileName: {self.file_name}")
         if self.title_path:
@@ -151,6 +201,9 @@ def _extra_body(settings: Settings) -> Dict[str, Any]:
     kid = (settings.kb_knowledge_id or "").strip()
     if kid and "knowledgeId" not in out:
         out["knowledgeId"] = kid
+    top_k = int(getattr(settings, "kb_top_k", 8) or 0)
+    if top_k > 0 and "topK" not in out:
+        out["topK"] = top_k
     return out
 
 
@@ -216,6 +269,9 @@ def search_knowledge(
         key=lambda h: (h.final_response, h.comprehended, h.rank_score),
         reverse=True,
     )
+    top_k = int(getattr(settings, "kb_top_k", 8) or 0)
+    if top_k > 0:
+        hits = hits[:top_k]
     return hits
 
 
@@ -226,9 +282,9 @@ def retrieve_risk_code(
     client: Optional[httpx.Client] = None,
     question: Optional[str] = None,
 ) -> RiskRetrieval:
-    """Search KB for one risk code (default question = the code itself)."""
-    c = str(code or "").strip().upper()
-    q = (question or c).strip()
+    """Search KB for one risk code or name (question = the query string)."""
+    q = normalize_risk_query(question if question is not None else code)
+    c = normalize_risk_query(code) or q
     try:
         hits = search_knowledge(q, settings, client=client)
     except KbApiError as exc:
@@ -243,11 +299,11 @@ def retrieve_risk_codes(
     *,
     client: Optional[httpx.Client] = None,
 ) -> List[RiskRetrieval]:
-    """Batch retrieve; one HTTP call per distinct code (shared client)."""
+    """Batch retrieve; one HTTP call per distinct code or name."""
     seen: set[str] = set()
     ordered: List[str] = []
     for raw in codes:
-        c = str(raw or "").strip().upper()
+        c = normalize_risk_query(raw)
         if not c or c in seen:
             continue
         seen.add(c)

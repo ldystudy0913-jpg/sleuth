@@ -51,12 +51,12 @@ from .util.ids import session_id
 
 
 class Renderer(Protocol):
-    def on_text(self, text: str) -> None: ...
-    def on_reasoning(self, text: str) -> None: ...
-    def on_tool_start(self, name: str, args: dict) -> None: ...
-    def on_tool_result(self, name: str, result: ToolResult) -> None: ...
-    def on_step(self, step: int, max_steps: int) -> None: ...
-    def on_stop(self, reason: str, usage: dict) -> None: ...
+    def on_text(self, text: str, **kwargs) -> None: ...
+    def on_reasoning(self, text: str, **kwargs) -> None: ...
+    def on_tool_start(self, name: str, args: dict, **kwargs) -> None: ...
+    def on_tool_result(self, name: str, result: ToolResult, **kwargs) -> None: ...
+    def on_step(self, step: int, max_steps: int, **kwargs) -> None: ...
+    def on_stop(self, reason: str, usage: dict, **kwargs) -> None: ...
     def on_error(self, message: str) -> None: ...
     def on_retry(self, attempt: int, message: str, wait: float) -> None: ...
 
@@ -64,12 +64,12 @@ class Renderer(Protocol):
 class NullRenderer:
     """Silent renderer; used by tests and the `--print` JSON mode."""
 
-    def on_text(self, text: str) -> None: pass
-    def on_reasoning(self, text: str) -> None: pass
-    def on_tool_start(self, name: str, args: dict) -> None: pass
-    def on_tool_result(self, name: str, result: ToolResult) -> None: pass
-    def on_step(self, step: int, max_steps: int) -> None: pass
-    def on_stop(self, reason: str, usage: dict) -> None: pass
+    def on_text(self, text: str, **kwargs) -> None: pass
+    def on_reasoning(self, text: str, **kwargs) -> None: pass
+    def on_tool_start(self, name: str, args: dict, **kwargs) -> None: pass
+    def on_tool_result(self, name: str, result: ToolResult, **kwargs) -> None: pass
+    def on_step(self, step: int, max_steps: int, **kwargs) -> None: pass
+    def on_stop(self, reason: str, usage: dict, **kwargs) -> None: pass
     def on_error(self, message: str) -> None: print(message, file=sys.stderr)
     def on_retry(self, attempt: int, message: str, wait: float) -> None: pass
 
@@ -97,7 +97,7 @@ class Session:
     parent_id: Optional[str] = None
     user_id: str = "local"
     yolo: bool = False  # auto-approve tools; CLI default False, server often True
-    skill_name: Optional[str] = None  # session-pinned skill; only for default agent
+    skill_names: List[str] = field(default_factory=list)  # pinned skills; default agent only
 
     # lifecycle
     status: str = "idle"  # "idle" | "busy" | "retry"
@@ -162,7 +162,7 @@ class Session:
         self.agent_name = agent
         self.permission = build_permission(self.config, agent, yolo=self.yolo)
         if not self.is_default_agent():
-            self.skill_name = None
+            self.skill_names = []
         try:
             self._update_record()
         except Exception as exc:
@@ -198,30 +198,78 @@ class Session:
             self.renderer.on_error(f"persist model failed: {exc}")
         return ref
 
-    def set_skill(self, name: Optional[str]) -> Optional[str]:
-        """Pin or clear a session skill. Non-empty pins require the default agent."""
-        raw = (name or "").strip()
-        if raw.lower() in ("", "off", "none", "default"):
-            self.skill_name = None
+    @property
+    def skill_name(self) -> Optional[str]:
+        """First pinned skill, or None. Kept for older callers."""
+        names = self.skill_names or []
+        return names[0] if names else None
+
+    @skill_name.setter
+    def skill_name(self, value: Optional[str]) -> None:
+        if isinstance(value, (list, tuple)):
+            self.skill_names = [str(x).strip() for x in value if str(x).strip()]
+            return
+        raw = (value or "").strip() if isinstance(value, str) else ""
+        self.skill_names = [raw] if raw else []
+
+    def set_skills(self, names: Optional[List[str]]) -> List[str]:
+        """Replace the pinned skill list. Empty clears. Requires the default agent when non-empty."""
+        from .session_select import parse_skill_names
+
+        parsed = parse_skill_names(names)
+        if not parsed:
+            self.skill_names = []
             try:
                 self._update_record()
             except Exception as exc:
                 self.renderer.on_error(f"persist skill failed: {exc}")
-            return None
+            return []
         if not self.is_default_agent():
             raise ValueError("skill only allowed when agent is the default agent")
         from .skill import get_skill, get_skills
 
-        info = get_skill(raw)
-        if info is None:
-            available = ", ".join(sorted(get_skills())) or "none"
-            raise ValueError(f"unknown skill: {raw!r}. available: {available}")
-        self.skill_name = info.name
+        resolved: List[str] = []
+        seen = set()
+        for raw in parsed:
+            info = get_skill(raw)
+            if info is None:
+                available = ", ".join(sorted(get_skills())) or "none"
+                raise ValueError(f"unknown skill: {raw!r}. available: {available}")
+            if info.name in seen:
+                continue
+            seen.add(info.name)
+            resolved.append(info.name)
+        self.skill_names = resolved
         try:
             self._update_record()
         except Exception as exc:
             self.renderer.on_error(f"persist skill failed: {exc}")
-        return self.skill_name
+        return list(self.skill_names)
+
+    def set_skill(self, name: Optional[str]) -> Optional[str]:
+        """Pin a single skill or clear. Non-empty pins require the default agent."""
+        raw = (name or "").strip()
+        if raw.lower() in ("", "off", "none", "default"):
+            self.set_skills([])
+            return None
+        names = self.set_skills([raw])
+        return names[0] if names else None
+
+    def add_skill(self, name: str) -> List[str]:
+        """Append a skill to the pin list (dedup, keep existing order)."""
+        extra = (name or "").strip()
+        return self.set_skills(list(self.skill_names or []) + [extra])
+
+    def remove_skill(self, name: str) -> List[str]:
+        """Drop a pinned skill by name. Missing names are ignored."""
+        raw = (name or "").strip()
+        remaining = [n for n in (self.skill_names or []) if n != raw]
+        self.skill_names = remaining
+        try:
+            self._update_record()
+        except Exception as exc:
+            self.renderer.on_error(f"persist skill failed: {exc}")
+        return list(self.skill_names)
 
     def set_yolo(self, enabled: bool) -> bool:
         """Toggle auto-approve and rebuild permission for the current agent."""
@@ -258,7 +306,11 @@ class Session:
         ensure_skills_fresh(self.config, self.workdir)
         sync_session_mcp(self)
         self._ensure_persisted()
-        user_msg = Message.user_text(user_text, agent=self.agent_name)
+        from .trace import now_ms
+
+        user_msg = Message.user_text(
+            user_text, agent=self.agent_name, started_at=now_ms()
+        )
         self.messages.append(user_msg)
         self._persist_message(user_msg)
         self._maybe_title()
@@ -315,11 +367,11 @@ class Session:
         return self.provider, resolve_title_model(self.config, self.model_id)
 
     def _pinned_skill_prompt(self) -> str:
-        if not self.skill_name or not self.is_default_agent():
+        if not self.skill_names or not self.is_default_agent():
             return ""
-        from .tools.skill_tool import pinned_skill_system_block
+        from .tools.skill_tool import pinned_skills_system_block
 
-        return pinned_skill_system_block(self.skill_name, session=self)
+        return pinned_skills_system_block(self.skill_names, session=self)
 
     def _maybe_title(self) -> None:
         if self.parent_id:
@@ -379,8 +431,11 @@ class Session:
         if pinned:
             system = system + "\n\n" + pinned
 
+        from .trace import now_ms
+
         for step in range(1, max_steps + 1):
-            self.renderer.on_step(step, max_steps)
+            step_mark_at = now_ms()
+            self.renderer.on_step(step, max_steps, started_at=step_mark_at)
             self.status = "busy"
             self._update_record()
             self._maybe_compact()
@@ -392,6 +447,8 @@ class Session:
             tool_uses: List[ToolUseBlock] = []
             stop_reason = "end_turn"
             usage: dict = {}
+            stream_started_at = step_mark_at
+            first_token_at: Optional[int] = None
 
             aborted = False
             stream_error: Optional[ProviderError] = None
@@ -402,6 +459,8 @@ class Session:
                 tool_uses.clear()
                 usage = {}
                 aborted = False
+                stream_started_at = now_ms()
+                first_token_at = None
                 try:
                     for event in self.provider.stream(
                         system=system,
@@ -415,15 +474,33 @@ class Session:
                         if isinstance(event, ReasoningDelta):
                             chunk = self._scrub(event.text)
                             reasoning_buf.append(chunk)
-                            self.renderer.on_reasoning(chunk)
+                            if first_token_at is None:
+                                first_token_at = now_ms()
+                                self.renderer.on_reasoning(
+                                    chunk, first_token_at=first_token_at
+                                )
+                            else:
+                                self.renderer.on_reasoning(chunk)
                         elif isinstance(event, TextDelta):
                             chunk = self._scrub(event.text)
                             text_buf.append(chunk)
-                            self.renderer.on_text(chunk)
+                            if first_token_at is None:
+                                first_token_at = now_ms()
+                                self.renderer.on_text(
+                                    chunk, first_token_at=first_token_at
+                                )
+                            else:
+                                self.renderer.on_text(chunk)
                         elif isinstance(event, ToolUse):
                             block = ToolUseBlock(id=event.id, name=event.name, input=event.input)
                             tool_uses.append(block)
-                            self.renderer.on_tool_start(event.name, event.input)
+                            self.renderer.on_tool_start(
+                                event.name,
+                                event.input,
+                                call_id=event.id,
+                                step=step,
+                                started_at=now_ms(),
+                            )
                         elif isinstance(event, Stop):
                             stop_reason = event.reason
                             usage = event.usage or {}
@@ -449,12 +526,27 @@ class Session:
                     self.status = "busy"
                     self._update_record()
 
+            completed_at = now_ms()
+            duration_ms = max(0, completed_at - stream_started_at)
+            stop_kwargs = dict(
+                step=step,
+                started_at=stream_started_at,
+                first_token_at=first_token_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
+            )
+
             if stream_error is not None:
                 err_text = self._scrub(str(stream_error))
                 self.renderer.on_error(err_text)
                 err_msg = Message.assistant(
                     [TextBlock(f"[error] {err_text}")], error=err_text,
                     agent=self.agent_name, model=self.model_id,
+                    step=step,
+                    started_at=stream_started_at,
+                    first_token_at=first_token_at,
+                    completed_at=completed_at,
+                    duration_ms=duration_ms,
                 )
                 self.messages.append(err_msg)
                 self._persist_message(err_msg)
@@ -475,6 +567,11 @@ class Session:
                 snapshots={"start": start_snap, "end": end_snap},
                 usage=usage, aborted=aborted,
                 cost=compute_cost(usage, self._cost_rates()),
+                step=step,
+                started_at=stream_started_at,
+                first_token_at=first_token_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
             )
             self.messages.append(assistant_msg)
             self._persist_message(assistant_msg)
@@ -484,26 +581,42 @@ class Session:
             self._update_record()
 
             if aborted:
-                self.renderer.on_stop("aborted", usage)
+                self.renderer.on_stop("aborted", usage, **stop_kwargs)
                 return
 
             # Continue only when the model requested tools (finish_reason tool_calls)
             if not tool_uses:
-                self.renderer.on_stop(stop_reason, usage)
+                self.renderer.on_stop(stop_reason, usage, **stop_kwargs)
                 return
             if stop_reason in ("end_turn", "stop", "max_tokens", "length") and not tool_uses:
-                self.renderer.on_stop(stop_reason, usage)
+                self.renderer.on_stop(stop_reason, usage, **stop_kwargs)
                 return
             if step >= max_steps:
-                self.renderer.on_stop("max_steps", usage)
+                self.renderer.on_stop("max_steps", usage, **stop_kwargs)
                 note = Message.user_text("[system] maximum steps reached; stopping.")
                 self.messages.append(note)
                 self._persist_message(note)
                 return
 
+            self.renderer.on_stop(stop_reason, usage, **stop_kwargs)
+
             results = []
+            tool_spans: List[dict] = []
             for tu in tool_uses:
+                exec_started = now_ms()
                 result = self._scrub_tool_result(self._execute_tool(tu))
+                ended_at = now_ms()
+                span_ms = max(0, ended_at - exec_started)
+                tool_spans.append(
+                    {
+                        "id": tu.id,
+                        "name": tu.name,
+                        "started_at": exec_started,
+                        "duration_ms": span_ms,
+                        "ended_at": ended_at,
+                        "is_error": bool(result.is_error),
+                    }
+                )
                 results.append(
                     ToolResultBlock(
                         tool_use_id=tu.id,
@@ -512,8 +625,16 @@ class Session:
                         attachments=list(result.attachments or []),
                     )
                 )
-                self.renderer.on_tool_result(tu.name, result)
-            tool_msg = Message.tool_results(results)
+                self.renderer.on_tool_result(
+                    tu.name,
+                    result,
+                    call_id=tu.id,
+                    step=step,
+                    started_at=exec_started,
+                    duration_ms=span_ms,
+                    ended_at=ended_at,
+                )
+            tool_msg = Message.tool_results(results, tool_spans=tool_spans)
             self.messages.append(tool_msg)
             self._persist_message(tool_msg)
 
@@ -604,8 +725,7 @@ class Session:
             meta = {"version": "0.1.0"}
             if self.parent_id:
                 meta["parent_id"] = self.parent_id
-            if self.skill_name:
-                meta["skill"] = self.skill_name
+            self._write_skill_metadata(meta)
             rec = SessionRecord(
                 id=self.id,
                 directory=str(self.workdir),
@@ -650,11 +770,17 @@ class Session:
         existing.metadata["status"] = self.status
         if self.parent_id:
             existing.metadata["parent_id"] = self.parent_id
-        if self.skill_name:
-            existing.metadata["skill"] = self.skill_name
-        else:
-            existing.metadata.pop("skill", None)
+        self._write_skill_metadata(existing.metadata)
         self.store.update_session(existing)
+
+    def _write_skill_metadata(self, meta: dict) -> None:
+        names = [n for n in (self.skill_names or []) if n]
+        if names:
+            meta["skills"] = names
+            meta["skill"] = names[0]
+        else:
+            meta.pop("skills", None)
+            meta.pop("skill", None)
 
     @classmethod
     def load(cls, *, provider, registry, config, workdir, permission, store,
@@ -667,12 +793,12 @@ class Session:
         rec = store.get_session(session_id_value)
         messages = store.load_messages(session_id_value) if rec else []
         parent_id = None
-        stored_skill = None
+        stored_skills: List[str] = []
         if rec and rec.metadata:
+            from .session_select import skills_from_metadata
+
             parent_id = rec.metadata.get("parent_id")
-            raw_sk = rec.metadata.get("skill")
-            if isinstance(raw_sk, str) and raw_sk.strip():
-                stored_skill = raw_sk.strip()
+            stored_skills = skills_from_metadata(rec.metadata)
         user_id = (rec.user_id if rec else None) or getattr(config, "user_id", "local") or "local"
 
         catalog_key = ""
@@ -709,8 +835,8 @@ class Session:
             resolved_agent = config.resolve_agent_name(stored)
 
         default_agent = (getattr(config, "default_agent", None) or "build").strip()
-        if stored_skill and resolved_agent != default_agent:
-            stored_skill = None
+        if stored_skills and resolved_agent != default_agent:
+            stored_skills = []
 
         sess = cls(
             provider=provider, registry=registry, config=config,
@@ -722,7 +848,7 @@ class Session:
             title=(rec.title if rec else default_title()),
             parent_id=parent_id,
             user_id=user_id,
-            skill_name=stored_skill,
+            skill_names=stored_skills,
         )
         sess._model_catalog_key = catalog_key
         if rec:

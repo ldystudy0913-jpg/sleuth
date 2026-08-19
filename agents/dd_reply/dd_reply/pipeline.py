@@ -11,9 +11,7 @@ from .config import Settings, get_settings
 from .kb import (
     KnowledgeBase,
     RiskPoint,
-    load_kb,
     load_kb_lexicon_only,
-    load_local_risk_points,
 )
 from .kb.remote import RiskRetrieval, retrieve_risk_codes
 from .lexicon_guard import guard_and_rewrite, hard_rules_prompt_block
@@ -32,41 +30,16 @@ def _load_system_prompt() -> str:
     )
 
 
-def _local_risk_context(found: List[RiskPoint], missing: List[str]) -> str:
-    blocks: List[str] = []
-    for rp in found:
-        blocks.append(
-            json.dumps(
-                {
-                    "code": rp.code,
-                    "name": rp.name,
-                    "category": rp.category,
-                    "questions": rp.questions,
-                    "answer_logic": rp.answer_logic,
-                    "materials": rp.materials,
-                    "conclusion_hints": rp.conclusion_hints,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-    text = "\n\n".join(blocks) if blocks else "（无命中风险点知识）"
-    if missing:
-        text += "\n\n【知识库未覆盖的编码】: " + ", ".join(missing)
-        text += "\n请在正文中为未覆盖编码留【待核实】槽位，并提示需人工补充知识库。"
-    return text
-
-
 def _remote_risk_context(
     retrievals: List[RiskRetrieval],
-    *,
-    local_fallback: Dict[str, RiskPoint],
-) -> Tuple[str, List[str], List[str], List[Dict[str, Any]]]:
-    """Build prompt block + found/missing codes + per-code meta."""
+) -> Tuple[str, List[str], List[str], List[Dict[str, Any]], List[Dict[str, str]]]:
+    """Build prompt block + found/missing codes + per-code meta + source cites."""
     found: List[str] = []
     missing: List[str] = []
     meta_rows: List[Dict[str, Any]] = []
     blocks: List[str] = []
+    sources: List[Dict[str, str]] = []
+    seen_cite: set[str] = set()
 
     for r in retrievals:
         row: Dict[str, Any] = {
@@ -78,48 +51,45 @@ def _remote_risk_context(
         }
         if r.ok:
             found.append(r.code)
-            hit_text = "\n".join(h.text_for_prompt() for h in r.hits[:8])
+            cites = []
+            for h in r.hits:
+                cite = h.source_cite()
+                cites.append(cite)
+                key = cite
+                if key not in seen_cite:
+                    seen_cite.add(key)
+                    sources.append(
+                        {
+                            "code": r.code,
+                            "cite": cite,
+                            "file_name": h.file_name,
+                            "title": h.title,
+                            "url": h.source_url(),
+                            "knowledge_id": h.knowledge_id,
+                        }
+                    )
+            hit_text = "\n".join(h.text_for_prompt() for h in r.hits)
             blocks.append(
                 f"### 风险点 {r.code}（远程检索，question={r.question!r}）\n"
                 f"请从下列知识摘录中归纳：风险点名称、对应尽调问题、回答判断要点、"
                 f"对应材料、相关制度要点。材料清单用于判断附件是否充分，"
-                f"不要求每份材料都必须齐套。\n{hit_text}"
+                f"不要求每份材料都必须齐套。引用知识时带上来源（文件名/链接）。\n"
+                f"{hit_text}"
             )
-            row["top_titles"] = [h.title or h.file_name for h in r.hits[:5]]
-        elif r.code in local_fallback:
-            rp = local_fallback[r.code]
-            found.append(r.code)
-            row["source"] = "fallback"
-            row["fallback_reason"] = r.error or "empty_hits"
-            blocks.append(
-                "### 风险点 "
-                + r.code
-                + "（远程未命中，已回退本地种子）\n"
-                + json.dumps(
-                    {
-                        "code": rp.code,
-                        "name": rp.name,
-                        "category": rp.category,
-                        "questions": rp.questions,
-                        "answer_logic": rp.answer_logic,
-                        "materials": rp.materials,
-                        "conclusion_hints": rp.conclusion_hints,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
+            row["top_titles"] = [h.title or h.file_name for h in r.hits]
+            row["sources"] = cites
         else:
             missing.append(r.code)
             reason = r.error or "empty_hits"
             blocks.append(
                 f"### 风险点 {r.code}（检索失败或无结果：{reason}）\n"
                 "请在正文中留【待核实】槽位，提示需人工查询知识库或补充制度。"
+                "不要使用本地种子知识或臆造制度条文。"
             )
         meta_rows.append(row)
 
     text = "\n\n".join(blocks) if blocks else "（无风险点检索结果）"
-    return text, found, missing, meta_rows
+    return text, found, missing, meta_rows, sources
 
 
 def _attachment_context(bundle: AttachmentBundle) -> str:
@@ -284,55 +254,58 @@ def _parse_verification_list(raw: str) -> List[VerificationItem]:
     return items
 
 
+def _sources_markdown(sources: List[Dict[str, str]]) -> str:
+    if not sources:
+        return ""
+    lines = ["## 知识来源", "以下条目来自知识库检索，供核对原文："]
+    for i, s in enumerate(sources, start=1):
+        code = s.get("code") or ""
+        cite = s.get("cite") or s.get("file_name") or "未知来源"
+        prefix = f"（{code}）" if code else ""
+        lines.append(f"{i}. {prefix}{cite}")
+    return "\n".join(lines)
+
+
 def _resolve_knowledge(
     req: FrameworkRequest,
     settings: Settings,
     kb: KnowledgeBase,
 ) -> Tuple[str, List[RiskPoint], List[str], Dict[str, Any]]:
     """Return (prompt_context, structured_found_for_fallback, missing, kb_meta)."""
-    meta: Dict[str, Any] = {"mode": "local"}
-
-    if settings.kb_api_configured():
-        meta["mode"] = "remote"
-        retrievals = retrieve_risk_codes(req.risk_codes, settings)
-        local_map: Dict[str, RiskPoint] = {}
-        if settings.kb_fallback_local:
-            try:
-                local_map = load_local_risk_points(settings.kb_path)
-            except (OSError, ValueError) as exc:
-                meta["fallback_load_error"] = str(exc)
-
-        ctx, found_codes, missing, rows = _remote_risk_context(
-            retrievals, local_fallback=local_map if settings.kb_fallback_local else {}
+    del kb  # lexicon-only; risk points always come from the KB API
+    if not settings.kb_api_configured():
+        raise ValueError(
+            "DD_REPLY_KB_API_URL is required; risk-point knowledge is remote-only"
         )
-        meta["retrievals"] = rows
-        # Structured RiskPoints only for offline fallback skeleton when we have local copies
-        found_rp = [local_map[c] for c in found_codes if c in local_map]
-        # If remote-only hits (no local struct), synthesize minimal RiskPoint for fallback MD
-        for c in found_codes:
-            if c in local_map:
-                continue
-            ret = next((x for x in retrievals if x.code == c), None)
-            title = ""
-            para = ""
-            if ret and ret.hits:
-                title = ret.hits[0].title or ret.hits[0].file_name
-                para = ret.hits[0].paragraph[:800]
-            found_rp.append(
-                RiskPoint(
-                    code=c,
-                    name=title or c,
-                    category="远程知识",
-                    questions=[f"请结合知识库摘录核实风险点 {c}"],
-                    answer_logic=para or "结合检索摘录组织核实要点；判断附件是否足以佐证。",
-                    materials=[],
-                    conclusion_hints={},
-                )
-            )
-        return ctx, found_rp, missing, meta
 
-    found, missing = kb.lookup_risks(req.risk_codes)
-    return _local_risk_context(found, missing), found, missing, meta
+    meta: Dict[str, Any] = {
+        "mode": "remote",
+        "top_k": int(getattr(settings, "kb_top_k", 8) or 0),
+    }
+    retrievals = retrieve_risk_codes(req.risk_queries(), settings)
+    ctx, found_codes, missing, rows, sources = _remote_risk_context(retrievals)
+    meta["retrievals"] = rows
+    meta["sources"] = sources
+    found_rp: List[RiskPoint] = []
+    for c in found_codes:
+        ret = next((x for x in retrievals if x.code == c), None)
+        title = ""
+        para = ""
+        if ret and ret.hits:
+            title = ret.hits[0].title or ret.hits[0].file_name
+            para = ret.hits[0].paragraph[:800]
+        found_rp.append(
+            RiskPoint(
+                code=c,
+                name=title or c,
+                category="远程知识",
+                questions=[f"请结合知识库摘录核实风险点 {c}"],
+                answer_logic=para or "结合检索摘录组织核实要点；判断附件是否足以佐证。",
+                materials=[],
+                conclusion_hints={},
+            )
+        )
+    return ctx, found_rp, missing, meta
 
 
 def generate_framework(
@@ -344,14 +317,15 @@ def generate_framework(
     use_llm: bool = True,
 ) -> FrameworkResult:
     settings = settings or get_settings()
-    if not req.risk_codes:
-        raise ValueError("risk_codes must contain at least one code")
+    if not req.risk_queries():
+        raise ValueError("provide at least one risk code or risk name")
+    if not settings.kb_api_configured():
+        raise ValueError(
+            "DD_REPLY_KB_API_URL is required; risk-point knowledge is remote-only"
+        )
 
     if kb is None:
-        if settings.kb_api_configured():
-            kb = load_kb_lexicon_only(settings.kb_path)
-        else:
-            kb = load_kb(settings.kb_path)
+        kb = load_kb_lexicon_only(settings.kb_path)
 
     risk_ctx, found, missing, kb_meta = _resolve_knowledge(req, settings, kb)
     bundle = load_attachments(
@@ -377,7 +351,7 @@ def generate_framework(
             + materials_note
             + "\n\n【附件摘要】\n"
             + _attachment_context(bundle)
-            + "\n\n请生成四段式答复框架。"
+            + "\n\n请生成四段式答复框架。引用知识摘录时必须写明来源（文件名、链接或 knowledgeId）。"
         )
         messages = [
             {"role": "system", "content": system},
@@ -420,6 +394,9 @@ def generate_framework(
 
     if DISCLAIMER not in markdown:
         markdown = markdown.rstrip() + f"\n\n> {DISCLAIMER}\n"
+    src_md = _sources_markdown(list(kb_meta.get("sources") or []))
+    if src_md and "知识来源" not in markdown:
+        markdown = markdown.rstrip() + "\n\n" + src_md + "\n"
 
     sections = _parse_sections(markdown)
     verification = _parse_verification_list(sections.get("verification_raw", ""))

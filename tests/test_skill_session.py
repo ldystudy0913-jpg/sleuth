@@ -11,7 +11,12 @@ from sleuth.cli import _expand_command
 from sleuth.config import AgentConfig, Config
 from sleuth.permission import Permission
 from sleuth.session import NullRenderer, Session
-from sleuth.session_select import SKILL_ONLY_DEFAULT_ERROR, apply_session_selectors
+from sleuth.session_select import (
+    SKILL_ONLY_DEFAULT_ERROR,
+    apply_session_selectors,
+    parse_skill_names,
+    skills_from_metadata,
+)
 from sleuth.skill import SkillInfo, set_skills
 from sleuth.storage.base import SessionRecord
 from sleuth.storage.sqlite import SQLiteStore
@@ -54,6 +59,15 @@ def _demo_skill() -> SkillInfo:
     )
 
 
+def _other_skill() -> SkillInfo:
+    return SkillInfo(
+        name="other",
+        description="Other skill",
+        location=Path("/tmp/other/SKILL.md"),
+        content="# Other\n\nDo the other steps.",
+    )
+
+
 class SessionSkillTests(unittest.TestCase):
     def setUp(self):
         set_skills({"demo": _demo_skill()})
@@ -63,8 +77,30 @@ class SessionSkillTests(unittest.TestCase):
         sess = _sess()
         self.assertEqual(sess.set_skill("demo"), "demo")
         self.assertEqual(sess.skill_name, "demo")
+        self.assertEqual(sess.skill_names, ["demo"])
         self.assertIsNone(sess.set_skill(""))
         self.assertIsNone(sess.skill_name)
+        self.assertEqual(sess.skill_names, [])
+
+    def test_set_skills_multiple(self):
+        set_skills({"demo": _demo_skill(), "other": _other_skill()})
+        sess = _sess()
+        self.assertEqual(sess.set_skills(["demo", "other", "demo"]), ["demo", "other"])
+        self.assertEqual(sess.skill_name, "demo")
+        self.assertEqual(sess.skill_names, ["demo", "other"])
+        text = sess._pinned_skill_prompt()
+        self.assertIn("Do the demo steps.", text)
+        self.assertIn("Do the other steps.", text)
+        self.assertIn("these names", text)
+
+    def test_add_and_remove_skill(self):
+        set_skills({"demo": _demo_skill(), "other": _other_skill()})
+        sess = _sess()
+        sess.set_skill("demo")
+        self.assertEqual(sess.add_skill("other"), ["demo", "other"])
+        self.assertEqual(sess.remove_skill("demo"), ["other"])
+        self.assertEqual(sess.remove_skill("missing"), ["other"])
+        self.assertEqual(sess.remove_skill("other"), [])
 
     def test_set_skill_rejects_non_default_agent(self):
         sess = _sess(agent_name="plan")
@@ -125,6 +161,7 @@ class SessionSkillTests(unittest.TestCase):
             sess.set_skill("demo")
             rec = store.get_session(sid)
             self.assertEqual(rec.metadata.get("skill"), "demo")
+            self.assertEqual(rec.metadata.get("skills"), ["demo"])
 
             sess2 = Session.load(
                 provider=provider,
@@ -139,6 +176,51 @@ class SessionSkillTests(unittest.TestCase):
                 renderer=NullRenderer(),
             )
             self.assertEqual(sess2.skill_name, "demo")
+            self.assertEqual(sess2.skill_names, ["demo"])
+
+    def test_skill_sticky_restore_list(self):
+        set_skills({"demo": _demo_skill(), "other": _other_skill()})
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+            store = SQLiteStore(Path(td) / "t.db")
+            sid = "sess_stickyskills00000000002"
+            cfg = Config(
+                default_agent="build",
+                user_id="alice",
+                agents={"build": AgentConfig(name="build")},
+            )
+            provider = MagicMock()
+            provider.id = "p"
+            sess = Session(
+                provider=provider,
+                registry=ToolRegistry(),
+                config=cfg,
+                workdir=Path(td),
+                permission=Permission(rules=[]),
+                agent_name="build",
+                model_id="m",
+                id=sid,
+                renderer=NullRenderer(),
+                store=store,
+                user_id="alice",
+            )
+            sess.set_skills(["other", "demo"])
+            rec = store.get_session(sid)
+            self.assertEqual(rec.metadata.get("skill"), "other")
+            self.assertEqual(rec.metadata.get("skills"), ["other", "demo"])
+
+            sess2 = Session.load(
+                provider=provider,
+                registry=ToolRegistry(),
+                config=cfg,
+                workdir=Path(td),
+                permission=Permission(rules=[]),
+                store=store,
+                session_id_value=sid,
+                agent_name="build",
+                model_id="m",
+                renderer=NullRenderer(),
+            )
+            self.assertEqual(sess2.skill_names, ["other", "demo"])
 
 
 class ApplySelectorsTests(unittest.TestCase):
@@ -159,6 +241,15 @@ class ApplySelectorsTests(unittest.TestCase):
         err = apply_session_selectors(sess, {"skill": ""}, self.cfg)
         self.assertIsNone(err)
         self.assertIsNone(sess.skill_name)
+
+    def test_parse_and_metadata(self):
+        self.assertEqual(parse_skill_names("demo, other demo"), ["demo", "other"])
+        self.assertEqual(parse_skill_names([" other ", "demo", "off"]), ["other", "demo"])
+        self.assertEqual(
+            skills_from_metadata({"skill": "demo", "skills": ["other", "demo"]}),
+            ["other", "demo"],
+        )
+        self.assertEqual(skills_from_metadata({"skill": "demo"}), ["demo"])
 
     def test_omit_skill_keeps_pin(self):
         sess = _sess()
@@ -196,6 +287,42 @@ class ApplySelectorsTests(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(sess.skill_name, "demo")
 
+    def test_skills_array_sets_multiple(self):
+        set_skills({"demo": _demo_skill(), "other": _other_skill()})
+        sess = _sess()
+        err = apply_session_selectors(
+            sess, {"skills": ["other", "demo", "other"]}, self.cfg
+        )
+        self.assertIsNone(err)
+        self.assertEqual(sess.skill_names, ["other", "demo"])
+
+    def test_skills_wins_over_skill(self):
+        set_skills({"demo": _demo_skill(), "other": _other_skill()})
+        sess = _sess()
+        sess.set_skill("demo")
+        err = apply_session_selectors(
+            sess, {"skill": "demo", "skills": ["other"]}, self.cfg
+        )
+        self.assertIsNone(err)
+        self.assertEqual(sess.skill_names, ["other"])
+
+    def test_empty_skills_clears(self):
+        sess = _sess()
+        sess.set_skill("demo")
+        err = apply_session_selectors(sess, {"skills": []}, self.cfg)
+        self.assertIsNone(err)
+        self.assertEqual(sess.skill_names, [])
+
+    def test_non_default_rejects_skills_array(self):
+        sess = _sess()
+        err = apply_session_selectors(
+            sess,
+            {"agent": "dd_analyst", "skills": ["demo"]},
+            self.cfg,
+        )
+        self.assertEqual(err, SKILL_ONLY_DEFAULT_ERROR)
+        self.assertEqual(sess.agent_name, "build")
+
 
 class CliSkillSlashTests(unittest.TestCase):
     def setUp(self):
@@ -213,6 +340,20 @@ class CliSkillSlashTests(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("skill set to demo", out)
         self.assertIn("skill cleared", out)
+
+    def test_skill_multi_and_add(self):
+        set_skills({"demo": _demo_skill(), "other": _other_skill()})
+        sess = _sess()
+        buf = io.StringIO()
+        with patch("sleuth.cli._print", side_effect=lambda s: buf.write(s)):
+            self.assertEqual(_expand_command(sess, "/skill demo other"), (None, None))
+            self.assertEqual(sess.skill_names, ["demo", "other"])
+            self.assertEqual(_expand_command(sess, "/skill -demo"), (None, None))
+            self.assertEqual(sess.skill_names, ["other"])
+            self.assertEqual(_expand_command(sess, "/skill +demo"), (None, None))
+            self.assertEqual(sess.skill_names, ["other", "demo"])
+        out = buf.getvalue()
+        self.assertIn("skills set to demo, other", out)
 
     def test_skill_rejects_when_not_default_agent(self):
         sess = _sess(agent_name="plan")
@@ -265,10 +406,19 @@ class HttpSkillSelectorTests(unittest.TestCase):
                     self.agent_name = "build"
                     self.model_id = "m"
                     self.provider = type("P", (), {"id": "p"})()
-                    self.skill_name = None
+                    self.skill_names = []
                     self.yolo = True
                     self._last_usage = {}
                     self._session_cost = 0.0
+
+                @property
+                def skill_name(self):
+                    return self.skill_names[0] if self.skill_names else None
+
+                @skill_name.setter
+                def skill_name(self, value):
+                    raw = (value or "").strip() if isinstance(value, str) else ""
+                    self.skill_names = [raw] if raw else []
 
                 def model_ref(self):
                     return "p/m"
@@ -276,7 +426,7 @@ class HttpSkillSelectorTests(unittest.TestCase):
                 def set_agent(self, name, yolo=False):
                     self.agent_name = name
                     if name != "build":
-                        self.skill_name = None
+                        self.skill_names = []
                     return name
 
                 def set_model(self, m):
@@ -287,17 +437,21 @@ class HttpSkillSelectorTests(unittest.TestCase):
                     self.model_id = "m"
                     return "p/m"
 
-                def set_skill(self, name):
-                    raw = (name or "").strip()
-                    if raw.lower() in ("", "off", "none", "default"):
-                        self.skill_name = None
-                        return None
+                def set_skills(self, names):
+                    parsed = parse_skill_names(names)
+                    if not parsed:
+                        self.skill_names = []
+                        return []
                     if self.agent_name != "build":
                         raise ValueError(
                             "skill only allowed when agent is the default agent"
                         )
-                    self.skill_name = raw
-                    return raw
+                    self.skill_names = parsed
+                    return list(self.skill_names)
+
+                def set_skill(self, name):
+                    names = self.set_skills([name] if name else [])
+                    return names[0] if names else None
 
                 def _ensure_persisted(self):
                     return None
@@ -341,6 +495,20 @@ class HttpSkillSelectorTests(unittest.TestCase):
                 )
                 self.assertEqual(created.status_code, 200)
                 self.assertEqual(created.json().get("skill"), "demo")
+                self.assertEqual(created.json().get("skills"), ["demo"])
+
+                multi = client.post(
+                    "/v1/sessions",
+                    headers=headers,
+                    json={
+                        "agent": "build",
+                        "model": "m",
+                        "skills": ["demo", "other"],
+                    },
+                )
+                self.assertEqual(multi.status_code, 200)
+                self.assertEqual(multi.json().get("skill"), "demo")
+                self.assertEqual(multi.json().get("skills"), ["demo", "other"])
 
                 ok = client.post(
                     f"/v1/sessions/{sid}/messages",
@@ -354,6 +522,7 @@ class HttpSkillSelectorTests(unittest.TestCase):
                 )
                 self.assertEqual(ok.status_code, 200)
                 self.assertIsNone(ok.json().get("skill"))
+                self.assertEqual(ok.json().get("skills"), [])
 
                 bad = client.post(
                     f"/v1/sessions/{sid}/messages",

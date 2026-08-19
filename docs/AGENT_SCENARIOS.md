@@ -181,7 +181,9 @@ START
 | `lookup_risk_kb` | `ddreply_lookup_risk_kb` | 按编码查 KB |
 | `list_risk_codes` | `ddreply_list_risk_codes` | 列出支持编码 |
 | `list_lexicon` | `ddreply_list_lexicon` | 用语规范 |
-| `health` | `ddreply_health` | 探活 |
+| `health` | `ddreply_health` | MCP 探活（与 `GET /health` 同 JSON） |
+
+HTTP：`GET /health`（与 MCP 同端口，供 Docker/K8s 探活，不走 MCP 协议）。
 
 入口：[`dd_reply/mcp_server.py`](../agents/dd_reply/dd_reply/mcp_server.py) → [`pipeline.py`](../agents/dd_reply/dd_reply/pipeline.py) 的 `generate_framework`。
 
@@ -239,7 +241,7 @@ sequenceDiagram
   SL-->>U: 四段框架供人工使用
 ```
 
-可选：`DD_REPLY_KB_PATH` 指向外部知识库目录（`risk_points.json`、`lexicon.json`）。
+风险点知识只走 `DD_REPLY_KB_API_URL`；`DD_REPLY_KB_PATH` 仅用于本地 `lexicon.json`（禁用词）。`DD_REPLY_KB_TOP_K` 控制每个编码保留的命中条数（默认 8）。
 
 ---
 

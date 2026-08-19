@@ -72,7 +72,7 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 - **会话主键**：创建/列表/详情响应字段名为 **`id`**；发消息回包与 SSE 事件字段名为 **`session_id`**。二者是**同一值**（如 `sess_a1b2…`），前端统一存成 `sessionId` 即可。多会话时所有读写必须带该 id（URL 路径），并固定 `X-User-Id`。
 - **同步发消息**：`POST .../messages` 会阻塞到整轮 Agent（含工具调用）跑完再返回整包 JSON。前端需设足够长的超时（建议 ≥ 5–15 分钟），并做好 loading。
 - **流式发消息**：`POST .../messages/stream` 使用 **SSE**（`text/event-stream`），边跑边推 `text` / 工具事件，最后以 `done` 收尾。**每条 `data` 事件均含 `session_id`**。原生 `EventSource` 只支持 GET，请用 `fetch` + `ReadableStream`。
-- **模型 / Agent / Skill 选择**：每次创建会话和发消息都应带 `agent`、`model`、`skill`。未选 agent / model 时传 `GET /v1/agents`、`GET /v1/models` 的 `default`；未选 skill、或当前不是默认 agent 时传 `skill: ""`。Skill **仅当 `agent` 等于默认 agent** 时可选并注入 SKILL.md；专用 agent 带非空 `skill` 返回 `400`。字段省略时兼容旧客户端（沿用会话已存值），前端主路径不要依赖省略。MCP 可晚于 Sleuth 启动，后台会重试；也可 `POST /v1/mcp/reload` 立即重连后再拉 agents。
+- **模型 / Agent / Skill 选择**：每次创建会话和发消息都应带 `agent`、`model`、`skills`（推荐）或旧字段 `skill`。未选 agent / model 时传 `GET /v1/agents`、`GET /v1/models` 的 `default`；未选 skill、或当前不是默认 agent 时传 `skills: []` 且 `skill: ""`。Skill **仅当 `agent` 等于默认 agent** 时可选并注入 SKILL.md（可同时钉多个，按数组顺序注入全文）；专用 agent 带非空 `skills` / `skill` 返回 `400`。两个字段都出现时以 `skills` 为准。字段省略时兼容旧客户端（沿用会话已存值），前端主路径不要依赖省略。MCP 可晚于 Sleuth 启动，后台会重试；也可 `POST /v1/mcp/reload` 立即重连后再拉 agents。
 - **无 CORS 中间件**：浏览器跨域需自行在网关加 CORS，或同域反代。
 - **会话 id** 形如：`sess_` + 24 位 hex（例：`sess_a1b2c3d4e5f678901234abcd`）。
 - 时间字段：
@@ -115,6 +115,7 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `POST` | `/v1/sessions` | 用户头 | 创建会话 |
 | `GET` | `/v1/sessions` | 用户头 | 会话列表（含预览） |
 | `GET` | `/v1/sessions/{session_id}` | 用户头 | 会话详情 + 消息 |
+| `GET` | `/v1/sessions/{session_id}/trace` | 用户头 | 会话执行台账（轮次 / 工具 / 计时） |
 | `POST` | `/v1/sessions/{session_id}/messages` | 用户头 | 发送一轮对话（**同步 JSON**） |
 | `POST` | `/v1/sessions/{session_id}/messages/stream` | 用户头 | 发送一轮对话（**SSE 流式**） |
 | `GET` | `/v1/models` | 无 | 模型目录（选择器用；不含密钥） |
@@ -122,7 +123,7 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `GET` | `/v1/mcp` | 无 | MCP 服务连接状态 |
 | `POST` | `/v1/mcp/reload` | Admin | 热重载 MCP（重连 + 刷新 Agent Card） |
 | `GET` | `/v1/users/{user_id}/usage` | 本人或 Admin | 用量汇总 |
-| `GET` | `/v1/skills` | 无 | Skill 目录（默认 agent 下发消息 body 的 `skill` 用此 `name`） |
+| `GET` | `/v1/skills` | 无 | Skill 目录（默认 agent 下发消息 body 的 `skills` / `skill` 用此 `name`） |
 | `POST` | `/v1/skills/reload` | Admin | 强制重载 Skill |
 
 ---
@@ -162,7 +163,8 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `agent` | string | 否 | 服务端 `default_agent`（常为 `build`） | Agent **id**（`GET /v1/agents` 的 `name`）。未选时传该接口的 `default` |
 | `yolo` | boolean | 否 | `true` | `true` 时自动批准工具调用 |
 | `model` | string | 否 | 配置默认模型 | 未选时传 `GET /v1/models` 的 `default` |
-| `skill` | string | 否 | `""`（无绑定） | 仅默认 agent 可非空；未选或专用 agent 时传 `""` |
+| `skills` | string[] | 否 | `[]` | 推荐。仅默认 agent 可非空；未选或专用 agent 时传 `[]`。按顺序把 SKILL.md 注入系统提示 |
+| `skill` | string | 否 | `""`（无绑定） | 兼容旧客户端的单选；与 `skills` 同时出现时以 `skills` 为准。`""` 清空 |
 
 **请求示例**
 
@@ -176,6 +178,7 @@ X-User-Id: alice
   "agent": "build",
   "yolo": true,
   "model": "qwen-max",
+  "skills": [],
   "skill": ""
 }
 ```
@@ -193,7 +196,8 @@ X-User-Id: alice
     "id": "qwen-max",
     "providerID": "qwen-max"
   },
-  "skill": null
+  "skill": null,
+  "skills": []
 }
 ```
 
@@ -238,6 +242,7 @@ X-User-Id: alice
     "agent": "dd_analyst",
     "model": { "id": "qwen-max", "providerID": "qwen-max" },
     "skill": null,
+    "skills": [],
     "tokens_input": 1200,
     "tokens_output": 340,
     "time_updated": 1723123456789,
@@ -273,6 +278,7 @@ X-User-Id: alice
   "agent": "dd_analyst",
   "model": { "id": "qwen-max", "providerID": "qwen-max" },
   "skill": null,
+  "skills": [],
   "cost": 0.045,
   "tokens": {
     "input": 5000,
@@ -294,7 +300,12 @@ X-User-Id: alice
       "role": "assistant",
       "text": "检查结论：…",
       "usage": { "input": 100, "output": 50 },
-      "cost": 0.001
+      "cost": 0.001,
+      "step": 1,
+      "started_at": 1723123456789,
+      "first_token_at": 1723123457010,
+      "completed_at": 1723123457989,
+      "duration_ms": 1200
     }
   ]
 }
@@ -305,6 +316,84 @@ X-User-Id: alice
 | `user` | 用户 |
 | `assistant` | 助手（`text` 为拼接后的可见文本；含工具轮次时可能较碎，以落库为准） |
 | `tool` | 工具结果消息（若存在；`text` 为工具输出摘要） |
+
+`messages[]` 还可带 `step` / `started_at` / `first_token_at` / `completed_at` / `duration_ms`（Unix **毫秒**）。旧会话没有计时时这些字段为 `null`；忽略未知字段的旧客户端不受影响。完整工具台账（含 `id` / 耗时）见 §4.4.1。
+
+**错误**
+
+| 状态 | body |
+|------|------|
+| `404` | `{ "error": "not found" }` |
+
+---
+
+### 4.4.1 会话执行台账（Trace）
+
+`GET /v1/sessions/{session_id}/trace`
+
+**说明**：从已落库消息投影 Trajectory 风格台账（不新建表）。前端用 `records` 画轮次列表；时间条用 `started_at` + `duration_ms`。旧会话缺计时字段为 `null`，按「未知时长」处理。**进行中的 span 不会编造 duration**（实时路径见 SSE，只有 start、没有 duration）。
+
+**Headers**：`X-User-Id`（须匹配会话归属用户，否则 404）。
+
+**响应 `200`**
+
+```json
+{
+  "session_id": "sess_a1b2c3d4e5f678901234abcd",
+  "records": [
+    {
+      "kind": "user",
+      "seq": 1,
+      "message_id": "msg_...",
+      "started_at": 1723123456789,
+      "preview": "请检查…"
+    },
+    {
+      "kind": "message",
+      "seq": 2,
+      "message_id": "msg_...",
+      "step": 1,
+      "started_at": 1723123456900,
+      "first_token_at": 1723123457120,
+      "completed_at": 1723123458100,
+      "duration_ms": 1200,
+      "usage": { "input": 100, "output": 40 },
+      "preview": "正在检查…"
+    },
+    {
+      "kind": "tool",
+      "seq": 3,
+      "message_id": "msg_...",
+      "id": "call_...",
+      "name": "ddreply_generate_reply_framework",
+      "started_at": 1723123458100,
+      "duration_ms": 800,
+      "ended_at": 1723123458900,
+      "is_error": false,
+      "preview": "ddreply_generate_reply_framework"
+    }
+  ]
+}
+```
+
+| `kind` | 含义 |
+|--------|------|
+| `user` | 用户输入 |
+| `message` | 助手一轮模型流（含 TTFT） |
+| `tool` | 一次工具执行 |
+
+时间字段均为 Unix **毫秒**。`preview` 已截断并按服务端脱敏策略处理。
+
+#### 与 Trajectory 字段对照
+
+| Trajectory | Sleuth | 说明 |
+|------------|--------|------|
+| `startedAt` | `started_at` | 开始时间（ms） |
+| `timeSeconds` | `duration_ms / 1000` | 完成后再有时长；运行中不要虚构 |
+| TTFT | `first_token_at - started_at` | 仅 `kind=message`；缺一则为未知 |
+| `kind` | `kind` | `user` / `message` / `tool` |
+
+实时流式时：用 SSE 的 `step` / `tool_start` / `tool_result` / `stop` 追加行；结束后再用本接口对齐历史。
 
 **错误**
 
@@ -336,7 +425,8 @@ X-User-Id: alice
 | `agent` | string | 否 | 未选时传默认 agent | 每轮带当前选择器值 |
 | `yolo` | boolean | 否 | `true` | 是否自动批准工具 |
 | `model` | string | 否 | 未选时传默认模型 | 每轮带当前选择器值 |
-| `skill` | string | 否 | `""` | 仅默认 agent 可非空；否则传 `""` |
+| `skills` | string[] | 否 | `[]` | 推荐；仅默认 agent 可非空，否则传 `[]` |
+| `skill` | string | 否 | `""` | 兼容单选；与 `skills` 同时出现时以 `skills` 为准 |
 
 **请求示例**
 
@@ -349,6 +439,7 @@ X-User-Id: alice
   "prompt": "请检查下面这份尽调报告：\n{...}",
   "agent": "build",
   "model": "qwen-max",
+  "skills": ["dd-report-check"],
   "skill": "dd-report-check",
   "yolo": true
 }
@@ -368,6 +459,7 @@ X-User-Id: alice
     "providerID": "qwen-max"
   },
   "skill": "dd-report-check",
+  "skills": ["dd-report-check"],
   "usage": {
     "input": 1200,
     "output": 400,
@@ -385,7 +477,8 @@ X-User-Id: alice
 | `usage` | **本轮最后一次**模型调用用量（非整会话累加） |
 | `cost` | 会话累计费用估算 |
 | `title` | 可能在首轮后更新为语义标题 |
-| `skill` | 当前绑定的 skill 名；未选为 `null` |
+| `skills` | 当前绑定的 skill 名列表；未选为 `[]` |
+| `skill` | 兼容字段，等于 `skills[0]`；未选为 `null` |
 
 **错误**
 
@@ -406,6 +499,8 @@ X-User-Id: alice
 
 **说明**：与 §4.5 **同一套鉴权与 Body**，但响应为 **SSE**。模型侧 `text` 按增量推送；MCP/工具为同步等待，期间会先有 `tool_start`，结束后有 `tool_result`（中间可能长时间没有 `text`）。连接结束前必有一条 `type=done`（含完整 `text`，请以前端最终对齐为准）。
 
+台账用 `step` / `tool_start` / `tool_result` / `stop` 追加行；时间条用 `started_at` + `duration_ms`。**运行中只有 start、没有 duration**（不要用墙钟时间填假长度）。`done` 仍作终态对齐，字段不变。旧事件 `type` 名与必填字段保持兼容，下列为新增可选字段。
+
 **Headers**
 
 | Header | 必填 | 说明 |
@@ -414,7 +509,7 @@ X-User-Id: alice
 | `X-User-Id` | 是 | 须与会话用户一致 |
 | `Accept: text/event-stream` | 建议 | |
 
-**Body**：同 §4.5（每轮带 `prompt` / `agent` / `model` / `skill`）。
+**Body**：同 §4.5（每轮带 `prompt` / `agent` / `model` / `skills`）。
 
 **成功时 HTTP `200`**，`Content-Type: text/event-stream`。
 
@@ -436,13 +531,13 @@ data: {"type":"text","delta":"你好","session_id":"sess_a1b2c3d4e5f678901234abc
 
 | `type` | 字段 | 说明 |
 |--------|------|------|
-| `text` | `delta`, `session_id` | 助手可见文本增量（拼起来即正文） |
-| `reasoning` | `delta`, `session_id` | 思考过程增量（可忽略） |
-| `step` | `step`, `max_steps`, `session_id` | Agent 循环步数 |
-| `tool_start` | `name`, `args_preview`, `session_id` | 开始调用工具（含 MCP）；`args_preview` 已截断 |
-| `tool_result` | `name`, `is_error`, `output_preview`, `session_id` | 工具返回；`output_preview` 已截断 |
+| `text` | `delta`, `session_id`；该步**首次**增量可带 `first_token_at` | 助手可见文本增量（拼起来即正文）；后续增量可省略 `first_token_at` |
+| `reasoning` | `delta`, `session_id`；该步**首次**增量可带 `first_token_at` | 思考过程增量（可忽略） |
+| `step` | `step`, `max_steps`, `session_id`；可选 `started_at` | Agent 循环步数 |
+| `tool_start` | `name`, `args_preview`, `session_id`；可选 `id`, `step`, `started_at` | 开始调用工具（含 MCP）；`args_preview` 已截断。`id` 为 tool call id |
+| `tool_result` | `name`, `is_error`, `output_preview`, `session_id`；可选 `id`, `step`, `started_at`, `duration_ms`, `ended_at` | 工具返回；`output_preview` 已截断。完成后才有 `duration_ms` |
 | `retry` | `attempt`, `message`, `wait`, `session_id` | 模型调用重试 |
-| `stop` | `reason`, `usage`, `session_id` | 单次模型流结束（一轮里可能多次） |
+| `stop` | `reason`, `usage`, `session_id`；可选 `step`, `started_at`, `first_token_at`, `completed_at`, `duration_ms` | 单次模型流结束（一轮里可能多次） |
 | `error` | `message`, `session_id` | 错误信息（连接可能仍继续到 `done`） |
 | `done` | 见下表 | **收尾**；对齐完整结果 |
 
@@ -461,6 +556,7 @@ data: {"type":"text","delta":"你好","session_id":"sess_a1b2c3d4e5f678901234abc
     "providerID": "qwen-max"
   },
   "skill": "dd-report-check",
+  "skills": ["dd-report-check"],
   "usage": {
     "input": 1200,
     "output": 400,
@@ -472,22 +568,24 @@ data: {"type":"text","delta":"你好","session_id":"sess_a1b2c3d4e5f678901234abc
 }
 ```
 
-与同步接口字段对齐：`text` / `title` / `agent` / `model` / `skill` / `usage` / `cost`。
+与同步接口字段对齐：`text` / `title` / `agent` / `model` / `skills` / `skill` / `usage` / `cost`。
 
 #### 示例事件流（示意）
 
 ```text
-data: {"type":"step","step":1,"max_steps":30,"session_id":"sess_..."}
+data: {"type":"step","step":1,"max_steps":30,"started_at":1723123456900,"session_id":"sess_..."}
 
-data: {"type":"text","delta":"正在","session_id":"sess_..."}
+data: {"type":"text","delta":"正在","first_token_at":1723123457120,"session_id":"sess_..."}
 
 data: {"type":"text","delta":"检查…","session_id":"sess_..."}
 
-data: {"type":"tool_start","name":"ddcheck_run_dd_check","args_preview":"{...}","session_id":"sess_..."}
+data: {"type":"tool_start","name":"ddcheck_run_dd_check","id":"call_...","step":1,"started_at":1723123458100,"args_preview":"{...}","session_id":"sess_..."}
 
-data: {"type":"tool_result","name":"ddcheck_run_dd_check","is_error":false,"output_preview":"{...}","session_id":"sess_..."}
+data: {"type":"stop","reason":"tool_use","usage":{...},"step":1,"started_at":1723123456900,"first_token_at":1723123457120,"completed_at":1723123458100,"duration_ms":1200,"session_id":"sess_..."}
 
-data: {"type":"text","delta":"\n结论：得分 72","session_id":"sess_..."}
+data: {"type":"tool_result","name":"ddcheck_run_dd_check","id":"call_...","is_error":false,"duration_ms":800,"ended_at":1723123458900,"output_preview":"{...}","session_id":"sess_..."}
+
+data: {"type":"text","delta":"\n结论：得分 72","first_token_at":1723123459000,"session_id":"sess_..."}
 
 data: {"type":"done","session_id":"sess_...","text":"正在检查…\n结论：得分 72","title":"...","model":{...},"usage":{...},"cost":0.01}
 ```
@@ -498,7 +596,8 @@ data: {"type":"done","session_id":"sess_...","text":"正在检查…\n结论：�
 |--|---------------------|----------------------------|
 | 响应 | 一次 JSON（含 `session_id`） | SSE 多帧（每帧含 `session_id`）+ 最后 `done` |
 | 打字机 | 否 | 是（拼 `text.delta`） |
-| 工具进度 | 无 | `tool_start` / `tool_result` |
+| 工具进度 | 无 | `tool_start` / `tool_result`（含 `id` / 耗时） |
+| 执行台账 | 结束后 `GET .../trace` | 流式用 `step`/`tool_*`/`stop`；历史用 `GET .../trace` |
 | 记忆 / 用户隔离 | 相同 | 相同 |
 
 #### 前端示例（`fetch` + ReadableStream）
@@ -596,7 +695,7 @@ async function streamMessage(base, sessionId, userId, prompt) {
 |------|------|------|
 | `include_hidden` | `false` | `1` / `true` / `yes` 时包含 `hidden` agent |
 
-**说明**：枚举本地 + MCP Agent Card 注册的 agent。列表用 `title` 展示、用 `name` 切换。`default` 即主 agent；**仅该 agent 允许非空 `skill`**。每轮发消息应带当前 `agent`。`ddreply` 这类 MCP 配置键会解析为 Card 上的规范名（如 `dd_reply`），切过去后系统提示词用该 agent 的人格，而不是默认 sleuth。
+**说明**：枚举本地 + MCP Agent Card 注册的 agent。列表用 `title` 展示、用 `name` 切换。`default` 即主 agent；**仅该 agent 允许非空 `skills` / `skill`**。每轮发消息应带当前 `agent`。`ddreply` 这类 MCP 配置键会解析为 Card 上的规范名（如 `dd_reply`），切过去后系统提示词用该 agent 的人格，而不是默认 sleuth。
 
 **响应 `200`**
 
@@ -719,7 +818,9 @@ async function streamMessage(base, sessionId, userId, prompt) {
 
 触发懒惰刷新逻辑（受 `SLEUTH_SKILLS_REFRESH_SECONDS` 影响）。
 
-默认 agent 下发消息 / 创建会话时，`skill` 填这里的 `name`；未选传 `""`。
+默认 agent 下发消息 / 创建会话时，`skills` 填这里的 `name` 列表（可多个）；未选传 `[]`。旧字段 `skill` 仍可用。
+
+多份 SKILL.md 会按选择顺序全部注入系统提示，注意上下文长度。
 
 ---
 
@@ -752,23 +853,25 @@ sequenceDiagram
   FE->>API: GET /v1/models
   FE->>API: GET /v1/agents
   FE->>API: GET /v1/skills
-  FE->>API: POST /v1/sessions (X-User-Id agent model skill)
+  FE->>API: POST /v1/sessions (X-User-Id agent model skills)
   API-->>FE: id equals sess_xxx
   FE->>API: GET /v1/sessions (列表页)
   API-->>FE: id title preview time_updated_local
   FE->>API: GET /v1/sessions/{id} (打开会话)
   API-->>FE: messages[]
+  FE->>API: GET /v1/sessions/{id}/trace
+  API-->>FE: records ledger
   FE->>API: POST /v1/sessions/{id}/messages/stream
-  Note over FE,API: SSE text tool_* done 均含 session_id
+  Note over FE,API: SSE text tool_* stop done 均含 session_id
   API-->>FE: done.text title usage
 ```
 
 1. 登录后固定 `X-User-Id`。
 2. 拉 `GET /v1/models`、`GET /v1/agents`、`GET /v1/skills` 做选择器。Skill 选择器仅在当前 agent 等于 `GET /v1/agents` 的 `default` 时启用。
-3. 新对话：`POST /v1/sessions`，body 带 `agent` / `model` / `skill`（未选 skill 传 `""`）→ 存返回的 **`id`**。
-4. 历史列表：`GET /v1/sessions`；详情：`GET /v1/sessions/{id}`。
-5. 发消息（推荐流式）：`POST .../messages/stream`，**每轮仍带**当前 `agent` / `model` / `skill`；拼 `text.delta`，以 `done.text` 对齐。
-6. 切到专用 agent 时禁用 skill 并传 `skill: ""`。MCP 晚启动会自动重试；也可 `POST /v1/mcp/reload` 立即重连。
+3. 新对话：`POST /v1/sessions`，body 带 `agent` / `model` / `skills`（未选传 `[]`；也可继续传 `skill`）→ 存返回的 **`id`**。
+4. 历史列表：`GET /v1/sessions`；详情：`GET /v1/sessions/{id}`。打开会话后可 `GET /v1/sessions/{id}/trace` 画轮次台账（时间条：`started_at` + `duration_ms`；TTFT：`first_token_at - started_at`）。
+5. 发消息（推荐流式）：`POST .../messages/stream`，**每轮仍带**当前 `agent` / `model` / `skills`；拼 `text.delta`，以 `done.text` 对齐。台账行用 `step` / `tool_*` / `stop` 追加；进行中不要虚构 duration。
+6. 切到专用 agent 时禁用 skill 并传 `skills: []`（及 `skill: ""`）。MCP 晚启动会自动重试；也可 `POST /v1/mcp/reload` 立即重连。
 
 ---
 
@@ -794,6 +897,9 @@ Invoke-RestMethod "$base/v1/sessions?limit=10" -Headers @{ "X-User-Id" = "alice"
 
 # 详情
 Invoke-RestMethod "$base/v1/sessions/$sid" -Headers @{ "X-User-Id" = "alice" }
+
+# 执行台账
+Invoke-RestMethod "$base/v1/sessions/$sid/trace" -Headers @{ "X-User-Id" = "alice" }
 ```
 
 ---

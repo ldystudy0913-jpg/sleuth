@@ -63,46 +63,86 @@ class StreamingRenderer:
         self._closed = True
         self._q.put(_DONE)
 
-    def on_text(self, text: str) -> None:
+    def on_text(self, text: str, **kwargs) -> None:
         if text:
-            self._put({"type": "text", "delta": text})
+            event: Dict[str, Any] = {"type": "text", "delta": text}
+            first_token_at = kwargs.get("first_token_at")
+            if first_token_at is not None:
+                event["first_token_at"] = int(first_token_at)
+            self._put(event)
 
-    def on_reasoning(self, text: str) -> None:
+    def on_reasoning(self, text: str, **kwargs) -> None:
         if text:
-            self._put({"type": "reasoning", "delta": text})
+            event: Dict[str, Any] = {"type": "reasoning", "delta": text}
+            first_token_at = kwargs.get("first_token_at")
+            if first_token_at is not None:
+                event["first_token_at"] = int(first_token_at)
+            self._put(event)
 
-    def on_tool_start(self, name: str, args: dict) -> None:
+    def on_tool_start(self, name: str, args: dict, **kwargs) -> None:
         raw = json.dumps(args or {}, ensure_ascii=False, default=str)
-        self._put(
-            {
-                "type": "tool_start",
-                "name": name,
-                "args_preview": _truncate(raw, self._args_max),
-            }
-        )
+        event: Dict[str, Any] = {
+            "type": "tool_start",
+            "name": name,
+            "args_preview": _truncate(raw, self._args_max),
+        }
+        call_id = kwargs.get("call_id")
+        if call_id:
+            event["id"] = str(call_id)
+        if kwargs.get("step") is not None:
+            event["step"] = int(kwargs["step"])
+        if kwargs.get("started_at") is not None:
+            event["started_at"] = int(kwargs["started_at"])
+        self._put(event)
 
-    def on_tool_result(self, name: str, result: ToolResult) -> None:
+    def on_tool_result(self, name: str, result: ToolResult, **kwargs) -> None:
         out = getattr(result, "output", "") or ""
-        self._put(
-            {
-                "type": "tool_result",
-                "name": name,
-                "is_error": bool(getattr(result, "is_error", False)),
-                "output_preview": _truncate(str(out), self._output_max),
-            }
-        )
+        event: Dict[str, Any] = {
+            "type": "tool_result",
+            "name": name,
+            "is_error": bool(getattr(result, "is_error", False)),
+            "output_preview": _truncate(str(out), self._output_max),
+        }
+        call_id = kwargs.get("call_id")
+        if call_id:
+            event["id"] = str(call_id)
+        if kwargs.get("step") is not None:
+            event["step"] = int(kwargs["step"])
+        if kwargs.get("started_at") is not None:
+            event["started_at"] = int(kwargs["started_at"])
+        if kwargs.get("duration_ms") is not None:
+            event["duration_ms"] = int(kwargs["duration_ms"])
+        if kwargs.get("ended_at") is not None:
+            event["ended_at"] = int(kwargs["ended_at"])
+        self._put(event)
 
-    def on_step(self, step: int, max_steps: int) -> None:
-        self._put({"type": "step", "step": int(step), "max_steps": int(max_steps)})
+    def on_step(self, step: int, max_steps: int, **kwargs) -> None:
+        event: Dict[str, Any] = {
+            "type": "step",
+            "step": int(step),
+            "max_steps": int(max_steps),
+        }
+        if kwargs.get("started_at") is not None:
+            event["started_at"] = int(kwargs["started_at"])
+        self._put(event)
 
-    def on_stop(self, reason: str, usage: dict) -> None:
-        self._put(
-            {
-                "type": "stop",
-                "reason": reason or "",
-                "usage": dict(usage or {}),
-            }
-        )
+    def on_stop(self, reason: str, usage: dict, **kwargs) -> None:
+        event: Dict[str, Any] = {
+            "type": "stop",
+            "reason": reason or "",
+            "usage": dict(usage or {}),
+        }
+        if kwargs.get("step") is not None:
+            event["step"] = int(kwargs["step"])
+        if kwargs.get("started_at") is not None:
+            event["started_at"] = int(kwargs["started_at"])
+        if kwargs.get("first_token_at") is not None:
+            event["first_token_at"] = int(kwargs["first_token_at"])
+        if kwargs.get("completed_at") is not None:
+            event["completed_at"] = int(kwargs["completed_at"])
+        if kwargs.get("duration_ms") is not None:
+            event["duration_ms"] = int(kwargs["duration_ms"])
+        self._put(event)
 
     def on_error(self, message: str) -> None:
         self._put({"type": "error", "message": str(message)})
