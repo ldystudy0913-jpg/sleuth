@@ -33,10 +33,16 @@ SLEUTH_MCP_SERVERS={"ddreply":{"type":"remote","url":"http://127.0.0.1:8792/mcp"
    - `risk_codes_json`：编码数组，如 `["C001","C003"]`（可空）
    - `risk_names_json`：名称数组，如 `["行政处罚记录"]`（可空；与编码至少填一类）
    - 也可把名称直接放进 `risk_codes_json`，将作为检索 question
-   - 10 字段字符串（缺失也要传空串，由预分析标明「本步无法判断」）
-   - 可选 `local_paths_json`（测试本地附件）或 `invest_id`（生产 COS）
+   - 10 个 KYC 字段字符串（客户名称、成立时间、经营范围、员工人数、注册资本、年销售收入、受益所有人身份信息、主营业务、开户主要目的、账户交易模式预估）
+   - 可选 `attachment_refs_json`（会话邮箱 HTTPS 引用，由 Sleuth 注入；生产路径）
+   - 可选 `local_paths_json`（仅本机测试）或 `invest_id`（业务 COS）
 3. 调用 `ddreply_generate_reply_framework`。
-4. 向用户展示返回的 `markdown`（或四段字段）；保留全部【待核实N】槽位，不要替客户经理填最终结论。
+   - 若返回 `status=need_input`：**不要继续生成**。向用户列出 `missing`（当前分析还缺这些字段），并询问是否还有其他缺失信息要补充。用内置 `question` 工具，选项建议：
+     - 「补充信息」（Recommended）
+     - 「没有补充，继续分析」
+   - 用户提供了新字段：带上更新后的入参再调用（不要设 `proceed_with_gaps`）。
+   - 用户明确说没有补充 / 继续：再次调用并设 `proceed_with_gaps=true`。此时空字段仍会在预分析标明「本步无法判断」，不得臆造。
+4. 向用户展示返回的 `markdown`（或四段字段）；保留全部【待核实N】槽位，不要替客户经理填最终结论。第 4 段须是「核实结果 → 可排除 / 可缓释 / 无法排除」对照，免责声明不能替代该段。文末虚线后的灰色「知识来源」是核对清单，不要并进答复正文。
 5. 若 `meta.missing_codes` 非空，提示知识库未覆盖，需人工补知识或补问。
 6. 若 `meta.soft_warnings` / `blocked_phrases` 有值，提醒注意表述合规。
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from sleuth.util.ids import message_id, part_id, session_id, tool_use_id
+from sleuth.util.ids import file_id, message_id, part_id, session_id, tool_use_id
 
 
 class PersistentIdTests(unittest.TestCase):
@@ -19,6 +19,7 @@ class PersistentIdTests(unittest.TestCase):
     def test_session_and_tool_use_prefixes(self):
         self.assertTrue(session_id().startswith("sess_"))
         self.assertTrue(tool_use_id().startswith("toolu_"))
+        self.assertTrue(file_id().startswith("file_"))
         self.assertNotEqual(session_id(), session_id())
 
 

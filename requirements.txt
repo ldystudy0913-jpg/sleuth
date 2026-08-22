@@ -7,3 +7,6 @@ pydantic>=2.5
 
 # Optional but recommended: nicer terminal output.
 rich>=13.0
+
+# Tencent COS / S3-compatible session file mailbox (also used by remote Skills).
+boto3>=1.34

@@ -56,6 +56,7 @@ class FrameworkRequest(BaseModel):
     account_purpose: str = ""
     tx_pattern_estimate: str = ""
     local_paths: List[str] = Field(default_factory=list)
+    attachment_refs: List[Dict[str, Any]] = Field(default_factory=list)
     invest_id: str = ""
     report_id: str = ""
     bank_id: str = ""
@@ -89,6 +90,30 @@ class FrameworkRequest(BaseModel):
             "主营业务": self.main_business,
             "开户主要目的": self.account_purpose,
             "账户交易模式预估": self.tx_pattern_estimate,
+        }
+
+    def filled_inputs(self) -> Dict[str, str]:
+        return {k: v for k, v in self.fields_dict().items() if str(v).strip()}
+
+    def missing_inputs(self) -> List[str]:
+        """Labels still empty: risk query + the 10 KYC strings."""
+        missing: List[str] = []
+        if not self.risk_queries():
+            missing.append("风险点编码或名称")
+        for key, val in self.fields_dict().items():
+            if not str(val).strip():
+                missing.append(key)
+        return missing
+
+    def need_input_payload(self) -> Dict[str, Any]:
+        return {
+            "status": "need_input",
+            "missing": self.missing_inputs(),
+            "filled": self.filled_inputs(),
+            "hint": (
+                "向用户列出缺项，询问是否还有其他要补充的信息。"
+                "有则下次带上字段再调用；用户说没有补充、请继续时再传 proceed_with_gaps=true。"
+            ),
         }
 
 

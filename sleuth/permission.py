@@ -172,6 +172,9 @@ def build_rules() -> Ruleset:
         Rule("question", "*", "allow"),
         Rule("webfetch", "*", "ask"),
         Rule("task", "*", "ask"),
+        Rule("kb_lookup", "*", "allow"),
+        Rule("save_output_file", "*", "allow"),
+        Rule("ddreply_*", "*", "allow"),
     ]
 
 
@@ -188,6 +191,8 @@ def plan_rules() -> Ruleset:
         Rule("question", "*", "allow"),
         Rule("webfetch", "*", "ask"),
         Rule("task", "*", "deny"),
+        Rule("kb_lookup", "*", "allow"),
+        Rule("save_output_file", "*", "deny"),
     ]
 
 

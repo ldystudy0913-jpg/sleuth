@@ -31,7 +31,7 @@ def health_payload(settings: Settings) -> dict[str, Any]:
         "kb_error": kb_err,
         "lexicon_rule_count": n_lex,
         "kb_api_configured": settings.kb_api_configured(),
-        "kb_top_k": int(getattr(settings, "kb_top_k", 8) or 0),
+        "kb_sort_count": int(getattr(settings, "kb_sort_count", 10) or 0),
         "llm_configured": settings.llm_configured(),
         "cos_configured": settings.cos_configured(),
         "agent_card": True,
@@ -135,7 +135,12 @@ def build_mcp_server(
             "Pass risk_codes_json (JSON array of codes like [\"C001\"]) and/or "
             "risk_names_json (JSON array of names like [\"行政处罚记录\"]). "
             "Each item is used as the KB search question. Also pass the 10 KYC field "
-            "strings, optional local_paths_json, optional invest_id. "
+            "strings, optional attachment_refs_json (session mailbox HTTPS refs; "
+            "preferred in production), optional local_paths_json (local tests only), "
+            "optional invest_id. If fields are missing, returns status=need_input "
+            "(do not generate yet — list missing fields and ask the user whether they "
+            "have more to provide). Pass proceed_with_gaps=true only after the user "
+            "says there is nothing more and analysis should continue. "
             "Returns JSON with markdown + structured sections. For human reference only."
         ),
     )
@@ -153,9 +158,11 @@ def build_mcp_server(
         account_purpose: str = "",
         tx_pattern_estimate: str = "",
         local_paths_json: str = "[]",
+        attachment_refs_json: str = "[]",
         invest_id: str = "",
         report_id: str = "",
         bank_id: str = "",
+        proceed_with_gaps: bool = False,
     ) -> str:
         try:
             codes = json.loads(risk_codes_json) if risk_codes_json else []
@@ -171,6 +178,12 @@ def build_mcp_server(
             paths = []
         if not isinstance(paths, list):
             paths = []
+        try:
+            refs = json.loads(attachment_refs_json) if attachment_refs_json else []
+        except json.JSONDecodeError:
+            refs = []
+        if not isinstance(refs, list):
+            refs = []
         req = FrameworkRequest(
             risk_codes=codes if isinstance(codes, list) else [str(codes)],
             risk_names=names if isinstance(names, list) else [str(names)],
@@ -185,10 +198,16 @@ def build_mcp_server(
             account_purpose=account_purpose,
             tx_pattern_estimate=tx_pattern_estimate,
             local_paths=[str(p) for p in paths],
+            attachment_refs=[r for r in refs if isinstance(r, dict)],
             invest_id=invest_id,
             report_id=report_id,
             bank_id=bank_id,
         )
+        gaps = proceed_with_gaps
+        if isinstance(gaps, str):
+            gaps = gaps.strip().lower() in ("1", "true", "yes", "on")
+        if req.missing_inputs() and not gaps:
+            return json.dumps(req.need_input_payload(), ensure_ascii=False)
         try:
             result = generate_framework(req, settings=settings)
         except ValueError as exc:

@@ -114,6 +114,77 @@ class ServerConfig:
 
 
 @dataclass
+class CosConfig:
+    """Tencent COS / S3-compatible mailbox. All values come from env / JSONC."""
+
+    secret_id: str = ""
+    secret_key: str = ""
+    region: str = ""
+    bucket: str = ""
+    endpoint: str = ""
+    path_prefix: str = "sleuth/files"
+    addressing_style: str = ""
+    signature_version: str = ""
+
+    def configured(self) -> bool:
+        return bool(
+            self.secret_id
+            and self.secret_key
+            and self.bucket
+            and (self.region or self.endpoint)
+        )
+
+
+@dataclass
+class FilesConfig:
+    """Session file mailbox limits (upload / complete / generated return)."""
+
+    max_bytes: int = 52_428_800
+    max_count: int = 20
+    presign_put_expires: int = 900
+    presign_get_expires: int = 300
+    # Empty or "*" = any MIME; otherwise CSV / JSONC list (supports "image/*").
+    mime_allow: List[str] = field(default_factory=list)
+
+
+@dataclass
+class KbConfig:
+    """Remote knowledge search for the default (build) agent — same API as dd_reply."""
+
+    api_url: str = ""
+    login_url: str = ""
+    openid: str = ""
+    service_id: str = ""
+    api_timeout: float = 30.0
+    sort_count: int = 10
+    sort_score: Optional[float] = None
+    time_combine: bool = False
+    knowledge_ids: str = ""
+    recall_count: int = 10
+    atom_ids: str = ""
+    node_ids: str = ""
+    html_clear: bool = False
+    qa_search_mode: str = ""
+    time_filter_enable: bool = False
+    time_filter_by_day: Optional[int] = None
+    time_filter_start_time: str = ""
+    time_filter_end_time: str = ""
+    tag_name: str = ""
+    tag_value_ids: str = ""
+    tag_value_names: str = ""
+    tag_search_operation: str = "AND"
+    subnet_type: str = "dmz"
+
+    def configured(self) -> bool:
+        return bool(
+            (self.api_url or "").strip()
+            and (self.login_url or "").strip()
+            and (self.openid or "").strip()
+            and (self.service_id or "").strip()
+        )
+
+
+@dataclass
 class Config:
     model: Optional[str] = None
     small_model: Optional[str] = None
@@ -146,6 +217,9 @@ class Config:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    cos: CosConfig = field(default_factory=CosConfig)
+    files: FilesConfig = field(default_factory=FilesConfig)
+    kb: KbConfig = field(default_factory=KbConfig)
     # Product disclosure guardrails (block sleuth internals / secrets).
     guardrails: bool = True
     # Scrub PII (ID / mobile / bank / password / labeled address) on outputs.
@@ -307,6 +381,12 @@ class Config:
             self._merge_storage(raw["storage"])
         if "server" in raw and isinstance(raw["server"], dict):
             self._merge_server(raw["server"])
+        if "cos" in raw and isinstance(raw["cos"], dict):
+            self._merge_cos(raw["cos"])
+        if "files" in raw and isinstance(raw["files"], dict):
+            self._merge_files(raw["files"])
+        if "kb" in raw and isinstance(raw["kb"], dict):
+            self._merge_kb(raw["kb"])
         self._merge_mcp(raw)
         self._merge_skills(raw)
         return self
@@ -343,6 +423,116 @@ class Config:
             self.server.admin_token = str(block["admin_token"])
         if block.get("default_backend"):
             self.server.default_backend = str(block["default_backend"])
+
+    def _merge_cos(self, block: Dict[str, Any]) -> None:
+        """Mailbox-only knobs. Credentials / bucket / endpoint come from AWS_* + Skills S3."""
+        for src, attr in (
+            ("path_prefix", "path_prefix"),
+            ("pathPrefix", "path_prefix"),
+            ("addressing_style", "addressing_style"),
+            ("addressingStyle", "addressing_style"),
+            ("signature_version", "signature_version"),
+            ("signatureVersion", "signature_version"),
+        ):
+            val = block.get(src)
+            if val is None or val == "":
+                continue
+            setattr(self.cos, attr, str(val))
+
+    def _merge_files(self, block: Dict[str, Any]) -> None:
+        for src, attr in (
+            ("max_bytes", "max_bytes"),
+            ("maxBytes", "max_bytes"),
+            ("max_count", "max_count"),
+            ("maxCount", "max_count"),
+            ("presign_put_expires", "presign_put_expires"),
+            ("presignPutExpires", "presign_put_expires"),
+            ("presign_get_expires", "presign_get_expires"),
+            ("presignGetExpires", "presign_get_expires"),
+        ):
+            val = block.get(src)
+            if val is None or val == "":
+                continue
+            try:
+                setattr(self.files, attr, int(val))
+            except (TypeError, ValueError):
+                continue
+        mime = block.get("mime_allow")
+        if mime is None:
+            mime = block.get("mimeAllow")
+        parsed = _parse_mime_allow(mime)
+        if parsed is not None:
+            self.files.mime_allow = parsed
+
+    def _merge_kb(self, block: Dict[str, Any]) -> None:
+        def _pick(*keys: str) -> Any:
+            for key in keys:
+                if key in block and block[key] not in (None, ""):
+                    return block[key]
+            return None
+
+        for srcs, attr in (
+            (("api_url", "apiUrl"), "api_url"),
+            (("login_url", "loginUrl"), "login_url"),
+            (("openid", "openId"), "openid"),
+            (("service_id", "serviceId"), "service_id"),
+            (("knowledge_ids", "knowledgeIds"), "knowledge_ids"),
+            (("atom_ids", "atomIds"), "atom_ids"),
+            (("node_ids", "nodeIds"), "node_ids"),
+            (("qa_search_mode", "qaSearchMode"), "qa_search_mode"),
+            (("time_filter_start_time", "timeFilterStartTime"), "time_filter_start_time"),
+            (("time_filter_end_time", "timeFilterEndTime"), "time_filter_end_time"),
+            (("tag_name", "tagName"), "tag_name"),
+            (("tag_value_ids", "tagValueIds"), "tag_value_ids"),
+            (("tag_value_names", "tagValueNames"), "tag_value_names"),
+            (("tag_search_operation", "tagSearchOperation"), "tag_search_operation"),
+            (("subnet_type", "subnetType"), "subnet_type"),
+        ):
+            val = _pick(*srcs)
+            if val is not None:
+                setattr(self.kb, attr, str(val))
+        # Single knowledgeId is accepted as a convenience alias.
+        if not self.kb.knowledge_ids:
+            single = _pick("knowledge_id", "knowledgeId")
+            if single is not None:
+                self.kb.knowledge_ids = str(single)
+
+        timeout = _pick("api_timeout", "apiTimeout")
+        if timeout is not None:
+            try:
+                self.kb.api_timeout = float(timeout)
+            except (TypeError, ValueError):
+                pass
+        for srcs, attr in (
+            (("sort_count", "sortCount"), "sort_count"),
+            (("recall_count", "recallCount"), "recall_count"),
+            (("time_filter_by_day", "timeFilterByDay"), "time_filter_by_day"),
+        ):
+            val = _pick(*srcs)
+            if val is None:
+                continue
+            try:
+                setattr(self.kb, attr, int(val))
+            except (TypeError, ValueError):
+                continue
+        score = _pick("sort_score", "sortScore")
+        if score is not None:
+            try:
+                self.kb.sort_score = float(score)
+            except (TypeError, ValueError):
+                pass
+        for srcs, attr in (
+            (("time_combine", "timeCombine"), "time_combine"),
+            (("html_clear", "htmlClear"), "html_clear"),
+            (("time_filter_enable", "timeFilterEnable"), "time_filter_enable"),
+        ):
+            val = _pick(*srcs)
+            if val is None:
+                continue
+            if isinstance(val, bool):
+                setattr(self.kb, attr, val)
+            else:
+                setattr(self.kb, attr, str(val).strip().lower() in ("1", "true", "yes", "on"))
 
     def _merge_mcp(self, raw: Dict[str, Any]) -> None:
         if "mcpServers" in raw and isinstance(raw["mcpServers"], dict):
@@ -635,6 +825,35 @@ def _env_csv(name: str) -> List[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
+def _env_float(name: str, default: Optional[float] = None) -> Optional[float]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _parse_mime_allow(raw: Any) -> Optional[List[str]]:
+    """None = leave unchanged; empty / * = allow all (empty list)."""
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip() and str(x).strip() != "*"]
+    text = str(raw).strip()
+    if not text or text == "*":
+        return []
+    if text.startswith("["):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, list):
+            return [str(x).strip() for x in data if str(x).strip() and str(x).strip() != "*"]
+    return [p.strip() for p in text.split(",") if p.strip() and p.strip() != "*"]
+
+
 def _parse_models_env(raw: str) -> Dict[str, Any]:
     """Parse SLEUTH_MODELS as JSON object or ``alias:provider/model`` CSV.
 
@@ -668,6 +887,32 @@ def _parse_models_env(raw: str) -> Dict[str, Any]:
         if alias and ref:
             out[alias] = ref
     return out
+
+
+def _bucket_from_skills_s3(cfg: Config) -> str:
+    """Bucket already declared on Skills S3 (uri or bucket field)."""
+    for entry in cfg.skills.s3 or []:
+        if entry.bucket:
+            return str(entry.bucket).strip()
+        uri = (entry.uri or "").strip()
+        if uri.startswith("s3://"):
+            bucket = uri[5:].split("/", 1)[0].strip()
+            if bucket:
+                return bucket
+    return ""
+
+
+def _apply_shared_object_store(cfg: Config) -> None:
+    """Session files use the same COS as Skills: AWS_* + SLEUTH_S3_ENDPOINT + Skills bucket."""
+    cfg.cos.secret_id = os.environ.get("AWS_ACCESS_KEY_ID") or ""
+    cfg.cos.secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY") or ""
+    cfg.cos.region = os.environ.get("AWS_DEFAULT_REGION") or ""
+    cfg.cos.endpoint = (
+        os.environ.get("SLEUTH_S3_ENDPOINT")
+        or os.environ.get("AWS_ENDPOINT_URL")
+        or ""
+    )
+    cfg.cos.bucket = _bucket_from_skills_s3(cfg)
 
 
 def _apply_env(cfg: Config) -> None:
@@ -747,6 +992,75 @@ def _apply_env(cfg: Config) -> None:
     if os.environ.get("SLEUTH_SERVER_DEFAULT_BACKEND"):
         cfg.server.default_backend = os.environ["SLEUTH_SERVER_DEFAULT_BACKEND"]
 
+    # session files (mailbox-only knobs; COS identity is the shared AWS / Skills S3 set)
+    for env_key, attr in (
+        ("SLEUTH_COS_PATH_PREFIX", "path_prefix"),
+        ("SLEUTH_COS_ADDRESSING_STYLE", "addressing_style"),
+        ("SLEUTH_COS_SIGNATURE_VERSION", "signature_version"),
+    ):
+        val = os.environ.get(env_key)
+        if val:
+            setattr(cfg.cos, attr, val)
+
+    for env_key, attr in (
+        ("SLEUTH_FILES_MAX_BYTES", "max_bytes"),
+        ("SLEUTH_FILES_MAX_COUNT", "max_count"),
+        ("SLEUTH_FILES_PRESIGN_PUT_EXPIRES", "presign_put_expires"),
+        ("SLEUTH_FILES_PRESIGN_GET_EXPIRES", "presign_get_expires"),
+    ):
+        val = _env_int(env_key)
+        if val is not None:
+            setattr(cfg.files, attr, val)
+    mime_parsed = _parse_mime_allow(os.environ.get("SLEUTH_FILES_MIME_ALLOW"))
+    if mime_parsed is not None and os.environ.get("SLEUTH_FILES_MIME_ALLOW") is not None:
+        cfg.files.mime_allow = mime_parsed
+
+    # remote KB (default agent) — login Cookie ragToken + optional serviceConfig
+    for env_key, attr in (
+        ("SLEUTH_KB_API_URL", "api_url"),
+        ("SLEUTH_KB_LOGIN_URL", "login_url"),
+        ("SLEUTH_KB_OPENID", "openid"),
+        ("SLEUTH_KB_SERVICEID", "service_id"),
+        ("SLEUTH_KB_KNOWLEDGE_IDS", "knowledge_ids"),
+        ("SLEUTH_KB_ATOM_IDS", "atom_ids"),
+        ("SLEUTH_KB_NODE_IDS", "node_ids"),
+        ("SLEUTH_KB_QA_SEARCH_MODE", "qa_search_mode"),
+        ("SLEUTH_KB_TIME_FILTER_START_TIME", "time_filter_start_time"),
+        ("SLEUTH_KB_TIME_FILTER_END_TIME", "time_filter_end_time"),
+        ("SLEUTH_KB_TAG_NAME", "tag_name"),
+        ("SLEUTH_KB_TAG_VALUE_IDS", "tag_value_ids"),
+        ("SLEUTH_KB_TAG_VALUE_NAMES", "tag_value_names"),
+        ("SLEUTH_KB_TAG_SEARCH_OPERATION", "tag_search_operation"),
+        ("SLEUTH_KB_SUBNET_TYPE", "subnet_type"),
+    ):
+        val = os.environ.get(env_key)
+        if val:
+            setattr(cfg.kb, attr, val)
+    kb_timeout = _env_float("SLEUTH_KB_API_TIMEOUT")
+    if kb_timeout is not None:
+        cfg.kb.api_timeout = kb_timeout
+    kb_sort = _env_int("SLEUTH_KB_SORT_COUNT")
+    if kb_sort is not None:
+        cfg.kb.sort_count = kb_sort
+    kb_score = _env_float("SLEUTH_KB_SORT_SCORE")
+    if kb_score is not None:
+        cfg.kb.sort_score = kb_score
+    kb_recall = _env_int("SLEUTH_KB_RECALL_COUNT")
+    if kb_recall is not None:
+        cfg.kb.recall_count = kb_recall
+    kb_day = _env_int("SLEUTH_KB_TIME_FILTER_BY_DAY")
+    if kb_day is not None:
+        cfg.kb.time_filter_by_day = kb_day
+    kb_combine = _env_bool("SLEUTH_KB_TIME_COMBINE")
+    if kb_combine is not None:
+        cfg.kb.time_combine = kb_combine
+    kb_html = _env_bool("SLEUTH_KB_HTML_CLEAR")
+    if kb_html is not None:
+        cfg.kb.html_clear = kb_html
+    kb_tf = _env_bool("SLEUTH_KB_TIME_FILTER_ENABLE")
+    if kb_tf is not None:
+        cfg.kb.time_filter_enable = kb_tf
+
     # skills
     refresh = _env_int("SLEUTH_SKILLS_REFRESH_SECONDS")
     if refresh is not None:
@@ -770,6 +1084,8 @@ def _apply_env(cfg: Config) -> None:
             # treat as comma-separated s3:// uris
             for uri in _env_csv("SLEUTH_SKILLS_S3"):
                 cfg.skills.s3.append(SkillS3Entry(uri=uri))
+
+    _apply_shared_object_store(cfg)
 
     # MCP servers as JSON
     mcp_json = os.environ.get("SLEUTH_MCP_SERVERS")

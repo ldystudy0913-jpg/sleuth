@@ -1,10 +1,11 @@
 """Tests for MCP tool bridging: schema exposure and argument passthrough."""
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from typing import Any, Dict, Tuple
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from sleuth.mcp.bridge import McpBridgeTool, bridge_tools
 from sleuth.mcp.manager import McpToolInfo
@@ -149,6 +150,103 @@ class McpBridgeExecuteTests(unittest.TestCase):
         self.assertEqual(len(tools), 1)
         self.assertEqual(tools[0].name, "anti_money_laundry_search_tables")
         self.assertTrue(tools[0].skip_strict_validation)
+
+
+class McpBridgeMailboxTests(unittest.TestCase):
+    def test_injects_attachment_refs_json_and_harvests_files(self):
+        from sleuth.config import Config
+        from sleuth.files.cos import MemoryObjectStore
+        from sleuth.files.mailbox import write_session_files
+
+        cfg = Config()
+        cfg.cos.secret_id = "id"
+        cfg.cos.secret_key = "key"
+        cfg.cos.bucket = "b"
+        cfg.cos.region = "ap-guangzhou"
+        mem = MemoryObjectStore()
+        mem.put_bytes(key="k/a.txt", data=b"hi", mime="text/plain")
+
+        class Sess:
+            id = "sess_bridge"
+            user_id = "alice"
+            config = cfg
+            store = None
+            _files = []
+            _prompt_file_ids = None
+            _turn_file_ids = []
+
+        sess = Sess()
+        write_session_files(
+            sess,
+            [
+                {
+                    "id": "file_aaa",
+                    "role": "user",
+                    "filename": "a.txt",
+                    "mime": "text/plain",
+                    "size": 2,
+                    "object_key": "k/a.txt",
+                    "status": "ready",
+                }
+            ],
+        )
+        calls: list = []
+
+        class FakeManager:
+            def call_tool(self, qualified_name: str, arguments: dict):
+                calls.append((qualified_name, dict(arguments)))
+                return (
+                    json.dumps(
+                        {
+                            "markdown": "ok",
+                            "files": [
+                                {
+                                    "filename": "out.txt",
+                                    "mime": "text/plain",
+                                    "object_key": "k/out.txt",
+                                    "size": 2,
+                                    "url": "https://cos.example/out.txt",
+                                }
+                            ],
+                        }
+                    ),
+                    False,
+                )
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "risk_codes_json": {"type": "string"},
+                "attachment_refs_json": {"type": "string"},
+            },
+        }
+        tool = McpBridgeTool(
+            _info(
+                server="ddreply",
+                name="generate_reply_framework",
+                qualified="ddreply_generate_reply_framework",
+                schema=schema,
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+        )
+        ctx = ToolContext(
+            workdir=Path("."),
+            permission=Permission(rules=[Rule("*", "*", "allow")]),
+            session=sess,
+        )
+        with patch(
+            "sleuth.files.mailbox.object_store_from_config", return_value=mem
+        ):
+            result = tool.execute({"risk_codes_json": '["C001"]'}, ctx)
+        self.assertFalse(result.is_error)
+        self.assertEqual(len(calls), 1)
+        injected = json.loads(calls[0][1]["attachment_refs_json"])
+        self.assertEqual(injected[0]["file_id"], "file_aaa")
+        self.assertTrue(str(injected[0]["url"]).startswith("https://"))
+        self.assertNotIn("local_paths_json", calls[0][1])
+        self.assertTrue(result.attachments)
+        self.assertEqual(result.attachments[0]["filename"], "out.txt")
+        self.assertTrue(sess._turn_file_ids)
 
 
 if __name__ == "__main__":

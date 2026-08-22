@@ -19,6 +19,14 @@ from .llm import LlmError, mockable_generate
 from .models import DISCLAIMER, FrameworkRequest, FrameworkResult, VerificationItem
 
 _PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "framework.txt"
+CONCLUSION_LABELS = ("可排除", "可缓释", "无法排除")
+_HINT_SPLIT_RE = re.compile(r"(可排除|可缓释|无法排除)\s*[:：]\s*")
+_GUIDE_HEAD_RE = re.compile(r"(?:##\s*4[\.、．]?\s*|四[、.．]\s*)结论判定指引")
+_SOURCES_HEAD_RE = re.compile(r"^##\s*知识来源\s*$", re.MULTILINE)
+_SOURCE_APPENDIX_RE = re.compile(
+    r"\n(?:##\s*知识来源|---\s*\n+(?:<span[^>]*>)?知识来源)[\s\S]*$",
+)
+_GRAY_STYLE = "color:#888"
 
 
 def _load_system_prompt() -> str:
@@ -28,6 +36,140 @@ def _load_system_prompt() -> str:
         "你是尽调答复框架生成助手。输出四段：预分析、答复正文框架、"
         "待核实清单、结论判定指引。供人工参考，最终判定由人工作出。"
     )
+
+
+def _extract_conclusion_hints(text: str) -> Dict[str, str]:
+    """Pull 可排除/可缓释/无法排除 mappings from KB prose when present."""
+    raw = text or ""
+    matches = list(_HINT_SPLIT_RE.finditer(raw))
+    if not matches:
+        return {}
+    hints: Dict[str, str] = {}
+    for i, m in enumerate(matches):
+        label = m.group(1)
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        chunk = re.sub(r"\s+", " ", raw[start:end]).strip(" ；;。、\n\r\t-")
+        if chunk:
+            hints[label] = chunk[:300]
+    return hints
+
+
+def _default_conclusion_hints(*, name: str, logic: str = "") -> Dict[str, str]:
+    """Fallback mappings so section 4 never collapses into the disclaimer."""
+    topic = (name or "该风险点").strip()
+    focus = re.sub(r"\s+", " ", (logic or "").strip())
+    if len(focus) > 80:
+        focus = focus[:79] + "…"
+    stem = (
+        f"就「{topic}」核实后，结合判断要点（{focus}）"
+        if focus
+        else f"就「{topic}」核实后"
+    )
+    return {
+        "可排除": (
+            f"{stem}，关键事实清楚、材料足以佐证且与系统字段/访谈一致"
+            "——此类核实结果对应「可排除」。"
+        ),
+        "可缓释": (
+            f"{stem}，主要事实可说明但材料或细节仍有缺口、需补充并持续关注"
+            "——此类核实结果对应「可缓释」。"
+        ),
+        "无法排除": (
+            f"{stem}，关键事实无法说明、材料不足以佐证或与字段/材料明显矛盾"
+            "——此类核实结果对应「无法排除」。"
+        ),
+    }
+
+
+def _complete_hints(name: str, logic: str, extracted: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    hints = dict(extracted or {})
+    defaults = _default_conclusion_hints(name=name, logic=logic)
+    for label in CONCLUSION_LABELS:
+        val = str(hints.get(label) or "").strip()
+        hints[label] = val or defaults[label]
+    return hints
+
+
+def _format_one_guide(code: str, name: str, hints: Dict[str, str]) -> str:
+    title = f"### {code}"
+    extra = (name or "").strip()
+    if extra and extra != code:
+        title = f"{title} {extra}"
+    lines = [title]
+    filled = _complete_hints(extra or code, "", hints)
+    for label in CONCLUSION_LABELS:
+        lines.append(f"- {label}：{filled[label]}")
+    return "\n".join(lines)
+
+
+def _build_guide_markdown(found: List[RiskPoint], missing: List[str]) -> str:
+    parts: List[str] = []
+    for rp in found:
+        parts.append(_format_one_guide(rp.code, rp.name, rp.conclusion_hints or {}))
+    for code in missing:
+        parts.append(
+            _format_one_guide(
+                code,
+                "",
+                _default_conclusion_hints(
+                    name=code,
+                    logic="知识库无命中，待补充判断要点后由人工对照核实结果判定",
+                ),
+            )
+        )
+    return "\n\n".join(parts) if parts else "（无风险点，无需结论映射）"
+
+
+def _guide_is_complete(guide: str) -> bool:
+    text = (guide or "").replace(DISCLAIMER, "")
+    text = re.sub(r"(?:##\s*知识来源|---\s*\n+(?:<span[^>]*>)?知识来源)[\s\S]*", "", text)
+    return all(label in text for label in CONCLUSION_LABELS)
+
+
+def _replace_conclusion_guide(markdown: str, guide_body: str) -> str:
+    body = (guide_body or "").strip() or "（无）"
+    new_block = f"## 4. 结论判定指引\n{body}\n"
+    text = markdown or ""
+    src_m = _SOURCES_HEAD_RE.search(text)
+    src_tail = text[src_m.start() :] if src_m else ""
+    prefix = text[: src_m.start()] if src_m else text
+    head_m = _GUIDE_HEAD_RE.search(prefix)
+    if head_m:
+        prefix = prefix[: head_m.start()].rstrip()
+    else:
+        prefix = re.sub(
+            rf"(?:>\s*)?{re.escape(DISCLAIMER)}\s*$",
+            "",
+            prefix.rstrip(),
+        ).rstrip()
+    out = prefix + "\n\n" + new_block
+    if DISCLAIMER not in out:
+        out += f"\n> {DISCLAIMER}\n"
+    if src_tail:
+        out = out.rstrip() + "\n\n" + src_tail.lstrip()
+    return out
+
+
+def _ensure_conclusion_guide(
+    markdown: str,
+    found: List[RiskPoint],
+    missing: List[str],
+) -> str:
+    sections = _parse_sections(markdown)
+    existing = sections.get("conclusion_guide") or ""
+    if _guide_is_complete(existing):
+        return markdown
+    return _replace_conclusion_guide(markdown, _build_guide_markdown(found, missing))
+
+
+def _hints_from_retrieval(ret: RiskRetrieval) -> Dict[str, str]:
+    blobs: List[str] = []
+    for h in ret.hits or []:
+        blobs.append(getattr(h, "paragraph", "") or "")
+        for sc in getattr(h, "split_contents", None) or []:
+            blobs.append(getattr(sc, "content", "") or "")
+    return _extract_conclusion_hints("\n".join(blobs))
 
 
 def _remote_risk_context(
@@ -53,18 +195,18 @@ def _remote_risk_context(
             found.append(r.code)
             cites = []
             for h in r.hits:
-                cite = h.source_cite()
-                cites.append(cite)
-                key = cite
-                if key not in seen_cite:
+                url = h.source_url()
+                name = (h.file_name or h.title or "").strip()
+                key = f"{name}|{url}"
+                cites.append(_source_display_line({"file_name": name, "url": url}))
+                if key not in seen_cite and (name or url):
                     seen_cite.add(key)
                     sources.append(
                         {
                             "code": r.code,
-                            "cite": cite,
-                            "file_name": h.file_name,
+                            "file_name": name,
+                            "url": url,
                             "title": h.title,
-                            "url": h.source_url(),
                             "knowledge_id": h.knowledge_id,
                         }
                     )
@@ -73,7 +215,12 @@ def _remote_risk_context(
                 f"### 风险点 {r.code}（远程检索，question={r.question!r}）\n"
                 f"请从下列知识摘录中归纳：风险点名称、对应尽调问题、回答判断要点、"
                 f"对应材料、相关制度要点。材料清单用于判断附件是否充分，"
-                f"不要求每份材料都必须齐套。引用知识时带上来源（文件名/链接）。\n"
+                f"不要求每份材料都必须齐套。\n"
+                f"引用知识时不要把文件名/链接写成与正文同级的段落；在参考句末用灰色括号："
+                f"（<span style=\"color:#888\">文件名 · 知识URL</span>）。"
+                f"不要输出「## 知识来源」标题，文末清单由系统在虚线后自动附加。\n"
+                f"第4段必须写明：何种核实结果分别对应「可排除」「可缓释」「无法排除」；"
+                f"不得用免责声明代替这三条对照。\n"
                 f"{hit_text}"
             )
             row["top_titles"] = [h.title or h.file_name for h in r.hits]
@@ -132,7 +279,6 @@ def _fallback_framework(
     slot_n = 0
     body_parts: List[str] = []
     verify_parts: List[str] = []
-    guide_parts: List[str] = []
 
     def next_slot(desc: str, methods: List[str], fmt: str, code: str) -> str:
         nonlocal slot_n
@@ -159,11 +305,6 @@ def _fallback_framework(
             "简述事实+材料名称+日期+是否充分",
             rp.code,
         )
-        hints = rp.conclusion_hints or {}
-        guide_parts.append(f"### {rp.code}")
-        for label in ("可排除", "可缓释", "无法排除"):
-            if label in hints:
-                guide_parts.append(f"- {label}：{hints[label]}")
 
     for code in missing:
         body_parts.append(f"### {code}（知识库未覆盖）")
@@ -172,9 +313,6 @@ def _fallback_framework(
             ["系统查询", "调取材料"],
             "补充知识条目或人工问题清单",
             code,
-        )
-        guide_parts.append(
-            f"### {code}\n- 可排除/可缓释/无法排除：待知识库补充后由人工判定。"
         )
 
     if remote_blocks and not found and not missing:
@@ -192,7 +330,7 @@ def _fallback_framework(
             "\n".join(verify_parts) if verify_parts else "- （无待核实项）",
             "",
             "## 4. 结论判定指引",
-            "\n".join(guide_parts) if guide_parts else "（无）",
+            _build_guide_markdown(found, missing),
             "",
             f"> {DISCLAIMER}",
         ]
@@ -201,10 +339,10 @@ def _fallback_framework(
 
 
 _SECTION_RE = re.compile(
-    r"##\s*1\.\s*预分析\s*(?P<pre>.*?)"
-    r"##\s*2\.\s*答复正文框架\s*(?P<body>.*?)"
-    r"##\s*3\.\s*待核实清单\s*(?P<ver>.*?)"
-    r"##\s*4\.\s*结论判定指引\s*(?P<guide>.*)",
+    r"(?:##\s*1[\.、．]?\s*|一[、.．]\s*)预分析\s*(?P<pre>.*?)"
+    r"(?:##\s*2[\.、．]?\s*|二[、.．]\s*)答复正文框架\s*(?P<body>.*?)"
+    r"(?:##\s*3[\.、．]?\s*|三[、.．]\s*)待核实清单\s*(?P<ver>.*?)"
+    r"(?:##\s*4[\.、．]?\s*|四[、.．]\s*)结论判定指引\s*(?P<guide>.*)",
     re.DOTALL,
 )
 
@@ -254,15 +392,70 @@ def _parse_verification_list(raw: str) -> List[VerificationItem]:
     return items
 
 
+def _html_escape(text: str) -> str:
+    return (
+        str(text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _gray_md(text: str) -> str:
+    return f'<span style="{_GRAY_STYLE}">{_html_escape(text)}</span>'
+
+
+def _source_display_line(item: Dict[str, str]) -> str:
+    name = (item.get("file_name") or item.get("title") or "未命名知识").strip()
+    url = (item.get("url") or "").strip()
+    if url:
+        return f"{name} · {url}"
+    return name
+
+
+def _gray_source_item(index: int, item: Dict[str, str]) -> str:
+    name = _html_escape(
+        (item.get("file_name") or item.get("title") or "未命名知识").strip()
+    )
+    url = (item.get("url") or "").strip()
+    if url:
+        href = _html_escape(url)
+        inner = f'{name} · <a href="{href}" style="{_GRAY_STYLE}">{href}</a>'
+    else:
+        inner = name
+    return f'<span style="{_GRAY_STYLE}">{index}. {inner}</span>'
+
+
+def _strip_source_appendix(markdown: str) -> str:
+    """Drop LLM/legacy source headings so the footer is not mixed into the body."""
+    return _SOURCE_APPENDIX_RE.sub("", markdown or "").rstrip()
+
+
 def _sources_markdown(sources: List[Dict[str, str]]) -> str:
+    """Dashed, gray appendix: file_name · url. Not a fifth answer heading."""
     if not sources:
         return ""
-    lines = ["## 知识来源", "以下条目来自知识库检索，供核对原文："]
-    for i, s in enumerate(sources, start=1):
-        code = s.get("code") or ""
-        cite = s.get("cite") or s.get("file_name") or "未知来源"
-        prefix = f"（{code}）" if code else ""
-        lines.append(f"{i}. {prefix}{cite}")
+    seen: set[str] = set()
+    lines = [
+        "---",
+        "",
+        _gray_md("知识来源（仅供核对原文，不属于答复正文）"),
+        "",
+    ]
+    n = 0
+    for item in sources:
+        name = (item.get("file_name") or item.get("title") or "").strip()
+        url = (item.get("url") or "").strip()
+        key = f"{name}|{url}"
+        if not name and not url:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        n += 1
+        lines.append(_gray_source_item(n, item))
+    if n == 0:
+        return ""
     return "\n".join(lines)
 
 
@@ -280,7 +473,7 @@ def _resolve_knowledge(
 
     meta: Dict[str, Any] = {
         "mode": "remote",
-        "top_k": int(getattr(settings, "kb_top_k", 8) or 0),
+        "sort_count": int(getattr(settings, "kb_sort_count", 10) or 0),
     }
     retrievals = retrieve_risk_codes(req.risk_queries(), settings)
     ctx, found_codes, missing, rows, sources = _remote_risk_context(retrievals)
@@ -293,16 +486,18 @@ def _resolve_knowledge(
         para = ""
         if ret and ret.hits:
             title = ret.hits[0].title or ret.hits[0].file_name
-            para = ret.hits[0].paragraph[:800]
+            para = (ret.hits[0].paragraph or "")[:800]
+        logic = para or "结合检索摘录组织核实要点；判断附件是否足以佐证。"
+        extracted = _hints_from_retrieval(ret) if ret else {}
         found_rp.append(
             RiskPoint(
                 code=c,
                 name=title or c,
                 category="远程知识",
                 questions=[f"请结合知识库摘录核实风险点 {c}"],
-                answer_logic=para or "结合检索摘录组织核实要点；判断附件是否足以佐证。",
+                answer_logic=logic,
                 materials=[],
-                conclusion_hints={},
+                conclusion_hints=_complete_hints(title or c, logic, extracted),
             )
         )
     return ctx, found_rp, missing, meta
@@ -331,6 +526,7 @@ def generate_framework(
     bundle = load_attachments(
         local_paths=req.local_paths,
         invest_id=req.invest_id,
+        attachment_refs=list(req.attachment_refs or []),
         settings=settings,
     )
 
@@ -351,7 +547,10 @@ def generate_framework(
             + materials_note
             + "\n\n【附件摘要】\n"
             + _attachment_context(bundle)
-            + "\n\n请生成四段式答复框架。引用知识摘录时必须写明来源（文件名、链接或 knowledgeId）。"
+            + "\n\n请生成四段式答复框架。引用知识时在句末用灰色括号标文件名与知识URL，"
+            "不要把来源写成与正文同级的段落，也不要输出「## 知识来源」。"
+            "第4段必须按每个风险点列出「可排除」「可缓释」「无法排除」各自对应的核实结果；"
+            "禁止用免责声明代替第4段正文。"
         )
         messages = [
             {"role": "system", "content": system},
@@ -392,13 +591,14 @@ def generate_framework(
         except LlmError:
             pass
 
+    markdown = _strip_source_appendix(markdown)
+    markdown = _ensure_conclusion_guide(markdown, found, missing)
     if DISCLAIMER not in markdown:
         markdown = markdown.rstrip() + f"\n\n> {DISCLAIMER}\n"
-    src_md = _sources_markdown(list(kb_meta.get("sources") or []))
-    if src_md and "知识来源" not in markdown:
-        markdown = markdown.rstrip() + "\n\n" + src_md + "\n"
-
     sections = _parse_sections(markdown)
+    src_md = _sources_markdown(list(kb_meta.get("sources") or []))
+    if src_md:
+        markdown = markdown.rstrip() + "\n\n" + src_md + "\n"
     verification = _parse_verification_list(sections.get("verification_raw", ""))
     soft_warnings = [
         {

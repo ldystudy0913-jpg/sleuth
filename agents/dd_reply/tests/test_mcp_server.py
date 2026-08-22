@@ -10,6 +10,17 @@ from dd_reply.kb.remote import KbHit, RiskRetrieval
 from dd_reply.mcp_server import build_mcp_server
 
 
+def _ready_settings(**kwargs):
+    data = {
+        "kb_api_url": "http://kb.test/search",
+        "kb_login_url": "http://kb.test/login",
+        "kb_login_openid": "oid",
+        "kb_login_service_id": "sid",
+    }
+    data.update(kwargs)
+    return Settings(**data)
+
+
 def _hit() -> KbHit:
     return KbHit.from_dict(
         {
@@ -26,7 +37,7 @@ def _hit() -> KbHit:
 
 class TestMcpServer(unittest.TestCase):
     def test_tools_registered(self) -> None:
-        settings = Settings(kb_api_url="http://kb.test/search")
+        settings = _ready_settings()
         server = build_mcp_server(settings)
         tools = {t.name: t for t in server._tool_manager.list_tools()}
         for name in (
@@ -44,6 +55,12 @@ class TestMcpServer(unittest.TestCase):
         self.assertTrue(health.get("kb_api_configured"))
         self.assertGreaterEqual(health.get("lexicon_rule_count", 0), 8)
         self.assertNotIn("kb_fallback_local", health)
+
+        need = json.loads(
+            tools["generate_reply_framework"].fn(risk_codes_json='["C001"]')
+        )
+        self.assertEqual(need.get("status"), "need_input")
+        self.assertIn("客户名称", need.get("missing") or [])
 
         codes = json.loads(tools["list_risk_codes"].fn())
         self.assertEqual(codes.get("codes"), [])
@@ -87,21 +104,29 @@ class TestMcpServer(unittest.TestCase):
                 tools["generate_reply_framework"].fn(
                     risk_codes_json='["C005"]',
                     customer_name="乙公司",
+                    proceed_with_gaps=True,
                 )
             )
         self.assertIn("markdown", out)
         self.assertIn("待核实", out["markdown"])
         self.assertIn("知识来源", out["markdown"])
+        self.assertIn("---", out["markdown"])
+        self.assertIn('style="color:#888"', out["markdown"])
+        self.assertNotIn("## 知识来源", out["markdown"])
+        self.assertIn("https://kb.example/f.pdf", out["markdown"])
 
         missing_url = build_mcp_server(Settings(kb_api_url=""))
         tools2 = {t.name: t for t in missing_url._tool_manager.list_tools()}
         err = json.loads(
-            tools2["generate_reply_framework"].fn(risk_codes_json='["C001"]')
+            tools2["generate_reply_framework"].fn(
+                risk_codes_json='["C001"]',
+                proceed_with_gaps=True,
+            )
         )
         self.assertIn("DD_REPLY_KB_API_URL", err.get("error") or "")
 
     def test_http_health_route(self) -> None:
-        settings = Settings(kb_api_url="http://kb.test/search")
+        settings = _ready_settings()
         server = build_mcp_server(settings)
         routes = getattr(server, "_custom_starlette_routes", None) or []
         paths = [getattr(r, "path", "") for r in routes]

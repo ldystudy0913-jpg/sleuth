@@ -25,6 +25,7 @@ _EXPLORE_RULES: Ruleset = [
     Rule("webfetch", "*", "allow"),
     Rule("read", "*", "allow"),
     Rule("question", "*", "allow"),
+    Rule("kb_lookup", "*", "allow"),
 ]
 
 _GENERAL_RULES: Ruleset = build_rules() + [

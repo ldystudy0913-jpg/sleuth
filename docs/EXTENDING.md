@@ -375,7 +375,18 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
    curl http://127.0.0.1:8787/health
    ```
 
-现有路由：`/v1/sessions`、`.../trace`、`.../messages`、`/v1/users/{id}/usage`、`/v1/skills`、`/v1/skills/reload`。
+现有路由：`/v1/sessions`、`.../trace`、`.../files/uploads|complete`、`.../files`、`.../messages`、`/v1/users/{id}/usage`、`/v1/skills`、`/v1/skills/reload`。
+
+---
+
+## 9b. MCP 会话附件约定
+
+Sleuth 基座不解析 PDF/Office。会话文件走 COS 邮箱：
+
+- **入参**：若工具 JSON Schema 含 `attachment_refs_json`，`McpBridgeTool` 在调用前注入 `[{file_id, filename, mime, size, object_key, url}]`（`url` 为短时 HTTPS GET）。不要再填生产路径的 `local_paths_json`。
+- **出参**：工具返回 JSON 若含 `files[]`（`filename` / `mime` / `object_key` 或 `https` `url`），基座登记为会话 `role: assistant` 文件，并出现在同步响应 / SSE `done.files`。禁止 data-URL。
+
+默认 agent `build` 另有内置 `kb_lookup`（`SLEUTH_KB_API_URL` + 登录 Cookie `ragToken`）与 `save_output_file`（把生成文本写入同一 COS 邮箱）。
 
 ---
 

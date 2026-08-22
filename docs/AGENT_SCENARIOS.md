@@ -170,7 +170,7 @@ START
 
 ### 2.1 职责
 
-给定风险点编码 + KYC 字段（+ 可选附件），生成四段式**人工参考**答复框架：预分析 / 答复正文 / 待核实清单 / 结论判定指引。引擎为 **线性 pipeline**（**不是** LangGraph），无 HITL。
+给定风险点编码 + KYC 字段（+ 可选附件），生成四段式**人工参考**答复框架：预分析 / 答复正文 / 待核实清单 / 结论判定指引。引擎为 **线性 pipeline**（**不是** LangGraph）。字段不齐时工具返回 `need_input`，Sleuth 用内置 `question` 暂停本轮：列出缺项并询问用户是否还有补充；用户提供或明确说继续后再生成。
 
 ### 2.2 MCP 工具面
 
@@ -241,7 +241,7 @@ sequenceDiagram
   SL-->>U: 四段框架供人工使用
 ```
 
-风险点知识只走 `DD_REPLY_KB_API_URL`；`DD_REPLY_KB_PATH` 仅用于本地 `lexicon.json`（禁用词）。`DD_REPLY_KB_TOP_K` 控制每个编码保留的命中条数（默认 8）。
+风险点知识只走远程检索 API：先 `DD_REPLY_KB_LOGIN_URL` 取 `ragToken`，再 `DD_REPLY_KB_API_URL` 检索。`DD_REPLY_KB_PATH` 仅用于本地 `lexicon.json`（禁用词）。可选 `DD_REPLY_KB_SORT_COUNT`（默认 10）限制每个编码保留的命中条数。
 
 ---
 
@@ -251,7 +251,7 @@ sequenceDiagram
 |--|--------------|------------|
 | 业务 | 报告检查 / 评分 | 答复框架生成 |
 | 引擎 | LangGraph | 线性 pipeline |
-| HITL / Checkpoint | 可选 | 无 |
+| HITL / Checkpoint | 可选（LangGraph interrupt） | 缺字段 `need_input` + 基座 `question` 暂停；用户选择补充或继续 |
 | 主工具 | `ddcheck_run_dd_check` | `ddreply_generate_reply_framework` |
 | Skill | `dd-report-check` | `dd-reply-framework` |
 | 默认端口 | 8791 | 8792 |

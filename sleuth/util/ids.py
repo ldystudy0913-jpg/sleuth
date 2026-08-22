@@ -28,3 +28,7 @@ def session_id() -> str:
 
 def part_id() -> str:
     return "part_" + secrets.token_hex(12)
+
+
+def file_id() -> str:
+    return "file_" + secrets.token_hex(12)

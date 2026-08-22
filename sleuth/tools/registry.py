@@ -20,6 +20,8 @@ from .question import QuestionTool
 from .webfetch import WebFetchTool
 from .task import TaskTool
 from .skill_tool import SkillTool
+from .kb_lookup import KbLookupTool
+from .save_output_file import SaveOutputFileTool
 
 
 def _builtins() -> List[Tool]:
@@ -35,6 +37,8 @@ def _builtins() -> List[Tool]:
         WebFetchTool(),
         TaskTool(),
         SkillTool(),
+        KbLookupTool(),
+        SaveOutputFileTool(),
     ]
 
 

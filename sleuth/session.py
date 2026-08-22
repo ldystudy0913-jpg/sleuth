@@ -21,7 +21,7 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Protocol
+from typing import Any, List, Optional, Protocol
 
 from .compaction import compact, is_overflow
 from .config import Config, parse_model_ref
@@ -98,6 +98,12 @@ class Session:
     user_id: str = "local"
     yolo: bool = False  # auto-approve tools; CLI default False, server often True
     skill_names: List[str] = field(default_factory=list)  # pinned skills; default agent only
+    # Session-file mailbox: which ready files apply this turn (None = all).
+    _prompt_file_ids: Optional[List[str]] = None
+    _turn_file_ids: List[str] = field(default_factory=list)
+    # HTTP parks `question` instead of blocking on stdin.
+    block_on_question: bool = True
+    _pending_ask: Optional[dict] = None
 
     # lifecycle
     status: str = "idle"  # "idle" | "busy" | "retry"
@@ -305,8 +311,13 @@ class Session:
 
         ensure_skills_fresh(self.config, self.workdir)
         sync_session_mcp(self)
+        self._turn_file_ids = []
         self._ensure_persisted()
         from .trace import now_ms
+
+        pending = dict(self._pending_ask) if self._pending_ask else None
+        if pending:
+            self._flush_pending_ask(user_text, pending)
 
         user_msg = Message.user_text(
             user_text, agent=self.agent_name, started_at=now_ms()
@@ -317,13 +328,25 @@ class Session:
         try:
             self._run_loop()
         finally:
-            self.status = "idle"
+            self.status = "awaiting_user" if self._pending_ask else "idle"
             self._update_record()
         return self.last_assistant_text()
 
+    def ask_payload(self) -> dict:
+        """HTTP `done` extras: ok, or awaiting_user plus parked questions."""
+        pending = self._pending_ask
+        if not pending:
+            return {"status": "ok"}
+        return {
+            "status": "awaiting_user",
+            "questions": list(pending.get("questions") or []),
+        }
+
     def cancel(self) -> None:
-        """Abort the running turn at the next stream chunk (port of
-        SessionRunState.cancel). No mid-step pause/resume — opencode has none.
+        """Abort the running turn at the next stream chunk.
+
+        A parked ``question`` (HTTP ``awaiting_user``) is not cancelled here;
+        the next user message resumes it.
         """
         self._abort.set()
 
@@ -333,8 +356,31 @@ class Session:
     def last_assistant_text(self) -> str:
         for m in reversed(self.messages):
             if m.role == "assistant":
-                return self._scrub(m.text)
+                text = self._scrub(m.text)
+                if text.strip():
+                    return text
+                if self._pending_ask:
+                    return self._scrub(self.ask_prompt_text())
+                return text
+        if self._pending_ask:
+            return self._scrub(self.ask_prompt_text())
         return ""
+
+    def ask_prompt_text(self) -> str:
+        """Fallback user-visible copy when the model parked a question with no prose."""
+        pending = self._pending_ask or {}
+        questions = list(pending.get("questions") or [])
+        lines = [
+            "当前分析还缺少部分信息。请确认是否还有其他要补充的内容；"
+            "有请直接提供，没有请回复继续，将按现有信息往下分析。"
+        ]
+        for q in questions:
+            if not isinstance(q, dict):
+                continue
+            body = str(q.get("question") or "").strip()
+            if body:
+                lines.append(body)
+        return "\n".join(lines)
 
     def _desensitize_on(self) -> bool:
         return bool(getattr(self.config, "output_desensitize", True))
@@ -430,6 +476,11 @@ class Session:
         pinned = self._pinned_skill_prompt()
         if pinned:
             system = system + "\n\n" + pinned
+        from .files.mailbox import files_prompt_block
+
+        files_block = files_prompt_block(self)
+        if files_block:
+            system = system + "\n\n" + files_block
 
         from .trace import now_ms
 
@@ -598,33 +649,58 @@ class Session:
                 self._persist_message(note)
                 return
 
-            self.renderer.on_stop(stop_reason, usage, **stop_kwargs)
+            will_park = any(
+                tu.name == "question" and not self.block_on_question for tu in tool_uses
+            )
+            if not will_park:
+                self.renderer.on_stop(stop_reason, usage, **stop_kwargs)
 
             results = []
             tool_spans: List[dict] = []
+            parked_items: List[dict] = []
+            sibling_results: List[dict] = []
+            sibling_spans: List[dict] = []
             for tu in tool_uses:
                 exec_started = now_ms()
+                if tu.name == "question" and not self.block_on_question:
+                    from .tools.question import parse_question_prompts
+
+                    try:
+                        questions = parse_question_prompts(tu.input or {})
+                    except Exception:
+                        questions = []
+                    parked_items.append(
+                        {"tool_use_id": tu.id, "questions": questions}
+                    )
+                    continue
                 result = self._scrub_tool_result(self._execute_tool(tu))
                 ended_at = now_ms()
                 span_ms = max(0, ended_at - exec_started)
-                tool_spans.append(
+                span = {
+                    "id": tu.id,
+                    "name": tu.name,
+                    "started_at": exec_started,
+                    "duration_ms": span_ms,
+                    "ended_at": ended_at,
+                    "is_error": bool(result.is_error),
+                }
+                tool_spans.append(span)
+                block = ToolResultBlock(
+                    tool_use_id=tu.id,
+                    content=result.output,
+                    is_error=result.is_error,
+                    attachments=list(result.attachments or []),
+                )
+                results.append(block)
+                sibling_results.append(
                     {
-                        "id": tu.id,
-                        "name": tu.name,
-                        "started_at": exec_started,
-                        "duration_ms": span_ms,
-                        "ended_at": ended_at,
+                        "tool_use_id": tu.id,
+                        "content": result.output,
                         "is_error": bool(result.is_error),
+                        "attachments": list(result.attachments or []),
                     }
                 )
-                results.append(
-                    ToolResultBlock(
-                        tool_use_id=tu.id,
-                        content=result.output,
-                        is_error=result.is_error,
-                        attachments=list(result.attachments or []),
-                    )
-                )
+                sibling_spans.append(span)
                 self.renderer.on_tool_result(
                     tu.name,
                     result,
@@ -634,9 +710,95 @@ class Session:
                     duration_ms=span_ms,
                     ended_at=ended_at,
                 )
+
+            if parked_items:
+                questions: List[Any] = []
+                for item in parked_items:
+                    questions.extend(item.get("questions") or [])
+                self._pending_ask = {
+                    "items": parked_items,
+                    "questions": questions,
+                    "sibling_results": sibling_results,
+                    "sibling_spans": sibling_spans,
+                }
+                self.status = "awaiting_user"
+                self._update_record()
+                self.renderer.on_stop("ask", usage, **stop_kwargs)
+                return
+
             tool_msg = Message.tool_results(results, tool_spans=tool_spans)
             self.messages.append(tool_msg)
             self._persist_message(tool_msg)
+
+    def _flush_pending_ask(self, user_text: str, pending: dict) -> None:
+        """Turn the next user message into tool_result(s) for a parked question."""
+        from .tools.question import format_question_result
+        from .trace import now_ms
+
+        items = list(pending.get("items") or [])
+        if not items and pending.get("tool_use_id"):
+            items = [
+                {
+                    "tool_use_id": pending.get("tool_use_id"),
+                    "questions": pending.get("questions") or [],
+                }
+            ]
+        answer_text = (user_text or "").strip()
+        blocks: List[ToolResultBlock] = []
+        spans: List[dict] = []
+        for raw in pending.get("sibling_results") or []:
+            if not isinstance(raw, dict):
+                continue
+            blocks.append(
+                ToolResultBlock(
+                    tool_use_id=str(raw.get("tool_use_id") or ""),
+                    content=str(raw.get("content") or ""),
+                    is_error=bool(raw.get("is_error")),
+                    attachments=list(raw.get("attachments") or []),
+                )
+            )
+        spans.extend(
+            s for s in (pending.get("sibling_spans") or []) if isinstance(s, dict)
+        )
+        started = now_ms()
+        for item in items:
+            questions = list(item.get("questions") or [])
+            answers = [[answer_text] for _ in questions] or [[answer_text]]
+            output = format_question_result(questions, answers)
+            tu_id = str(item.get("tool_use_id") or "")
+            blocks.append(
+                ToolResultBlock(
+                    tool_use_id=tu_id,
+                    content=output,
+                    is_error=False,
+                )
+            )
+            ended = now_ms()
+            spans.append(
+                {
+                    "id": tu_id,
+                    "name": "question",
+                    "started_at": started,
+                    "duration_ms": max(0, ended - started),
+                    "ended_at": ended,
+                    "is_error": False,
+                }
+            )
+            self.renderer.on_tool_result(
+                "question",
+                ToolResult.success("question", output, answers=answers),
+                call_id=tu_id,
+                started_at=started,
+                duration_ms=max(0, ended - started),
+                ended_at=ended,
+            )
+        if blocks:
+            tool_msg = Message.tool_results(blocks, tool_spans=spans)
+            self.messages.append(tool_msg)
+            self._persist_message(tool_msg)
+        self._pending_ask = None
+        self.status = "busy"
+        self._update_record()
 
     def _execute_tool(self, tool_use: ToolUseBlock) -> ToolResult:
         ctx = ToolContext(
@@ -771,6 +933,13 @@ class Session:
         if self.parent_id:
             existing.metadata["parent_id"] = self.parent_id
         self._write_skill_metadata(existing.metadata)
+        cached = getattr(self, "_files", None)
+        if cached is not None:
+            existing.metadata["files"] = list(cached)
+        if self._pending_ask:
+            existing.metadata["pending_ask"] = dict(self._pending_ask)
+        else:
+            existing.metadata.pop("pending_ask", None)
         self.store.update_session(existing)
 
     def _write_skill_metadata(self, meta: dict) -> None:
@@ -799,6 +968,9 @@ class Session:
 
             parent_id = rec.metadata.get("parent_id")
             stored_skills = skills_from_metadata(rec.metadata)
+        pending_ask = None
+        if rec and rec.metadata and isinstance(rec.metadata.get("pending_ask"), dict):
+            pending_ask = dict(rec.metadata.get("pending_ask") or {})
         user_id = (rec.user_id if rec else None) or getattr(config, "user_id", "local") or "local"
 
         catalog_key = ""
@@ -850,6 +1022,7 @@ class Session:
             user_id=user_id,
             skill_names=stored_skills,
         )
+        sess._pending_ask = pending_ask
         sess._model_catalog_key = catalog_key
         if rec:
             sess._session_cost = float(rec.cost or 0)

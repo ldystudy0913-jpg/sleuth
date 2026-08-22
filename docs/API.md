@@ -66,6 +66,8 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `400` | 参数错误（如缺 prompt、非法 model） |
 | `401` | Admin Token 不匹配 |
 | `404` | 会话不存在，或不属于当前用户 |
+| `413` | 上传文件过大或会话文件数超限 |
+| `503` | 未配置 COS（会话文件邮箱不可用） |
 
 ### 2.4 重要限制（对接必读）
 
@@ -116,6 +118,10 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `GET` | `/v1/sessions` | 用户头 | 会话列表（含预览） |
 | `GET` | `/v1/sessions/{session_id}` | 用户头 | 会话详情 + 消息 |
 | `GET` | `/v1/sessions/{session_id}/trace` | 用户头 | 会话执行台账（轮次 / 工具 / 计时） |
+| `POST` | `/v1/sessions/{session_id}/files/uploads` | 用户头 | 预签名上传（COS PUT URL） |
+| `POST` | `/v1/sessions/{session_id}/files/complete` | 用户头 | 绑定已上传对象到会话 |
+| `GET` | `/v1/sessions/{session_id}/files` | 用户头 | 列出会话文件 |
+| `GET` | `/v1/sessions/{session_id}/files/{file_id}` | 用户头 | 下载（默认 302 到预签名 GET） |
 | `POST` | `/v1/sessions/{session_id}/messages` | 用户头 | 发送一轮对话（**同步 JSON**） |
 | `POST` | `/v1/sessions/{session_id}/messages/stream` | 用户头 | 发送一轮对话（**SSE 流式**） |
 | `GET` | `/v1/models` | 无 | 模型目录（选择器用；不含密钥） |
@@ -403,6 +409,61 @@ X-User-Id: alice
 
 ---
 
+### 4.4.2 会话文件（COS 邮箱）
+
+默认 agent 是 `build`。用户**不必切换**到 `dd_reply` 等专用 agent 也能：上传附件、把生成文件回传给前端、检索远程知识库（`kb_lookup`，需 `SLEUTH_KB_API_URL` + `SLEUTH_KB_LOGIN_URL` + `SLEUTH_KB_OPENID` + `SLEUTH_KB_SERVICEID`）。
+
+字节**不经过** Sleuth：浏览器用预签名 URL 直传 COS；会话只存 `file_id` / 对象键 / 文件名 / mime / size。不要把 data-URL 或文件字节塞进 `prompt` / SSE。
+
+配置（`.env`）：会话文件与 Skill 共用 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` / `SLEUTH_S3_ENDPOINT`，桶名取 `SLEUTH_SKILLS_S3` 的 `s3://桶/...`。只需另加 `SLEUTH_COS_PATH_PREFIX`（默认 `sleuth/files`）和可选 `SLEUTH_FILES_*`。对象存储客户端随核心依赖安装（boto3）。
+
+#### 申请上传
+
+`POST /v1/sessions/{session_id}/files/uploads`
+
+```json
+{ "filename": "notes.txt", "mime": "text/plain", "size": 120 }
+```
+
+**响应 `200`**
+
+```json
+{
+  "file_id": "file_...",
+  "object_key": "sleuth/files/alice/sess_.../file_.../notes.txt",
+  "upload_url": "https://...",
+  "expires_at": "2026-08-19T13:20:00Z",
+  "headers": { "Content-Type": "text/plain" }
+}
+```
+
+前端对 `upload_url` 发 **PUT**（body 为文件字节，`Content-Type` 与申请时一致）。
+
+| 状态 | 说明 |
+|------|------|
+| `413` | `size` 超过 `SLEUTH_FILES_MAX_BYTES`，或会话文件数超过 `SLEUTH_FILES_MAX_COUNT` |
+| `503` | 未配置共享 COS（`AWS_*` / `SLEUTH_S3_ENDPOINT` / `SLEUTH_SKILLS_S3`） |
+
+#### 确认上传
+
+`POST /v1/sessions/{session_id}/files/complete`
+
+```json
+{ "file_id": "file_..." }
+```
+
+服务端 HEAD 对象，状态变为 `ready`（`role: user`）。
+
+#### 列表 / 下载
+
+`GET /v1/sessions/{session_id}/files` → `{ "files": [{ "id", "filename", "mime", "size", "role", "status", "download_url" }] }`
+
+`GET /v1/sessions/{session_id}/files/{file_id}`：默认 **302** 到短时预签名 GET。`?json=1` 或 `Accept: application/json` 时返回 `{ "download_url": "https://..." }`。
+
+`download_url` 在列表 / `done.files` 里是 **Sleuth API 路径**（`/v1/sessions/.../files/{id}`），前端带 `X-User-Id` 再跳转 COS。
+
+---
+
 ### 4.5 发送消息（一轮 Agent）
 
 `POST /v1/sessions/{session_id}/messages`
@@ -427,6 +488,7 @@ X-User-Id: alice
 | `model` | string | 否 | 未选时传默认模型 | 每轮带当前选择器值 |
 | `skills` | string[] | 否 | `[]` | 推荐；仅默认 agent 可非空，否则传 `[]` |
 | `skill` | string | 否 | `""` | 兼容单选；与 `skills` 同时出现时以 `skills` 为准 |
+| `file_ids` | string[] | 否 | 本会话全部 `ready` 文件 | 本轮交给 MCP 的附件；`[]` 表示本轮不用附件 |
 
 **请求示例**
 
@@ -460,6 +522,7 @@ X-User-Id: alice
   },
   "skill": "dd-report-check",
   "skills": ["dd-report-check"],
+  "files": [],
   "usage": {
     "input": 1200,
     "output": 400,
@@ -474,9 +537,12 @@ X-User-Id: alice
 | 字段 | 说明 |
 |------|------|
 | `text` | 本轮助手对用户可见的最终文本 |
+| `status` | `ok` 正常结束；`awaiting_user` 表示本轮在 `question` 上暂停，等用户下一条消息 |
+| `questions` | 仅 `awaiting_user`：列出缺项并询问是否还有补充（`question` / `options`） |
 | `usage` | **本轮最后一次**模型调用用量（非整会话累加） |
 | `cost` | 会话累计费用估算 |
 | `title` | 可能在首轮后更新为语义标题 |
+| `files` | 本轮**新产生**的助手文件（`id` / `filename` / `mime` / `size` / `download_url`）；无则 `[]` |
 | `skills` | 当前绑定的 skill 名列表；未选为 `[]` |
 | `skill` | 兼容字段，等于 `skills[0]`；未选为 `null` |
 
@@ -499,6 +565,8 @@ X-User-Id: alice
 
 **说明**：与 §4.5 **同一套鉴权与 Body**，但响应为 **SSE**。模型侧 `text` 按增量推送；MCP/工具为同步等待，期间会先有 `tool_start`，结束后有 `tool_result`（中间可能长时间没有 `text`）。连接结束前必有一条 `type=done`（含完整 `text`，请以前端最终对齐为准）。
 
+若 `done.status` 为 `awaiting_user`：本轮已停，请把 `questions`（或缺项说明）展示给用户。用户补充字段或回复「没有补充、继续」后再发一条 `POST .../messages`（不必新接口）。`stop.reason` 可能为 `ask`。
+
 台账用 `step` / `tool_start` / `tool_result` / `stop` 追加行；时间条用 `started_at` + `duration_ms`。**运行中只有 start、没有 duration**（不要用墙钟时间填假长度）。`done` 仍作终态对齐，字段不变。旧事件 `type` 名与必填字段保持兼容，下列为新增可选字段。
 
 **Headers**
@@ -509,7 +577,7 @@ X-User-Id: alice
 | `X-User-Id` | 是 | 须与会话用户一致 |
 | `Accept: text/event-stream` | 建议 | |
 
-**Body**：同 §4.5（每轮带 `prompt` / `agent` / `model` / `skills`）。
+**Body**：同 §4.5（每轮带 `prompt` / `agent` / `model` / `skills` / 可选 `file_ids`）。
 
 **成功时 HTTP `200`**，`Content-Type: text/event-stream`。
 
@@ -557,6 +625,7 @@ data: {"type":"text","delta":"你好","session_id":"sess_a1b2c3d4e5f678901234abc
   },
   "skill": "dd-report-check",
   "skills": ["dd-report-check"],
+  "files": [],
   "usage": {
     "input": 1200,
     "output": 400,
@@ -568,7 +637,7 @@ data: {"type":"text","delta":"你好","session_id":"sess_a1b2c3d4e5f678901234abc
 }
 ```
 
-与同步接口字段对齐：`text` / `title` / `agent` / `model` / `skills` / `skill` / `usage` / `cost`。
+与同步接口字段对齐：`text` / `title` / `agent` / `model` / `skills` / `skill` / `files` / `usage` / `cost`。
 
 #### 示例事件流（示意）
 

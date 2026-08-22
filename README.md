@@ -48,6 +48,11 @@ py -3.12 -m sleuth --yolo "用三句话说明 sleuth/session.py 做什么"
 | `SLEUTH_SKILLS_REFRESH_SECONDS` | Skill 热更新 TTL |
 | `SLEUTH_MCP_SERVERS` | MCP 服务 JSON |
 | `SLEUTH_SERVER_*` | HTTP 服务配置 |
+| `SLEUTH_S3_ENDPOINT` / `AWS_*` | Skill 与会话文件共用的 COS 凭证、地域、Endpoint |
+| `SLEUTH_SKILLS_S3` | Skill 对象前缀；桶名同时用于会话文件 |
+| `SLEUTH_COS_PATH_PREFIX` | 会话文件对象键前缀（默认 `sleuth/files`） |
+| `SLEUTH_FILES_*` | 单文件大小、会话文件数、预签名 TTL、MIME 白名单 |
+| `SLEUTH_KB_*` | 默认 agent（`build`）远程知识库：login Cookie `ragToken` + `serviceConfig`，与 dd_reply 同一 API |
 
 复杂嵌套可用 [`sleuth.jsonc.example`](sleuth.jsonc.example) 叠加；同名项以 `.env` 为准。
 
@@ -146,6 +151,7 @@ py -3.12 -m sleuth.server
 | POST/GET | `/v1/sessions`（创建可选 body `model`；列表含 `preview` / `time_updated_local`） |
 | GET | `/v1/sessions/{id}`（含 `model`、messages、计时字段） |
 | GET | `/v1/sessions/{id}/trace`（执行台账；见 [docs/API.md](docs/API.md) §4.4.1） |
+| POST | `/v1/sessions/{id}/files/uploads` · `.../complete`；GET `.../files` · `.../files/{file_id}`（COS 邮箱，见 [docs/API.md](docs/API.md) §4.4.2） |
 | POST | `/v1/sessions/{id}/messages`（可选 body `model`，本轮前切换；**同步长耗时**） |
 | POST | `/v1/sessions/{id}/messages/stream`（同上 Body；**SSE**，见 [docs/API.md](docs/API.md) §4.5.1） |
 | GET | `/v1/models` · `/v1/agents`（选择器目录；agents 含 available） |

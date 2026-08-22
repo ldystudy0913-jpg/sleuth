@@ -38,23 +38,37 @@ class QuestionParams(BaseModel):
 class QuestionTool:
     name = "question"
     description = (
-        "Ask the user a question during execution — for preferences, "
-        "clarifications, or decisions the model cannot make alone. Blocks "
-        "until the user answers. Put the recommended option first and append "
-        "(Recommended) to it."
+        "Ask the user a question and wait for their reply. Use this when required "
+        "inputs are incomplete: list what is still missing, then ask whether they "
+        "have any other information to provide. Offer options to supply more fields "
+        "or to continue the analysis without them. Do not invent missing values. "
+        "Put the recommended option first and append (Recommended) to it."
     )
     params = QuestionParams
 
     def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
-        p = QuestionParams(**args)
-        prompts = [q.model_dump() for q in p.questions]
+        prompts = parse_question_prompts(args)
         answers = ctx.ask_question(prompts)
-        formatted = ", ".join(
-            f'"{q.question}"="{", ".join(ans) if ans else "Unanswered"}"'
-            for q, ans in zip(p.questions, answers)
-        )
         return ToolResult.success(
             "question",
-            f"User has answered your questions: {formatted}. Continue with the user's answers in mind.",
+            format_question_result(prompts, answers),
             answers=[list(a) for a in answers],
         )
+
+
+def parse_question_prompts(args: dict) -> List[dict]:
+    p = QuestionParams(**(args or {}))
+    return [q.model_dump() for q in p.questions]
+
+
+def format_question_result(questions: List[dict], answers: List[List[str]]) -> str:
+    formatted = ", ".join(
+        f'"{q.get("question")}"="{", ".join(ans) if ans else "Unanswered"}"'
+        for q, ans in zip(questions, answers)
+    )
+    return (
+        f"User has answered your questions: {formatted}. "
+        "If they provided more information, use it. "
+        "If they said there is nothing more to add, continue the analysis "
+        "with the information already collected; do not invent missing values."
+    )

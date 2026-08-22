@@ -17,6 +17,23 @@ def _env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_optional_float(name: str) -> Optional[float]:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 def _env_path(name: str) -> Optional[Path]:
     raw = os.environ.get(name)
     if not raw:
@@ -56,13 +73,24 @@ class Settings:
         kb = overrides.get("kb_path", _env_path("DD_REPLY_KB_PATH"))
         self.kb_path: Optional[Path] = Path(kb) if kb else None
 
-        # Remote knowledge-base search (production). Only "question" is required by API;
-        # optional fields (knowledgeId etc.) can be sent via env.
+        # Remote KB: login → Cookie ragToken, then POST search (optional serviceConfig).
         self.kb_api_url: str = str(
             overrides.get("kb_api_url", _env("DD_REPLY_KB_API_URL", "") or "")
         ).strip()
-        self.kb_api_token: str = str(
-            overrides.get("kb_api_token", _env("DD_REPLY_KB_API_TOKEN", "") or "")
+        self.kb_login_url: str = str(
+            overrides.get("kb_login_url", _env("DD_REPLY_KB_LOGIN_URL", "") or "")
+        ).strip()
+        self.kb_login_openid: str = str(
+            overrides.get(
+                "kb_login_openid",
+                _env("DD_REPLY_KB_OPENID", "") or "",
+            )
+        ).strip()
+        self.kb_login_service_id: str = str(
+            overrides.get(
+                "kb_login_service_id",
+                _env("DD_REPLY_KB_SERVICEID", "") or "",
+            )
         ).strip()
         self.kb_api_timeout: float = float(
             overrides.get(
@@ -70,39 +98,95 @@ class Settings:
                 _env("DD_REPLY_KB_API_TIMEOUT", "30") or "30",
             )
         )
-        # Authorization header value prefix; empty = send raw token as header value.
-        self.kb_api_auth_scheme: str = str(
-            overrides.get(
-                "kb_api_auth_scheme",
-                _env("DD_REPLY_KB_API_AUTH_SCHEME", "Bearer") or "Bearer",
-            )
-        ).strip()
-        self.kb_api_auth_header: str = str(
-            overrides.get(
-                "kb_api_auth_header",
-                _env("DD_REPLY_KB_API_AUTH_HEADER", "Authorization") or "Authorization",
-            )
-        ).strip() or "Authorization"
-        # Optional body fields merged into every search request (JSON object string).
-        self.kb_api_extra_body: str = str(
-            overrides.get(
-                "kb_api_extra_body",
-                _env("DD_REPLY_KB_API_EXTRA_BODY", "") or "",
-            )
-        ).strip()
-        # Convenience: single optional knowledgeId (also settable via EXTRA_BODY).
-        self.kb_knowledge_id: str = str(
-            overrides.get(
-                "kb_knowledge_id",
-                _env("DD_REPLY_KB_KNOWLEDGE_ID", "") or "",
-            )
-        ).strip()
-        # How many KB hits to keep per risk code (API topK + local slice). 0 = no local cap.
-        self.kb_top_k: int = int(
-            overrides.get("kb_top_k", _env_int("DD_REPLY_KB_TOP_K", 8))
+        self.kb_sort_count: int = int(
+            overrides.get("kb_sort_count", _env_int("DD_REPLY_KB_SORT_COUNT", 10))
         )
-        if self.kb_top_k < 0:
-            self.kb_top_k = 0
+        if "kb_sort_score" in overrides:
+            raw_score = overrides.get("kb_sort_score")
+            self.kb_sort_score: Optional[float] = (
+                float(raw_score) if raw_score is not None and raw_score != "" else None
+            )
+        else:
+            self.kb_sort_score = _env_optional_float("DD_REPLY_KB_SORT_SCORE")
+        self.kb_time_combine: bool = bool(
+            overrides.get("kb_time_combine", _env_bool("DD_REPLY_KB_TIME_COMBINE", False))
+        )
+        self.kb_knowledge_ids: str = str(
+            overrides.get(
+                "kb_knowledge_ids",
+                _env("DD_REPLY_KB_KNOWLEDGE_IDS", "") or "",
+            )
+        ).strip()
+        self.kb_recall_count: int = int(
+            overrides.get("kb_recall_count", _env_int("DD_REPLY_KB_RECALL_COUNT", 10))
+        )
+        self.kb_atom_ids: str = str(
+            overrides.get("kb_atom_ids", _env("DD_REPLY_KB_ATOM_IDS", "") or "")
+        ).strip()
+        self.kb_node_ids: str = str(
+            overrides.get("kb_node_ids", _env("DD_REPLY_KB_NODE_IDS", "") or "")
+        ).strip()
+        self.kb_html_clear: bool = bool(
+            overrides.get("kb_html_clear", _env_bool("DD_REPLY_KB_HTML_CLEAR", False))
+        )
+        self.kb_qa_search_mode: str = str(
+            overrides.get(
+                "kb_qa_search_mode",
+                _env("DD_REPLY_KB_QA_SEARCH_MODE", "") or "",
+            )
+        ).strip()
+        self.kb_time_filter_enable: bool = bool(
+            overrides.get(
+                "kb_time_filter_enable",
+                _env_bool("DD_REPLY_KB_TIME_FILTER_ENABLE", False),
+            )
+        )
+        self.kb_time_filter_by_day: Optional[int] = None
+        if "kb_time_filter_by_day" in overrides and overrides.get("kb_time_filter_by_day") not in (None, ""):
+            self.kb_time_filter_by_day = int(overrides.get("kb_time_filter_by_day"))  # type: ignore[arg-type]
+        else:
+            raw_day = os.environ.get("DD_REPLY_KB_TIME_FILTER_BY_DAY")
+            if raw_day:
+                self.kb_time_filter_by_day = int(raw_day)
+        self.kb_time_filter_start_time: str = str(
+            overrides.get(
+                "kb_time_filter_start_time",
+                _env("DD_REPLY_KB_TIME_FILTER_START_TIME", "") or "",
+            )
+        ).strip()
+        self.kb_time_filter_end_time: str = str(
+            overrides.get(
+                "kb_time_filter_end_time",
+                _env("DD_REPLY_KB_TIME_FILTER_END_TIME", "") or "",
+            )
+        ).strip()
+        self.kb_tag_name: str = str(
+            overrides.get("kb_tag_name", _env("DD_REPLY_KB_TAG_NAME", "") or "")
+        ).strip()
+        self.kb_tag_value_ids: str = str(
+            overrides.get(
+                "kb_tag_value_ids",
+                _env("DD_REPLY_KB_TAG_VALUE_IDS", "") or "",
+            )
+        ).strip()
+        self.kb_tag_value_names: str = str(
+            overrides.get(
+                "kb_tag_value_names",
+                _env("DD_REPLY_KB_TAG_VALUE_NAMES", "") or "",
+            )
+        ).strip()
+        self.kb_tag_search_operation: str = str(
+            overrides.get(
+                "kb_tag_search_operation",
+                _env("DD_REPLY_KB_TAG_SEARCH_OPERATION", "AND") or "AND",
+            )
+        ).strip()
+        self.kb_subnet_type: str = str(
+            overrides.get(
+                "kb_subnet_type",
+                _env("DD_REPLY_KB_SUBNET_TYPE", "dmz") or "dmz",
+            )
+        ).strip()
 
         self.llm_base_url: str = str(
             overrides.get("llm_base_url", _env("DD_REPLY_LLM_BASE_URL", "") or "")
@@ -192,8 +276,13 @@ class Settings:
         return bool(self.llm_base_url and self.llm_api_key)
 
     def kb_api_configured(self) -> bool:
-        """Production remote KB: URL is enough; token optional for open intranet APIs."""
-        return bool(self.kb_api_url)
+        """Need search URL plus login (Cookie ragToken)."""
+        return bool(
+            self.kb_api_url
+            and self.kb_login_url
+            and self.kb_login_openid
+            and self.kb_login_service_id
+        )
 
 
 _SETTINGS: Optional[Settings] = None

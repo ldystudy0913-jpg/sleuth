@@ -48,16 +48,16 @@ py -3.12 -m sleuth --agent dd_reply
 | 配置 | 说明 |
 |------|------|
 | `DD_REPLY_KB_API_URL` | **必填**。风险点知识只走该检索 API，连不上或无命中即标缺失，不再读本地 JSON |
-| `DD_REPLY_KB_API_TOKEN` | Header Token（默认 `Authorization: Bearer …`） |
-| `DD_REPLY_KB_TOP_K` | 每个风险编码保留相关性最高的命中条数（默认 8；同时作为请求 `topK`） |
-| `DD_REPLY_KB_KNOWLEDGE_ID` / `DD_REPLY_KB_API_EXTRA_BODY` | 可选请求字段（如 knowledgeId） |
+| `DD_REPLY_KB_LOGIN_URL` / `DD_REPLY_KB_OPENID` / `DD_REPLY_KB_SERVICEID` | **必填**。登录拿 `ragToken`，检索请求带 `Cookie: ragToken=…` |
+| `DD_REPLY_KB_KNOWLEDGE_IDS` | 可选召回库 ID（逗号分隔）；不配则走服务默认配置 |
+| `DD_REPLY_KB_SORT_COUNT` | 每个风险编码保留的命中条数（默认 10） |
 | `DD_REPLY_KB_PATH` | 本地目录；**仅禁用词**读其中的 `lexicon.json` |
 
 | 文件 | 说明 |
 |------|------|
 | `lexicon.json` | 禁用词 hard/soft（本地） |
 
-流程：对每个风险编码或名称以 `question=<该项>` 检索 → 按 `finalResponse` / `comprehended` / `rankScore` 排序后取前 `TOP_K` 条 → 摘录带文件名/链接/knowledgeId → 结合字段与附件生成框架，文末附「知识来源」。材料清单用于判断附件是否**充分**，不要求齐套。
+流程：对每个风险编码或名称以 `question=<该项>` 检索（可选 `serviceConfig`）→ 按 `finalResponse` / `comprehended` / `rankScore` 排序后取前 `SORT_COUNT` 条 → 结合字段与附件生成框架。正文里用来源灰色括号标 `file_name` 与知识 URL；文末用虚线与正文分开，再灰色列出文件名和链接。材料清单用于判断附件是否**充分**，不要求齐套。
 
 ## 本地附件测试
 

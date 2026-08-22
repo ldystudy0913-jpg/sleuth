@@ -63,6 +63,31 @@ def _skill_fields(sess) -> Dict[str, Any]:
     return {"skill": names[0] if names else None, "skills": names}
 
 
+def _turn_files_fields(sess) -> Dict[str, Any]:
+    from ..files.mailbox import public_files
+    from ..storage.base import SessionRecord
+
+    store = getattr(sess, "store", None)
+    rec = None
+    if store is not None:
+        rec = store.get_session(sess.id)
+    if rec is None:
+        rec = SessionRecord(
+            id=sess.id,
+            directory=str(getattr(sess, "workdir", "") or ""),
+            title=getattr(sess, "title", "") or "",
+            user_id=getattr(sess, "user_id", "") or "",
+            metadata={"files": list(getattr(sess, "_files", None) or [])},
+        )
+    ids = list(getattr(sess, "_turn_file_ids", None) or [])
+    return {"files": public_files(rec, file_ids=ids or None) if ids else []}
+
+
+def _mailbox_error_response(exc) -> Any:
+    status = int(getattr(exc, "status", 400) or 400)
+    return _json_response({"error": str(exc)}, status)
+
+
 def create_app(workdir: Optional[Path] = None):
     from starlette.applications import Starlette
     from starlette.requests import Request
@@ -200,6 +225,41 @@ def create_app(workdir: Optional[Path] = None):
                     )
         return _json_response(payload)
 
+    def _owned_rec(request: Request):
+        sid = request.path_params["session_id"]
+        user_id = _user_id(request)
+        rec = store.get_session(sid)
+        if rec is None or (rec.user_id and rec.user_id != user_id):
+            return None, _json_response({"error": "not found"}, 404)
+        return rec, None
+
+    def _bind_prompt_files(sess, body: Dict[str, Any]):
+        if "file_ids" not in body:
+            sess._prompt_file_ids = None
+            return None
+        raw = body.get("file_ids")
+        if raw is None:
+            sess._prompt_file_ids = []
+            return None
+        if not isinstance(raw, list):
+            return "file_ids must be an array"
+        ids = [str(x).strip() for x in raw if str(x).strip()]
+        from ..files.mailbox import get_file, session_files
+
+        files = session_files(sess)
+        unknown = [fid for fid in ids if get_file(files, fid) is None]
+        if unknown:
+            return f"unknown file_ids: {', '.join(unknown)}"
+        not_ready = [
+            fid
+            for fid in ids
+            if str((get_file(files, fid) or {}).get("status") or "") != "ready"
+        ]
+        if not_ready:
+            return f"file_ids not ready: {', '.join(not_ready)}"
+        sess._prompt_file_ids = ids
+        return None
+
     def _parse_message_body(body: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
         """Return (prompt, error_message)."""
         prompt = body.get("prompt") or body.get("text") or ""
@@ -235,6 +295,10 @@ def create_app(workdir: Optional[Path] = None):
         err = apply_session_selectors(sess, body, cfg)
         if err:
             return _json_response({"error": err}, 400)
+        ferr = _bind_prompt_files(sess, body)
+        if ferr:
+            return _json_response({"error": ferr}, 400)
+        sess.block_on_question = False
         text = sess.prompt(str(prompt))
         return _json_response(
             {
@@ -244,8 +308,10 @@ def create_app(workdir: Optional[Path] = None):
                 "agent": sess.agent_name,
                 "model": _session_model_payload(sess),
                 **_skill_fields(sess),
+                **_turn_files_fields(sess),
                 "usage": sess._last_usage,
                 "cost": sess._session_cost,
+                **sess.ask_payload(),
             }
         )
 
@@ -279,6 +345,10 @@ def create_app(workdir: Optional[Path] = None):
         err = apply_session_selectors(sess, body, cfg)
         if err:
             return _json_response({"error": err}, 400)
+        ferr = _bind_prompt_files(sess, body)
+        if ferr:
+            return _json_response({"error": ferr}, 400)
+        sess.block_on_question = False
 
         run_prompt_in_thread(sess, str(prompt), renderer)
 
@@ -308,8 +378,10 @@ def create_app(workdir: Optional[Path] = None):
                     "agent": sess.agent_name,
                     "model": _session_model_payload(sess),
                     **_skill_fields(sess),
+                    **_turn_files_fields(sess),
                     "usage": dict(sess._last_usage or {}),
                     "cost": float(sess._session_cost or 0),
+                    **sess.ask_payload(),
                 }
                 yield sse_pack(done)
 
@@ -376,6 +448,101 @@ def create_app(workdir: Optional[Path] = None):
             return denied
         return _json_response(reload_mcp(load(workdir), workdir))
 
+    async def create_file_upload(request: Request):
+        rec, denied = _owned_rec(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_response({"error": "invalid json"}, 400)
+        filename = str(body.get("filename") or "")
+        mime = str(body.get("mime") or body.get("content_type") or "")
+        try:
+            size = int(body.get("size") if body.get("size") is not None else -1)
+        except (TypeError, ValueError):
+            return _json_response({"error": "size must be an integer"}, 400)
+        cfg = load(workdir)
+        from ..files.cos import CosNotConfigured
+        from ..files.mailbox import MailboxError, create_upload
+
+        try:
+            payload = create_upload(
+                config=cfg,
+                store=store,
+                rec=rec,
+                filename=filename,
+                mime=mime,
+                size=size,
+            )
+        except CosNotConfigured as exc:
+            return _json_response({"error": str(exc)}, 503)
+        except MailboxError as exc:
+            return _mailbox_error_response(exc)
+        return _json_response(payload)
+
+    async def complete_file_upload(request: Request):
+        rec, denied = _owned_rec(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_response({"error": "invalid json"}, 400)
+        file_id = str(body.get("file_id") or body.get("id") or "")
+        if not file_id:
+            return _json_response({"error": "file_id required"}, 400)
+        cfg = load(workdir)
+        from ..files.cos import CosNotConfigured
+        from ..files.mailbox import MailboxError, complete_upload, public_file
+
+        try:
+            item = complete_upload(config=cfg, store=store, rec=rec, file_id=file_id)
+        except CosNotConfigured as exc:
+            return _json_response({"error": str(exc)}, 503)
+        except MailboxError as exc:
+            return _mailbox_error_response(exc)
+        rec = store.get_session(rec.id) or rec
+        view = public_file(rec, item, include_pending=True)
+        return _json_response(view or {"id": item.get("id"), "status": item.get("status")})
+
+    async def list_session_files(request: Request):
+        rec, denied = _owned_rec(request)
+        if denied is not None:
+            return denied
+        from ..files.mailbox import public_files
+
+        include_pending = request.query_params.get("include_pending", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        return _json_response({"files": public_files(rec, include_pending=include_pending)})
+
+    async def download_session_file(request: Request):
+        rec, denied = _owned_rec(request)
+        if denied is not None:
+            return denied
+        file_id = request.path_params["file_id"]
+        cfg = load(workdir)
+        from ..files.cos import CosNotConfigured
+        from ..files.mailbox import MailboxError, download_target
+
+        try:
+            url = download_target(config=cfg, rec=rec, file_id=file_id)
+        except CosNotConfigured as exc:
+            return _json_response({"error": str(exc)}, 503)
+        except MailboxError as exc:
+            status = 404 if "not found" in str(exc).lower() else int(getattr(exc, "status", 400) or 400)
+            return _json_response({"error": str(exc)}, status)
+        want_json = request.query_params.get("json", "").lower() in ("1", "true", "yes")
+        accept = (request.headers.get("accept") or "").lower()
+        if want_json or "application/json" in accept:
+            return _json_response({"download_url": url})
+        from starlette.responses import RedirectResponse
+
+        return RedirectResponse(url, status_code=302)
+
     routes = [
         Route("/health", health),
         Route("/v1/sessions", create_session, methods=["POST"]),
@@ -387,6 +554,22 @@ def create_app(workdir: Optional[Path] = None):
             "/v1/sessions/{session_id}/messages/stream",
             post_message_stream,
             methods=["POST"],
+        ),
+        Route(
+            "/v1/sessions/{session_id}/files/uploads",
+            create_file_upload,
+            methods=["POST"],
+        ),
+        Route(
+            "/v1/sessions/{session_id}/files/complete",
+            complete_file_upload,
+            methods=["POST"],
+        ),
+        Route("/v1/sessions/{session_id}/files", list_session_files, methods=["GET"]),
+        Route(
+            "/v1/sessions/{session_id}/files/{file_id}",
+            download_session_file,
+            methods=["GET"],
         ),
         Route("/v1/users/{user_id}/usage", user_usage, methods=["GET"]),
         Route("/v1/models", models_list, methods=["GET"]),

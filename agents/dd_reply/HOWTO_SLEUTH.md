@@ -23,16 +23,18 @@ SLEUTH_MCP_SERVERS={"ddreply":{"type":"remote","url":"http://127.0.0.1:8792/mcp"
 可选：在 **dd_reply 进程** 的 `agents/dd_reply/.env` 配置知识库（内网 URL 写这里）：
 
 ```env
-DD_REPLY_KB_API_URL=http://your-intranet-kb/api/search
-DD_REPLY_KB_API_TOKEN=your-token
-# DD_REPLY_KB_KNOWLEDGE_ID=
-# DD_REPLY_KB_TOP_K=8
+DD_REPLY_KB_LOGIN_URL=http://your-intranet-kb/v1/auth/login
+DD_REPLY_KB_OPENID=your-openid
+DD_REPLY_KB_SERVICEID=your-service-id
+DD_REPLY_KB_API_URL=http://your-intranet-kb/v1/search/api/search
+# DD_REPLY_KB_KNOWLEDGE_IDS=10752
+# DD_REPLY_KB_SORT_COUNT=10
 
 # 仅禁用词目录（默认包内 kb/lexicon.json）
 # DD_REPLY_KB_PATH=D:/kb/dd_reply
 ```
 
-必须配置 `DD_REPLY_KB_API_URL`：风险点只从知识库 API 取；连不上或无结果会标缺失，不会回退本地 JSON。禁用词始终用本地 `lexicon.json`。
+必须配置检索 URL 以及登录三项（`LOGIN_URL` / `OPENID` / `SERVICEID`）：风险点只从知识库 API 取；连不上或无结果会标缺失，不会回退本地 JSON。禁用词始终用本地 `lexicon.json`。
 
 ## 3. 运行
 

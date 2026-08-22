@@ -48,4 +48,7 @@
   "storage": {
     "backend": "sqlite"
   }
+  // files / kb via .env (AWS_* + SLEUTH_S3_ENDPOINT + SLEUTH_SKILLS_S3; SLEUTH_COS_PATH_PREFIX / SLEUTH_FILES_* / SLEUTH_KB_*)
+  // "files": { "max_bytes": 52428800, "max_count": 20 },
+  // "kb": { "api_url": "" }
 }
