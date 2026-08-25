@@ -83,6 +83,13 @@ def _mask_address(m: re.Match[str]) -> str:
     return m.group(1) + "***"
 
 
+def contains_raw_pii(text: str) -> bool:
+    """True when text still contains an unmasked ID, mobile, or bank-card run."""
+    if not text:
+        return False
+    return bool(_RE_ID.search(text) or _RE_MOBILE.search(text) or _RE_BANK.search(text))
+
+
 def desensitize_text(text: str) -> str:
     """Return text with common PII patterns masked. Empty/None-safe for str only."""
     if not text:

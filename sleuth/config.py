@@ -145,6 +145,14 @@ class FilesConfig:
     presign_get_expires: int = 300
     # Empty or "*" = any MIME; otherwise CSV / JSONC list (supports "image/*").
     mime_allow: List[str] = field(default_factory=list)
+    sm4_key: str = ""
+    require_encrypt: bool = True
+    excerpt_max_chars: int = 8000
+    image_mode: str = "vision"
+    vision_model: str = ""
+    extract_concurrency: int = 2
+    extract_timeout_s: float = 45.0
+    prompt_wait_s: float = 8.0
 
 
 @dataclass
@@ -185,6 +193,60 @@ class KbConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """Long-term memory (OpenGauss). Defaults live here only — business code reads Config."""
+
+    backend: str = "off"
+    og_host: str = ""
+    og_port: int = 5432
+    og_user: str = ""
+    og_password: str = ""
+    og_database: str = ""
+    og_dsn: str = ""
+    og_schema: str = ""
+    og_connect_timeout_s: float = 5.0
+    table_item: str = "mem_item"
+    table_audit: str = "mem_audit"
+    embedding_model: str = ""
+    embedding_dim: int = 1024
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    top_k: int = 12
+    min_score: str = "0.35"
+    max_items: int = 24
+    max_chars: int = 6000
+    pattern_ttl_days: int = 90
+    ttl_kinds: str = "pattern"
+    scenarios: str = "general,suspicious_analysis,due_diligence,screening,rating"
+    kinds: str = "preference,workflow,policy,fact,pattern,forget"
+    pin_kinds: str = "preference,forget"
+    vector_kind: str = "vector"
+    scope_kinds: str = "user,role,org"
+    origins: str = "user_explicit,agent_inferred,admin"
+    row_status_active: str = "active"
+    row_status_archived: str = "archived"
+
+
+@dataclass
+class AclConfig:
+    """Identity directory + agent/skill grants on the session MySQL/SQLite database."""
+
+    enabled: bool = False
+    table_org: str = "mem_org"
+    table_role: str = "mem_role"
+    table_user: str = "mem_user"
+    table_grant: str = "mem_grant"
+    default_agent_open: bool = True
+    default_agent_name: str = ""
+    row_status_active: str = "active"
+    row_status_disabled: str = "disabled"
+    grant_allow: str = "allow"
+    grant_deny: str = "deny"
+    scope_kinds: str = "role,org,user"
+    resource_kinds: str = "agent,skill"
+
+
+@dataclass
 class Config:
     model: Optional[str] = None
     small_model: Optional[str] = None
@@ -220,6 +282,8 @@ class Config:
     cos: CosConfig = field(default_factory=CosConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     kb: KbConfig = field(default_factory=KbConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    acl: AclConfig = field(default_factory=AclConfig)
     # Product disclosure guardrails (block sleuth internals / secrets).
     guardrails: bool = True
     # Scrub PII (ID / mobile / bank / password / labeled address) on outputs.
@@ -387,6 +451,10 @@ class Config:
             self._merge_files(raw["files"])
         if "kb" in raw and isinstance(raw["kb"], dict):
             self._merge_kb(raw["kb"])
+        if "memory" in raw and isinstance(raw["memory"], dict):
+            self._merge_memory(raw["memory"])
+        if "acl" in raw and isinstance(raw["acl"], dict):
+            self._merge_acl(raw["acl"])
         self._merge_mcp(raw)
         self._merge_skills(raw)
         return self
@@ -449,6 +517,10 @@ class Config:
             ("presignPutExpires", "presign_put_expires"),
             ("presign_get_expires", "presign_get_expires"),
             ("presignGetExpires", "presign_get_expires"),
+            ("excerpt_max_chars", "excerpt_max_chars"),
+            ("excerptMaxChars", "excerpt_max_chars"),
+            ("extract_concurrency", "extract_concurrency"),
+            ("extractConcurrency", "extract_concurrency"),
         ):
             val = block.get(src)
             if val is None or val == "":
@@ -457,6 +529,44 @@ class Config:
                 setattr(self.files, attr, int(val))
             except (TypeError, ValueError):
                 continue
+        for src, attr in (
+            ("extract_timeout_s", "extract_timeout_s"),
+            ("extractTimeoutS", "extract_timeout_s"),
+            ("prompt_wait_s", "prompt_wait_s"),
+            ("promptWaitS", "prompt_wait_s"),
+        ):
+            val = block.get(src)
+            if val is None or val == "":
+                continue
+            try:
+                setattr(self.files, attr, float(val))
+            except (TypeError, ValueError):
+                continue
+        for src, attr in (
+            ("sm4_key", "sm4_key"),
+            ("sm4Key", "sm4_key"),
+            ("image_mode", "image_mode"),
+            ("imageMode", "image_mode"),
+            ("vision_model", "vision_model"),
+            ("visionModel", "vision_model"),
+        ):
+            val = block.get(src)
+            if val is None:
+                continue
+            setattr(self.files, attr, str(val))
+        req = block.get("require_encrypt")
+        if req is None:
+            req = block.get("requireEncrypt")
+        if req is not None:
+            if isinstance(req, bool):
+                self.files.require_encrypt = req
+            else:
+                self.files.require_encrypt = str(req).strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
         mime = block.get("mime_allow")
         if mime is None:
             mime = block.get("mimeAllow")
@@ -533,6 +643,126 @@ class Config:
                 setattr(self.kb, attr, val)
             else:
                 setattr(self.kb, attr, str(val).strip().lower() in ("1", "true", "yes", "on"))
+
+    def _merge_memory(self, block: Dict[str, Any]) -> None:
+        str_keys = (
+            ("backend", "backend"),
+            ("og_host", "og_host"),
+            ("ogHost", "og_host"),
+            ("og_user", "og_user"),
+            ("ogUser", "og_user"),
+            ("og_password", "og_password"),
+            ("ogPassword", "og_password"),
+            ("og_database", "og_database"),
+            ("ogDatabase", "og_database"),
+            ("og_dsn", "og_dsn"),
+            ("ogDsn", "og_dsn"),
+            ("og_schema", "og_schema"),
+            ("ogSchema", "og_schema"),
+            ("table_item", "table_item"),
+            ("tableItem", "table_item"),
+            ("table_audit", "table_audit"),
+            ("tableAudit", "table_audit"),
+            ("embedding_model", "embedding_model"),
+            ("embeddingModel", "embedding_model"),
+            ("embedding_base_url", "embedding_base_url"),
+            ("embeddingBaseUrl", "embedding_base_url"),
+            ("embedding_api_key", "embedding_api_key"),
+            ("embeddingApiKey", "embedding_api_key"),
+            ("min_score", "min_score"),
+            ("minScore", "min_score"),
+            ("ttl_kinds", "ttl_kinds"),
+            ("ttlKinds", "ttl_kinds"),
+            ("scenarios", "scenarios"),
+            ("kinds", "kinds"),
+            ("pin_kinds", "pin_kinds"),
+            ("pinKinds", "pin_kinds"),
+            ("vector_kind", "vector_kind"),
+            ("vectorKind", "vector_kind"),
+            ("scope_kinds", "scope_kinds"),
+            ("scopeKinds", "scope_kinds"),
+            ("origins", "origins"),
+            ("row_status_active", "row_status_active"),
+            ("rowStatusActive", "row_status_active"),
+            ("row_status_archived", "row_status_archived"),
+            ("rowStatusArchived", "row_status_archived"),
+        )
+        for src, attr in str_keys:
+            val = block.get(src)
+            if val is None:
+                continue
+            setattr(self.memory, attr, str(val))
+        int_keys = (
+            ("og_port", "og_port"),
+            ("ogPort", "og_port"),
+            ("embedding_dim", "embedding_dim"),
+            ("embeddingDim", "embedding_dim"),
+            ("top_k", "top_k"),
+            ("topK", "top_k"),
+            ("max_items", "max_items"),
+            ("maxItems", "max_items"),
+            ("max_chars", "max_chars"),
+            ("maxChars", "max_chars"),
+            ("pattern_ttl_days", "pattern_ttl_days"),
+            ("patternTtlDays", "pattern_ttl_days"),
+        )
+        for src, attr in int_keys:
+            val = block.get(src)
+            if val is None or val == "":
+                continue
+            try:
+                setattr(self.memory, attr, int(val))
+            except (TypeError, ValueError):
+                continue
+        timeout = block.get("og_connect_timeout_s") or block.get("ogConnectTimeoutS")
+        if timeout is not None and timeout != "":
+            try:
+                self.memory.og_connect_timeout_s = float(timeout)
+            except (TypeError, ValueError):
+                pass
+
+    def _merge_acl(self, block: Dict[str, Any]) -> None:
+        str_keys = (
+            ("table_org", "table_org"),
+            ("tableOrg", "table_org"),
+            ("table_role", "table_role"),
+            ("tableRole", "table_role"),
+            ("table_user", "table_user"),
+            ("tableUser", "table_user"),
+            ("table_grant", "table_grant"),
+            ("tableGrant", "table_grant"),
+            ("default_agent_name", "default_agent_name"),
+            ("defaultAgentName", "default_agent_name"),
+            ("row_status_active", "row_status_active"),
+            ("rowStatusActive", "row_status_active"),
+            ("row_status_disabled", "row_status_disabled"),
+            ("rowStatusDisabled", "row_status_disabled"),
+            ("grant_allow", "grant_allow"),
+            ("grantAllow", "grant_allow"),
+            ("grant_deny", "grant_deny"),
+            ("grantDeny", "grant_deny"),
+            ("scope_kinds", "scope_kinds"),
+            ("scopeKinds", "scope_kinds"),
+            ("resource_kinds", "resource_kinds"),
+            ("resourceKinds", "resource_kinds"),
+        )
+        for src, attr in str_keys:
+            val = block.get(src)
+            if val is None:
+                continue
+            setattr(self.acl, attr, str(val))
+        for src, attr in (
+            ("enabled", "enabled"),
+            ("default_agent_open", "default_agent_open"),
+            ("defaultAgentOpen", "default_agent_open"),
+        ):
+            val = block.get(src)
+            if val is None:
+                continue
+            if isinstance(val, bool):
+                setattr(self.acl, attr, val)
+            else:
+                setattr(self.acl, attr, str(val).strip().lower() in ("1", "true", "yes", "on"))
 
     def _merge_mcp(self, raw: Dict[str, Any]) -> None:
         if "mcpServers" in raw and isinstance(raw["mcpServers"], dict):
@@ -1007,10 +1237,27 @@ def _apply_env(cfg: Config) -> None:
         ("SLEUTH_FILES_MAX_COUNT", "max_count"),
         ("SLEUTH_FILES_PRESIGN_PUT_EXPIRES", "presign_put_expires"),
         ("SLEUTH_FILES_PRESIGN_GET_EXPIRES", "presign_get_expires"),
+        ("SLEUTH_FILES_EXCERPT_MAX_CHARS", "excerpt_max_chars"),
+        ("SLEUTH_FILES_EXTRACT_CONCURRENCY", "extract_concurrency"),
     ):
         val = _env_int(env_key)
         if val is not None:
             setattr(cfg.files, attr, val)
+    timeout = _env_float("SLEUTH_FILES_EXTRACT_TIMEOUT_S")
+    if timeout is not None:
+        cfg.files.extract_timeout_s = timeout
+    wait_s = _env_float("SLEUTH_FILES_PROMPT_WAIT_S")
+    if wait_s is not None:
+        cfg.files.prompt_wait_s = wait_s
+    if os.environ.get("SLEUTH_SM4_KEY") is not None:
+        cfg.files.sm4_key = os.environ.get("SLEUTH_SM4_KEY") or ""
+    if os.environ.get("SLEUTH_FILES_IMAGE_MODE"):
+        cfg.files.image_mode = os.environ["SLEUTH_FILES_IMAGE_MODE"].strip() or "vision"
+    if os.environ.get("SLEUTH_FILES_VISION_MODEL") is not None:
+        cfg.files.vision_model = os.environ.get("SLEUTH_FILES_VISION_MODEL") or ""
+    req_enc = _env_bool("SLEUTH_FILES_REQUIRE_ENCRYPT")
+    if req_enc is not None:
+        cfg.files.require_encrypt = req_enc
     mime_parsed = _parse_mime_allow(os.environ.get("SLEUTH_FILES_MIME_ALLOW"))
     if mime_parsed is not None and os.environ.get("SLEUTH_FILES_MIME_ALLOW") is not None:
         cfg.files.mime_allow = mime_parsed
@@ -1060,6 +1307,73 @@ def _apply_env(cfg: Config) -> None:
     kb_tf = _env_bool("SLEUTH_KB_TIME_FILTER_ENABLE")
     if kb_tf is not None:
         cfg.kb.time_filter_enable = kb_tf
+
+    # long-term memory (OpenGauss) + identity ACL (session DB)
+    if os.environ.get("SLEUTH_MEMORY_BACKEND") is not None:
+        cfg.memory.backend = (os.environ.get("SLEUTH_MEMORY_BACKEND") or "").strip()
+    for env_key, attr in (
+        ("SLEUTH_OG_HOST", "og_host"),
+        ("SLEUTH_OG_USER", "og_user"),
+        ("SLEUTH_OG_PASSWORD", "og_password"),
+        ("SLEUTH_OG_DATABASE", "og_database"),
+        ("SLEUTH_OG_DSN", "og_dsn"),
+        ("SLEUTH_OG_SCHEMA", "og_schema"),
+        ("SLEUTH_MEMORY_TABLE_ITEM", "table_item"),
+        ("SLEUTH_MEMORY_TABLE_AUDIT", "table_audit"),
+        ("SLEUTH_EMBEDDING_MODEL", "embedding_model"),
+        ("SLEUTH_EMBEDDING_BASE_URL", "embedding_base_url"),
+        ("SLEUTH_EMBEDDING_API_KEY", "embedding_api_key"),
+        ("SLEUTH_MEMORY_MIN_SCORE", "min_score"),
+        ("SLEUTH_MEMORY_SCENARIOS", "scenarios"),
+        ("SLEUTH_MEMORY_KINDS", "kinds"),
+        ("SLEUTH_MEMORY_PIN_KINDS", "pin_kinds"),
+        ("SLEUTH_MEMORY_VECTOR_KIND", "vector_kind"),
+        ("SLEUTH_MEMORY_TTL_KINDS", "ttl_kinds"),
+        ("SLEUTH_MEMORY_SCOPE_KINDS", "scope_kinds"),
+        ("SLEUTH_MEMORY_ORIGINS", "origins"),
+    ):
+        val = os.environ.get(env_key)
+        if val:
+            setattr(cfg.memory, attr, val)
+    og_port = _env_int("SLEUTH_OG_PORT")
+    if og_port is not None:
+        cfg.memory.og_port = og_port
+    og_timeout = _env_float("SLEUTH_OG_CONNECT_TIMEOUT_S")
+    if og_timeout is not None:
+        cfg.memory.og_connect_timeout_s = og_timeout
+    emb_dim = _env_int("SLEUTH_EMBEDDING_DIM")
+    if emb_dim is not None:
+        cfg.memory.embedding_dim = emb_dim
+    top_k = _env_int("SLEUTH_MEMORY_TOP_K")
+    if top_k is not None:
+        cfg.memory.top_k = top_k
+    max_items = _env_int("SLEUTH_MEMORY_MAX_ITEMS")
+    if max_items is not None:
+        cfg.memory.max_items = max_items
+    max_chars = _env_int("SLEUTH_MEMORY_MAX_CHARS")
+    if max_chars is not None:
+        cfg.memory.max_chars = max_chars
+    ttl_days = _env_int("SLEUTH_MEMORY_PATTERN_TTL_DAYS")
+    if ttl_days is not None:
+        cfg.memory.pattern_ttl_days = ttl_days
+
+    acl_on = _env_bool("SLEUTH_ACL_ENABLED")
+    if acl_on is not None:
+        cfg.acl.enabled = acl_on
+    acl_open = _env_bool("SLEUTH_ACL_DEFAULT_AGENT_OPEN")
+    if acl_open is not None:
+        cfg.acl.default_agent_open = acl_open
+    if os.environ.get("SLEUTH_ACL_DEFAULT_AGENT_NAME") is not None:
+        cfg.acl.default_agent_name = os.environ.get("SLEUTH_ACL_DEFAULT_AGENT_NAME") or ""
+    for env_key, attr in (
+        ("SLEUTH_ACL_TABLE_ORG", "table_org"),
+        ("SLEUTH_ACL_TABLE_ROLE", "table_role"),
+        ("SLEUTH_ACL_TABLE_USER", "table_user"),
+        ("SLEUTH_ACL_TABLE_GRANT", "table_grant"),
+    ):
+        val = os.environ.get(env_key)
+        if val:
+            setattr(cfg.acl, attr, val)
 
     # skills
     refresh = _env_int("SLEUTH_SKILLS_REFRESH_SECONDS")

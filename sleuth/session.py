@@ -96,6 +96,8 @@ class Session:
     title: str = field(default_factory=default_title)
     parent_id: Optional[str] = None
     user_id: str = "local"
+    role_id: Optional[str] = None
+    org_id: Optional[str] = None
     yolo: bool = False  # auto-approve tools; CLI default False, server often True
     skill_names: List[str] = field(default_factory=list)  # pinned skills; default agent only
     # Session-file mailbox: which ready files apply this turn (None = all).
@@ -163,6 +165,9 @@ class Session:
         agent = self.config.resolve_agent_name(name)
         if not agent:
             raise ValueError("agent name required")
+        from .memory.acl import assert_resource_allowed
+
+        assert_resource_allowed(self.config, self.user_id, "agent", agent)
         if yolo is not None:
             self.yolo = bool(yolo)
         self.agent_name = agent
@@ -245,6 +250,10 @@ class Session:
                 continue
             seen.add(info.name)
             resolved.append(info.name)
+        from .memory.acl import assert_resource_allowed
+
+        for skill_name in resolved:
+            assert_resource_allowed(self.config, self.user_id, "skill", skill_name)
         self.skill_names = resolved
         try:
             self._update_record()
@@ -476,11 +485,19 @@ class Session:
         pinned = self._pinned_skill_prompt()
         if pinned:
             system = system + "\n\n" + pinned
+        from .files.ingest import ensure_session_excerpts
         from .files.mailbox import files_prompt_block
 
+        wait_s = float(getattr(getattr(self.config, "files", None), "prompt_wait_s", 8) or 0)
+        ensure_session_excerpts(self, timeout_s=wait_s)
         files_block = files_prompt_block(self)
         if files_block:
             system = system + "\n\n" + files_block
+        from .memory.prompt import memory_prompt_block
+
+        mem_block = memory_prompt_block(self)
+        if mem_block:
+            system = system + "\n\n" + mem_block
 
         from .trace import now_ms
 

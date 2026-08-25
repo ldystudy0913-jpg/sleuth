@@ -32,3 +32,15 @@ def part_id() -> str:
 
 def file_id() -> str:
     return "file_" + secrets.token_hex(12)
+
+
+def memory_id() -> str:
+    return "mem_" + secrets.token_hex(12)
+
+
+def grant_id() -> str:
+    return "grant_" + secrets.token_hex(12)
+
+
+def audit_id() -> str:
+    return "audit_" + secrets.token_hex(12)

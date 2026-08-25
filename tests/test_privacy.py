@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from sleuth.privacy import desensitize_text, maybe_desensitize
+from sleuth.privacy import contains_raw_pii, desensitize_text, maybe_desensitize
 from sleuth.tools.base import ToolResult
 
 
@@ -73,6 +73,10 @@ class TestPrivacy(unittest.TestCase):
         )
         self.assertNotIn("13711112222", scrubbed.output)
         self.assertTrue(cfg.output_desensitize)
+
+    def test_contains_raw_pii_detects_unmasked_id(self) -> None:
+        self.assertTrue(contains_raw_pii("110101199001011234"))
+        self.assertFalse(contains_raw_pii(desensitize_text("110101199001011234")))
 
 
 if __name__ == "__main__":

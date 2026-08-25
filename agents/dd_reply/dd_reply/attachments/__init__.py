@@ -110,6 +110,21 @@ def load_from_urls(
                 continue
             url = str(ref.get("url") or "").strip()
             name = str(ref.get("filename") or ref.get("file_id") or url or "attachment")
+            excerpt = str(ref.get("excerpt") or "").strip()
+            if excerpt:
+                truncated = bool(ref.get("truncated"))
+                if len(excerpt) > max_chars:
+                    excerpt = excerpt[:max_chars]
+                    truncated = True
+                bundle.excerpts.append(
+                    AttachmentExcerpt(source=name, text=excerpt, truncated=truncated)
+                )
+                continue
+            if ref.get("encrypted"):
+                bundle.skipped.append(
+                    f"url:{name}:encrypted; Sleuth decrypts and supplies excerpt"
+                )
+                continue
             if not url:
                 bundle.skipped.append(f"url:{name}:missing url")
                 continue

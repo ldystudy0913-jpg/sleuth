@@ -174,6 +174,10 @@ def build_rules() -> Ruleset:
         Rule("task", "*", "ask"),
         Rule("kb_lookup", "*", "allow"),
         Rule("save_output_file", "*", "allow"),
+        Rule("read_session_file", "*", "allow"),
+        Rule("memory_search", "*", "allow"),
+        Rule("memory_write", "*", "allow"),
+        Rule("memory_forget", "*", "allow"),
         Rule("ddreply_*", "*", "allow"),
     ]
 
@@ -193,6 +197,10 @@ def plan_rules() -> Ruleset:
         Rule("task", "*", "deny"),
         Rule("kb_lookup", "*", "allow"),
         Rule("save_output_file", "*", "deny"),
+        Rule("read_session_file", "*", "allow"),
+        Rule("memory_search", "*", "allow"),
+        Rule("memory_write", "*", "ask"),
+        Rule("memory_forget", "*", "ask"),
     ]
 
 

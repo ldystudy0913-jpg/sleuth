@@ -672,7 +672,10 @@ def _handle_agent_command(session, rest: str) -> None:
         except Exception:
             mcp_manager = None
     payload = agents_payload(
-        session.config, include_hidden=False, mcp_manager=mcp_manager
+        session.config,
+        include_hidden=False,
+        mcp_manager=mcp_manager,
+        user_id=getattr(session, "user_id", None),
     )
     if not rest:
         _print(f"current agent: {session.agent_name}\n")
@@ -835,7 +838,9 @@ def _handle_skills_command(session, rest: str) -> None:
             _print("skill cleared\n")
         return
 
-    rows = skills_payload(session.config, session.workdir)
+    rows = skills_payload(
+        session.config, session.workdir, user_id=getattr(session, "user_id", None)
+    )
     current_names = [n for n in (getattr(session, "skill_names", None) or []) if n]
     current = ", ".join(current_names)
     default = (getattr(session.config, "default_agent", None) or "build").strip()

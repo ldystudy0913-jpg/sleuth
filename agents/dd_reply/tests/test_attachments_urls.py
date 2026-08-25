@@ -53,6 +53,30 @@ class LoadFromUrlsTests(unittest.TestCase):
         self.assertIn("hello", bundle.excerpts[0].text)
         self.assertFalse(bundle.skipped)
 
+    def test_prefers_excerpt_and_skips_encrypted_without_excerpt(self):
+        settings = Settings(kb_api_url="http://kb.test/search")
+        bundle = load_from_urls(
+            [
+                {
+                    "filename": "id.pdf",
+                    "url": "https://cos.example/id.pdf",
+                    "encrypted": True,
+                    "excerpt": "姓名 余某",
+                    "truncated": False,
+                },
+                {
+                    "filename": "cipher.bin",
+                    "url": "https://cos.example/cipher.bin",
+                    "encrypted": True,
+                },
+            ],
+            settings,
+            client=FakeClient(b"\x00\x01\x02"),
+        )
+        self.assertEqual(len(bundle.excerpts), 1)
+        self.assertIn("余某", bundle.excerpts[0].text)
+        self.assertTrue(any("encrypted" in s for s in bundle.skipped))
+
     def test_rejects_data_url(self):
         settings = Settings(kb_api_url="http://kb.test/search")
         bundle = load_from_urls(

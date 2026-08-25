@@ -24,6 +24,7 @@ class ObjectStore(Protocol):
     def presign_get(self, *, key: str, mime: str = "", expires: int) -> str: ...
     def head(self, key: str) -> Optional[Dict[str, Any]]: ...
     def put_bytes(self, *, key: str, data: bytes, mime: str) -> None: ...
+    def get_bytes(self, key: str, max_bytes: int = 0) -> bytes: ...
 
 
 class BotoCosStore:
@@ -121,6 +122,33 @@ class BotoCosStore:
         except Exception as exc:
             raise CosError(f"put_object failed: {exc}") from exc
 
+    def get_bytes(self, key: str, max_bytes: int = 0) -> bytes:
+        try:
+            resp = self._boto().get_object(Bucket=self._cos.bucket, Key=key)
+        except Exception as exc:
+            raise CosError(f"get_object failed: {exc}") from exc
+        body = resp.get("Body")
+        if body is None:
+            return b""
+        cap = int(max_bytes or 0)
+        chunks = bytearray()
+        try:
+            while True:
+                chunk = body.read(256 * 1024)
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+                if cap and len(chunks) > cap:
+                    raise CosError(f"object too large: > {cap}")
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+        return bytes(chunks)
+
 
 class MemoryObjectStore:
     """In-process store for tests. Not a production backend."""
@@ -143,6 +171,16 @@ class MemoryObjectStore:
 
     def put_bytes(self, *, key: str, data: bytes, mime: str) -> None:
         self.objects[key] = {"data": bytes(data), "mime": mime or ""}
+
+    def get_bytes(self, key: str, max_bytes: int = 0) -> bytes:
+        obj = self.objects.get(key)
+        if obj is None:
+            raise CosError(f"object not found: {key}")
+        data = bytes(obj.get("data") or b"")
+        cap = int(max_bytes or 0)
+        if cap and len(data) > cap:
+            raise CosError(f"object too large: {len(data)} > {cap}")
+        return data
 
 
 def object_store_from_config(config: Config) -> ObjectStore:

@@ -47,8 +47,24 @@
   },
   "storage": {
     "backend": "sqlite"
+  },
+  "memory": {
+    "backend": "off",
+    "og_schema": "aml_gs",
+    "top_k": 12,
+    "min_score": "0.35",
+    "table_item": "mem_item",
+    "table_audit": "mem_audit"
+  },
+  "acl": {
+    "enabled": false,
+    "default_agent_open": true,
+    "table_org": "mem_org",
+    "table_role": "mem_role",
+    "table_user": "mem_user",
+    "table_grant": "mem_grant"
   }
-  // files / kb via .env (AWS_* + SLEUTH_S3_ENDPOINT + SLEUTH_SKILLS_S3; SLEUTH_COS_PATH_PREFIX / SLEUTH_FILES_* / SLEUTH_KB_*)
-  // "files": { "max_bytes": 52428800, "max_count": 20 },
+  // files / kb / OpenGauss DSN via .env
+  // "files": { "max_bytes": 52428800, "max_count": 20, "image_mode": "vision" },
   // "kb": { "api_url": "" }
 }

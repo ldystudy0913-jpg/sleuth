@@ -51,8 +51,10 @@ py -3.12 -m sleuth --yolo "用三句话说明 sleuth/session.py 做什么"
 | `SLEUTH_S3_ENDPOINT` / `AWS_*` | Skill 与会话文件共用的 COS 凭证、地域、Endpoint |
 | `SLEUTH_SKILLS_S3` | Skill 对象前缀；桶名同时用于会话文件 |
 | `SLEUTH_COS_PATH_PREFIX` | 会话文件对象键前缀（默认 `sleuth/files`） |
-| `SLEUTH_FILES_*` | 单文件大小、会话文件数、预签名 TTL、MIME 白名单 |
+| `SLEUTH_FILES_*` / `SLEUTH_SM4_KEY` | 单文件大小、会话文件数、预签名 TTL、MIME 白名单、前端 SM4 加密与摘录抽取 |
 | `SLEUTH_KB_*` | 默认 agent（`build`）远程知识库：login Cookie `ragToken` + `serviceConfig`，与 dd_reply 同一 API |
+| `SLEUTH_MEMORY_*` / `SLEUTH_OG_*` / `SLEUTH_EMBEDDING_*` | 分层长期记忆（OpenGauss 向量库，需手工建表；`pip install sleuth[memory]`） |
+| `SLEUTH_ACL_*` | 岗位授权过滤 agent/skill（目录表与会话同库，需手工建表） |
 
 复杂嵌套可用 [`sleuth.jsonc.example`](sleuth.jsonc.example) 叠加；同名项以 `.env` 为准。
 
@@ -158,6 +160,8 @@ py -3.12 -m sleuth.server
 | GET | `/v1/mcp` · `POST /v1/mcp/reload`（连接状态 / 热重载） |
 | GET | `/v1/users/{user_id}/usage` |
 | GET/POST | `/v1/skills` · `/v1/skills/reload` |
+| GET/POST/PATCH/DELETE | `/v1/memory`（长期记忆；见 [docs/API.md](docs/API.md)） |
+| GET/PUT | `/v1/directory/users/{id}` · `/v1/directory/grants`（Admin 维护岗位与授权） |
 
 ## MCP
 

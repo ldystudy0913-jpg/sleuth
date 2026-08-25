@@ -21,7 +21,11 @@ from .webfetch import WebFetchTool
 from .task import TaskTool
 from .skill_tool import SkillTool
 from .kb_lookup import KbLookupTool
+from .read_session_file import ReadSessionFileTool
 from .save_output_file import SaveOutputFileTool
+from .memory_search import MemorySearchTool
+from .memory_write import MemoryWriteTool
+from .memory_forget import MemoryForgetTool
 
 
 def _builtins() -> List[Tool]:
@@ -39,6 +43,10 @@ def _builtins() -> List[Tool]:
         SkillTool(),
         KbLookupTool(),
         SaveOutputFileTool(),
+        ReadSessionFileTool(),
+        MemorySearchTool(),
+        MemoryWriteTool(),
+        MemoryForgetTool(),
     ]
 
 

@@ -172,6 +172,13 @@ def build_session(
         sess._mcp_manager = mcp_manager
         sess.user_id = config.user_id or "local"
         sess.yolo = bool(yolo)
+        try:
+            from .memory.acl import attach_identity
+
+            attach_identity(sess)
+        except Exception:
+            sess.role_id = None
+            sess.org_id = None
         if mcp_manager is not None:
             sess._mcp_tool_names = set(mcp_manager.tools.keys())
             sess._mcp_card_names = set(mcp_manager.agent_cards.keys())

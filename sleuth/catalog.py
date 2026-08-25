@@ -73,7 +73,7 @@ def models_payload(cfg) -> Dict[str, Any]:
 
 
 def agents_payload(
-    cfg, *, include_hidden: bool = False, mcp_manager=None
+    cfg, *, include_hidden: bool = False, mcp_manager=None, user_id: Optional[str] = None
 ) -> Dict[str, Any]:
     names = set(cfg.agents)
     if cfg.default_agent:
@@ -133,6 +133,10 @@ def agents_payload(
                 "available": available,
             }
         )
+    if user_id:
+        from .memory.acl import filter_resources
+
+        agents = filter_resources(cfg, user_id, "agent", agents, id_key="name")
     return {"default": cfg.default_agent, "agents": agents}
 
 
@@ -171,12 +175,19 @@ def mcp_status_dict(cfg) -> Dict[str, Any]:
         }
 
 
-def skills_payload(cfg, workdir: Optional[Path] = None) -> List[Dict[str, Any]]:
+def skills_payload(
+    cfg, workdir: Optional[Path] = None, *, user_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
     from .skill import ensure_skills_fresh
 
     workdir = workdir or Path.cwd()
     skills = ensure_skills_fresh(cfg, workdir)
-    return [
+    rows = [
         {"name": s.name, "description": s.description, "location": str(s.location)}
         for s in skills.values()
     ]
+    if user_id:
+        from .memory.acl import filter_resources
+
+        rows = filter_resources(cfg, user_id, "skill", rows, id_key="name")
+    return rows

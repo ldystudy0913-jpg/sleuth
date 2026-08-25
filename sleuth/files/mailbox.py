@@ -138,7 +138,7 @@ def public_file(
     if not fid:
         return None
     sid = str(getattr(rec, "id", "") or "")
-    return {
+    row = {
         "id": fid,
         "filename": str(item.get("filename") or ""),
         "mime": str(item.get("mime") or ""),
@@ -147,6 +147,15 @@ def public_file(
         "status": status,
         "download_url": f"/v1/sessions/{sid}/files/{fid}",
     }
+    excerpt_status = str(item.get("excerpt_status") or "")
+    if excerpt_status:
+        row["excerpt_status"] = excerpt_status
+    if item.get("encrypted"):
+        row["encrypted"] = True
+    excerpt = item.get("excerpt")
+    if isinstance(excerpt, dict) and excerpt.get("skipped"):
+        row["excerpt_skipped"] = str(excerpt.get("skipped") or "")
+    return row
 
 
 def public_files(rec, *, include_pending: bool = False, file_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
@@ -187,6 +196,7 @@ def create_upload(
     filename: str,
     mime: str,
     size: int,
+    encrypted: Optional[bool] = None,
     object_store: Optional[ObjectStore] = None,
 ) -> Dict[str, Any]:
     validate_upload(config=config, rec=rec, filename=filename, mime=mime, size=size)
@@ -200,6 +210,15 @@ def create_upload(
         filename=filename,
     )
     fcfg = files_config(config)
+    has_key = bool((fcfg.sm4_key or "").strip())
+    if encrypted is None:
+        encrypted = bool(has_key and fcfg.require_encrypt)
+    else:
+        encrypted = bool(encrypted)
+    if fcfg.require_encrypt and has_key and not encrypted:
+        raise MailboxError("encrypted uploads are required")
+    if encrypted and int(size) % 16 != 0:
+        raise MailboxError("encrypted size must be a multiple of 16")
     expires = int(fcfg.presign_put_expires or 900)
     upload_url = store_impl.presign_put(key=key, mime=mime or "", expires=expires)
     item = {
@@ -210,7 +229,10 @@ def create_upload(
         "size": int(size),
         "object_key": key,
         "status": "pending",
+        "encrypted": encrypted,
     }
+    if encrypted:
+        item["enc"] = "sm4-cbc-kiv"
     files = record_files(rec)
     files.append(item)
     save_record_files(store, rec, files)
@@ -236,6 +258,14 @@ def complete_upload(
     if item is None:
         raise MailboxError("file not found")
     if str(item.get("status") or "") == "ready":
+        if str(item.get("excerpt_status") or "") not in ("ok", "skipped"):
+            _schedule_extract(
+                config=config,
+                store=store,
+                session_id=str(rec.id),
+                file_id=str(item.get("id") or ""),
+                object_store=object_store,
+            )
         return item
     store_impl = object_store or object_store_from_config(config)
     key = str(item.get("object_key") or "")
@@ -257,9 +287,34 @@ def complete_upload(
         item["size"] = size
     if head.get("mime") and not item.get("mime"):
         item["mime"] = str(head.get("mime") or item.get("mime") or "")
+    if item.get("encrypted") and size % 16 != 0:
+        raise MailboxError("encrypted object size must be a multiple of 16")
     item["status"] = "ready"
+    if str(item.get("excerpt_status") or "") not in ("ok", "skipped"):
+        item["excerpt_status"] = "pending"
     save_record_files(store, rec, files)
+    _schedule_extract(
+        config=config,
+        store=store,
+        session_id=str(rec.id),
+        file_id=str(item.get("id") or ""),
+        object_store=store_impl,
+    )
     return item
+
+
+def _schedule_extract(*, config, store, session_id: str, file_id: str, object_store=None) -> None:
+    if not session_id or not file_id:
+        return
+    from .ingest import schedule_extract
+
+    schedule_extract(
+        config=config,
+        store=store,
+        session_id=session_id,
+        file_id=file_id,
+        object_store=object_store,
+    )
 
 
 def download_target(
@@ -329,18 +384,27 @@ def attachment_refs(
                 url = url if _https_url(url) else ""
         elif not _https_url(url):
             url = ""
-        if not url:
+        excerpt = item.get("excerpt") if isinstance(item.get("excerpt"), dict) else {}
+        excerpt_text = str((excerpt or {}).get("text") or "")
+        if not url and not excerpt_text:
             continue
-        refs.append(
-            {
-                "file_id": str(item.get("id") or ""),
-                "filename": str(item.get("filename") or ""),
-                "mime": str(item.get("mime") or ""),
-                "size": int(item.get("size") or 0),
-                "object_key": key,
-                "url": url,
-            }
-        )
+        ref = {
+            "file_id": str(item.get("id") or ""),
+            "filename": str(item.get("filename") or ""),
+            "mime": str(item.get("mime") or ""),
+            "size": int(item.get("size") or 0),
+            "object_key": key,
+            "url": url,
+            "encrypted": bool(item.get("encrypted")),
+            "excerpt_status": str(item.get("excerpt_status") or ""),
+        }
+        if excerpt_text:
+            ref["excerpt"] = excerpt_text
+            ref["truncated"] = bool((excerpt or {}).get("truncated"))
+        skipped = str((excerpt or {}).get("skipped") or "")
+        if skipped:
+            ref["excerpt_skipped"] = skipped
+        refs.append(ref)
     return refs
 
 
@@ -350,15 +414,27 @@ def files_prompt_block(session) -> str:
         return ""
     lines = [
         "# Session files",
-        "The user attached files to this session. They are not inlined in the prompt.",
-        "MCP tools receive `attachment_refs_json` automatically. Use `kb_lookup` to search the knowledge base.",
+        "The user attached files to this session. Excerpts below were extracted in-process after decrypting ciphertext. Use them to answer. Do not recite full ID numbers.",
+        "MCP tools receive `attachment_refs_json` (including excerpt). If an excerpt is truncated or still pending, call `read_session_file`. Use `kb_lookup` to search the knowledge base.",
         "To return a generated text file, call `save_output_file`. Do not embed file bytes or data-URLs.",
         "Attached:",
     ]
     for item in files:
+        status = str(item.get("excerpt_status") or "pending")
         lines.append(
-            f"- `{item.get('id')}` {item.get('filename')} ({item.get('mime')}, {item.get('size')} bytes)"
+            f"- `{item.get('id')}` {item.get('filename')} ({item.get('mime')}, {item.get('size')} bytes) excerpt_status={status}"
         )
+        excerpt = item.get("excerpt") if isinstance(item.get("excerpt"), dict) else {}
+        text = str((excerpt or {}).get("text") or "")
+        skipped = str((excerpt or {}).get("skipped") or "")
+        if text:
+            mark = " (truncated)" if excerpt.get("truncated") else ""
+            lines.append(f"  excerpt{mark}:")
+            lines.append(text)
+        elif skipped:
+            lines.append(f"  skipped: {skipped}")
+        elif status == "pending":
+            lines.append("  excerpt: still parsing; use the filename or call read_session_file")
     return "\n".join(lines)
 
 

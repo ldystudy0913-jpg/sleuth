@@ -126,6 +126,11 @@ def create_app(workdir: Optional[Path] = None):
         err = apply_session_selectors(sess, body, cfg)
         if err:
             return _json_response({"error": err}, 400)
+        from ..memory.acl import session_acl_error
+
+        acl_err = session_acl_error(sess)
+        if acl_err:
+            return _json_response({"error": acl_err}, 400)
         sess._ensure_persisted()
         return _json_response(
             {
@@ -295,6 +300,11 @@ def create_app(workdir: Optional[Path] = None):
         err = apply_session_selectors(sess, body, cfg)
         if err:
             return _json_response({"error": err}, 400)
+        from ..memory.acl import session_acl_error
+
+        acl_err = session_acl_error(sess)
+        if acl_err:
+            return _json_response({"error": acl_err}, 400)
         ferr = _bind_prompt_files(sess, body)
         if ferr:
             return _json_response({"error": ferr}, 400)
@@ -345,6 +355,11 @@ def create_app(workdir: Optional[Path] = None):
         err = apply_session_selectors(sess, body, cfg)
         if err:
             return _json_response({"error": err}, 400)
+        from ..memory.acl import session_acl_error
+
+        acl_err = session_acl_error(sess)
+        if acl_err:
+            return _json_response({"error": acl_err}, 400)
         ferr = _bind_prompt_files(sess, body)
         if ferr:
             return _json_response({"error": ferr}, 400)
@@ -413,8 +428,10 @@ def create_app(workdir: Optional[Path] = None):
             {"ok": True, "count": len(skills), "names": sorted(skills.keys())}
         )
 
-    async def skills_list(_: Request):
-        return _json_response(skills_payload(load(workdir), workdir))
+    async def skills_list(request: Request):
+        return _json_response(
+            skills_payload(load(workdir), workdir, user_id=_user_id(request))
+        )
 
     async def models_list(_: Request):
         return _json_response(models_payload(load(workdir)))
@@ -435,7 +452,10 @@ def create_app(workdir: Optional[Path] = None):
             mcp_manager = None
         return _json_response(
             agents_payload(
-                cfg, include_hidden=include_hidden, mcp_manager=mcp_manager
+                cfg,
+                include_hidden=include_hidden,
+                mcp_manager=mcp_manager,
+                user_id=_user_id(request),
             )
         )
 
@@ -447,6 +467,46 @@ def create_app(workdir: Optional[Path] = None):
         if denied is not None:
             return denied
         return _json_response(reload_mcp(load(workdir), workdir))
+
+    async def memory_list(request: Request):
+        from .memory_api import list_or_search_memory
+
+        return await list_or_search_memory(request, load(workdir))
+
+    async def memory_create(request: Request):
+        from .memory_api import create_memory
+
+        return await create_memory(request, load(workdir))
+
+    async def memory_patch(request: Request):
+        from .memory_api import patch_memory
+
+        return await patch_memory(request, load(workdir))
+
+    async def memory_delete(request: Request):
+        from .memory_api import delete_memory
+
+        return await delete_memory(request, load(workdir))
+
+    async def directory_get_user(request: Request):
+        from .memory_api import get_directory_user
+
+        return await get_directory_user(request, load(workdir))
+
+    async def directory_put_user(request: Request):
+        from .memory_api import put_directory_user
+
+        return await put_directory_user(request, load(workdir))
+
+    async def directory_list_grants(request: Request):
+        from .memory_api import list_grants
+
+        return await list_grants(request, load(workdir))
+
+    async def directory_put_grant(request: Request):
+        from .memory_api import put_grant
+
+        return await put_grant(request, load(workdir))
 
     async def create_file_upload(request: Request):
         rec, denied = _owned_rec(request)
@@ -462,6 +522,9 @@ def create_app(workdir: Optional[Path] = None):
             size = int(body.get("size") if body.get("size") is not None else -1)
         except (TypeError, ValueError):
             return _json_response({"error": "size must be an integer"}, 400)
+        encrypted = body.get("encrypted")
+        if encrypted is not None:
+            encrypted = bool(encrypted)
         cfg = load(workdir)
         from ..files.cos import CosNotConfigured
         from ..files.mailbox import MailboxError, create_upload
@@ -474,6 +537,7 @@ def create_app(workdir: Optional[Path] = None):
                 filename=filename,
                 mime=mime,
                 size=size,
+                encrypted=encrypted,
             )
         except CosNotConfigured as exc:
             return _json_response({"error": str(exc)}, 503)
@@ -578,6 +642,14 @@ def create_app(workdir: Optional[Path] = None):
         Route("/v1/mcp/reload", mcp_reload, methods=["POST"]),
         Route("/v1/skills", skills_list, methods=["GET"]),
         Route("/v1/skills/reload", skills_reload, methods=["POST"]),
+        Route("/v1/memory", memory_list, methods=["GET"]),
+        Route("/v1/memory", memory_create, methods=["POST"]),
+        Route("/v1/memory/{memory_id}", memory_patch, methods=["PATCH"]),
+        Route("/v1/memory/{memory_id}", memory_delete, methods=["DELETE"]),
+        Route("/v1/directory/users/{user_id}", directory_get_user, methods=["GET"]),
+        Route("/v1/directory/users/{user_id}", directory_put_user, methods=["PUT"]),
+        Route("/v1/directory/grants", directory_list_grants, methods=["GET"]),
+        Route("/v1/directory/grants", directory_put_grant, methods=["PUT"]),
     ]
     return Starlette(routes=routes)
 

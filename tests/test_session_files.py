@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from sleuth.config import Config, _apply_env
 from sleuth.files.cos import CosNotConfigured, MemoryObjectStore
+from sleuth.files.ingest import wait_extracts
 from sleuth.files.mailbox import (
     MailboxError,
     complete_upload,
@@ -128,7 +129,7 @@ class MailboxTests(unittest.TestCase):
     def test_upload_complete_and_oversize(self):
         cfg = _cfg()
         mem = MemoryObjectStore()
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             rec = _rec(store)
             with self.assertRaises(MailboxError) as ctx:
@@ -166,6 +167,8 @@ class MailboxTests(unittest.TestCase):
             )
             self.assertEqual(item["status"], "ready")
             self.assertEqual(item["size"], 5)
+            self.assertEqual(item.get("excerpt_status"), "pending")
+            wait_extracts(3.0)
             rec = store.get_session(rec.id)
             listed = public_files(rec)
             self.assertEqual(len(listed), 1)
@@ -217,6 +220,7 @@ class PermissionBuildTests(unittest.TestCase):
         rules = build_rules()
         self.assertEqual(evaluate("kb_lookup", "*", rules).action, "allow")
         self.assertEqual(evaluate("save_output_file", "*", rules).action, "allow")
+        self.assertEqual(evaluate("read_session_file", "*", rules).action, "allow")
         self.assertEqual(
             evaluate("ddreply_lookup_risk_kb", "*", rules).action, "allow"
         )
@@ -227,6 +231,7 @@ class BuiltinToolTests(unittest.TestCase):
         names = ToolRegistry().names()
         self.assertIn("kb_lookup", names)
         self.assertIn("save_output_file", names)
+        self.assertIn("read_session_file", names)
 
     def test_kb_lookup_and_save_output_file(self):
         cfg = _cfg()
@@ -284,7 +289,7 @@ class HttpFileRouteTests(unittest.TestCase):
 
         cfg = _cfg()
         mem = MemoryObjectStore()
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             rec = _rec(store, sid="sess_httptest000000000001")
             from sleuth.server.app import create_app
@@ -319,6 +324,7 @@ class HttpFileRouteTests(unittest.TestCase):
                 )
                 self.assertEqual(done.status_code, 200, done.text)
                 self.assertEqual(done.json()["status"], "ready")
+                wait_extracts(3.0)
 
                 listed = client.get(f"/v1/sessions/{rec.id}/files", headers=headers)
                 self.assertEqual(listed.status_code, 200)
@@ -339,7 +345,7 @@ class HttpFileRouteTests(unittest.TestCase):
             self.skipTest("starlette TestClient not available")
 
         cfg = Config()
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             rec = _rec(store, sid="sess_httptest000000000002")
             from sleuth.server.app import create_app

@@ -125,12 +125,18 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `POST` | `/v1/sessions/{session_id}/messages` | 用户头 | 发送一轮对话（**同步 JSON**） |
 | `POST` | `/v1/sessions/{session_id}/messages/stream` | 用户头 | 发送一轮对话（**SSE 流式**） |
 | `GET` | `/v1/models` | 无 | 模型目录（选择器用；不含密钥） |
-| `GET` | `/v1/agents` | 无 | Agent 目录（含 `available` / MCP 状态） |
+| `GET` | `/v1/agents` | 用户头 | Agent 目录（开启 ACL 时按岗位授权过滤） |
 | `GET` | `/v1/mcp` | 无 | MCP 服务连接状态 |
 | `POST` | `/v1/mcp/reload` | Admin | 热重载 MCP（重连 + 刷新 Agent Card） |
 | `GET` | `/v1/users/{user_id}/usage` | 本人或 Admin | 用量汇总 |
-| `GET` | `/v1/skills` | 无 | Skill 目录（默认 agent 下发消息 body 的 `skills` / `skill` 用此 `name`） |
+| `GET` | `/v1/skills` | 用户头 | Skill 目录（开启 ACL 时按岗位授权过滤） |
 | `POST` | `/v1/skills/reload` | Admin | 强制重载 Skill |
+| `GET` | `/v1/memory` | 用户头 | 列出或向量检索当前用户可见记忆（`?q=`） |
+| `POST` | `/v1/memory` | 用户头 | 写入记忆（默认 user 层；role/org 需 Admin） |
+| `PATCH` | `/v1/memory/{memory_id}` | 用户头 | 更新正文并重算向量 |
+| `DELETE` | `/v1/memory/{memory_id}` | 用户头 | 归档（忘记） |
+| `GET`/`PUT` | `/v1/directory/users/{user_id}` | Admin | 维护一人一岗一机构 |
+| `GET`/`PUT` | `/v1/directory/grants` | Admin | 维护岗位/机构/用户例外授权 |
 
 ---
 
@@ -413,16 +419,16 @@ X-User-Id: alice
 
 默认 agent 是 `build`。用户**不必切换**到 `dd_reply` 等专用 agent 也能：上传附件、把生成文件回传给前端、检索远程知识库（`kb_lookup`，需 `SLEUTH_KB_API_URL` + `SLEUTH_KB_LOGIN_URL` + `SLEUTH_KB_OPENID` + `SLEUTH_KB_SERVICEID`）。
 
-字节**不经过** Sleuth：浏览器用预签名 URL 直传 COS；会话只存 `file_id` / 对象键 / 文件名 / mime / size。不要把 data-URL 或文件字节塞进 `prompt` / SSE。
+字节**不经过** Sleuth：浏览器用预签名 URL 直传 COS。生产路径：前端用与 Sleuth 相同的 `SLEUTH_SM4_KEY` 做 SM4-CBC（key == IV，PKCS7）后 **PUT 密文**；`size` 为密文长度（16 的倍数）。COS 只存密文。Sleuth 在解析时进程内解密、抽文本、写入 `files[].excerpt`，明文不落盘、不写 SSE。预签名 GET 仍是密文，预览由前端自行解密。
 
-配置（`.env`）：会话文件与 Skill 共用 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` / `SLEUTH_S3_ENDPOINT`，桶名取 `SLEUTH_SKILLS_S3` 的 `s3://桶/...`。只需另加 `SLEUTH_COS_PATH_PREFIX`（默认 `sleuth/files`）和可选 `SLEUTH_FILES_*`。对象存储客户端随核心依赖安装（boto3）。
+配置（`.env`）：会话文件与 Skill 共用 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` / `SLEUTH_S3_ENDPOINT`，桶名取 `SLEUTH_SKILLS_S3` 的 `s3://桶/...`。另加 `SLEUTH_COS_PATH_PREFIX`（默认 `sleuth/files`）、`SLEUTH_SM4_KEY` 与可选 `SLEUTH_FILES_*`。对象存储客户端随核心依赖安装（boto3）。PDF/xlsx/docx 解析：`pip install sleuth[files]`；图片 RapidOCR 回退：`pip install sleuth[ocr]`。图片默认走多模态视觉抽取（`SLEUTH_FILES_IMAGE_MODE=vision`）。
 
 #### 申请上传
 
 `POST /v1/sessions/{session_id}/files/uploads`
 
 ```json
-{ "filename": "notes.txt", "mime": "text/plain", "size": 120 }
+{ "filename": "notes.txt", "mime": "text/plain", "size": 128, "encrypted": true }
 ```
 
 **响应 `200`**
@@ -437,7 +443,7 @@ X-User-Id: alice
 }
 ```
 
-前端对 `upload_url` 发 **PUT**（body 为文件字节，`Content-Type` 与申请时一致）。
+前端对 `upload_url` 发 **PUT**（body 为**密文**，`Content-Type` 与申请时一致）。配了 `SLEUTH_SM4_KEY` 且 `SLEUTH_FILES_REQUIRE_ENCRYPT=1` 时，未传 `encrypted` 则默认 `true`。
 
 | 状态 | 说明 |
 |------|------|
@@ -452,11 +458,11 @@ X-User-Id: alice
 { "file_id": "file_..." }
 ```
 
-服务端 HEAD 对象，状态变为 `ready`（`role: user`）。
+服务端 HEAD 对象，状态变为 `ready`（`role: user`），`excerpt_status` 为 `pending`。抽取在进程内限流队列中进行（默认同时 2 个），完成后为 `ok` 或 `skipped`。`done` / system prompt 使用的是摘录，不是 COS 明文。
 
 #### 列表 / 下载
 
-`GET /v1/sessions/{session_id}/files` → `{ "files": [{ "id", "filename", "mime", "size", "role", "status", "download_url" }] }`
+`GET /v1/sessions/{session_id}/files` → `{ "files": [{ "id", "filename", "mime", "size", "role", "status", "download_url", "excerpt_status", "encrypted" }] }`
 
 `GET /v1/sessions/{session_id}/files/{file_id}`：默认 **302** 到短时预签名 GET。`?json=1` 或 `Accept: application/json` 时返回 `{ "download_url": "https://..." }`。
 
@@ -766,6 +772,8 @@ async function streamMessage(base, sessionId, userId, prompt) {
 
 **说明**：枚举本地 + MCP Agent Card 注册的 agent。列表用 `title` 展示、用 `name` 切换。`default` 即主 agent；**仅该 agent 允许非空 `skills` / `skill`**。每轮发消息应带当前 `agent`。`ddreply` 这类 MCP 配置键会解析为 Card 上的规范名（如 `dd_reply`），切过去后系统提示词用该 agent 的人格，而不是默认 sleuth。
 
+开启 `SLEUTH_ACL_ENABLED` 且目录表可用时，列表按 `X-User-Id` 查 `mem_user` 的唯一岗位/机构，再按 `mem_grant` 过滤：user deny → user allow → role/org allow → 默认 agent（若 `SLEUTH_ACL_DEFAULT_AGENT_OPEN`）。无授权的 agent 前端选不了；`set_agent` / 发消息 body `agent` 同样拒绝。未建目录表或 ACL 关闭时保持全可见。
+
 **响应 `200`**
 
 ```json
@@ -910,6 +918,50 @@ async function streamMessage(base, sessionId, userId, prompt) {
 ```
 
 **错误**：`401` `{ "error": "unauthorized" }`
+
+---
+
+### 4.11 长期记忆
+
+记忆正文只存已脱敏文本；写入前若仍含未掩码证件号/手机/卡号则 `400` 且不写向量。会话不迁 OpenGauss。未配 `SLEUTH_MEMORY_BACKEND` / embedding / 表不存在时接口返回 `503`，对话与 agent 授权不受影响。
+
+手工建表与测试插入示例：[`docs/ddl_memory_opengauss.sql`](ddl_memory_opengauss.sql)（记忆）+ [`docs/ddl_memory_mysql.sql`](ddl_memory_mysql.sql)（目录/授权，与会话同库）。代码不执行这些 SQL。
+
+`GET /v1/memory?q=` — `q` 为空则列出当前用户 user+role+org 可见的未过期条目；有 `q` 则向量检索。
+
+`POST /v1/memory`
+
+```json
+{
+  "item_key": "output.language",
+  "title_text": "回复语言",
+  "body_text": "默认用中文回复",
+  "scenario_code": "general",
+  "mem_kind": "preference"
+}
+```
+
+默认 `scope_kind=user`、`scope_id` 为当前 `X-User-Id`。写 role/org 层需 `X-Admin-Token`。
+
+`PATCH /v1/memory/{memory_id}` 可改 `title_text` / `body_text`（会重算 embedding）。`DELETE` 将 `row_status` 置为归档。
+
+### 4.12 目录与授权（Admin）
+
+`GET` / `PUT /v1/directory/users/{user_id}` 维护一人一岗一机构（`role_id` / `org_id`）。换岗改这两列即可。
+
+`GET` / `PUT /v1/directory/grants` 以岗位为主授权 agent/skill。Body 可为单条或 `{ "grants": [ ... ] }`：
+
+```json
+{
+  "scope_kind": "role",
+  "scope_id": "aml_analyst",
+  "resource_kind": "agent",
+  "resource_id": "dd_reply",
+  "grant_effect": "allow"
+}
+```
+
+判定：user deny → user allow → role/org allow → 默认 agent（`SLEUTH_ACL_DEFAULT_AGENT_OPEN`）。用户 deny 只做例外，不要按人预生成全量行。表需手工创建，代码不执行 `CREATE TABLE`（DDL 与插入示例见 [`ddl_memory_mysql.sql`](ddl_memory_mysql.sql)）。
 
 ---
 
