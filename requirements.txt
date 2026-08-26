@@ -8,5 +8,7 @@ pydantic>=2.5
 # Optional but recommended: nicer terminal output.
 rich>=13.0
 
-# Optional: pip install sleuth[memory]  →  psycopg2-binary (OpenGauss)
+# Optional OpenGauss driver: from this repo, same interpreter as the server
+#   python -m pip install -e ".[memory]"
+# Do not `pip install sleuth[memory]` from a corporate index (package is not published).
 # Optional: pip install sleuth[mysql]   →  PyMySQL

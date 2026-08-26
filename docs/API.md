@@ -67,7 +67,7 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `401` | Admin Token 不匹配 |
 | `404` | 会话不存在，或不属于当前用户 |
 | `413` | 上传文件过大或会话文件数超限 |
-| `503` | 未配置 COS（会话文件邮箱不可用） |
+| `503` | 未配置 COS（会话文件邮箱不可用），或长期记忆未就绪（OpenGauss 驱动/表；见 `detail`） |
 
 ### 2.4 重要限制（对接必读）
 
@@ -923,7 +923,11 @@ async function streamMessage(base, sessionId, userId, prompt) {
 
 ### 4.11 长期记忆
 
-记忆正文只存已脱敏文本；写入前若仍含未掩码证件号/手机/卡号则 `400` 且不写向量。会话不迁 OpenGauss。未配 `SLEUTH_MEMORY_BACKEND` / embedding / 表不存在时接口返回 `503`，对话与 agent 授权不受影响。
+记忆正文只存已脱敏文本；写入前若仍含未掩码证件号/手机/卡号则 `400` 且不写向量。会话不迁 OpenGauss。未配 `SLEUTH_MEMORY_BACKEND`、缺少 OpenGauss 驱动、或表不可达时接口返回 `503`，对话与 agent 授权不受影响。`503` 的 `detail` 为进程内真实原因。
+
+驱动请装进**启动 HTTP 服务的同一个 Python**：在仓库根目录执行 `python -m pip install -e ".[memory]"`（或 `python -m pip install psycopg2-binary`）。不要对内网 PyPI 执行 `pip install sleuth[memory]`，本仓库未发布到该索引。装好后必须重启进程。
+
+OpenGauss 列为 `FLOATVECTOR` 时设 `SLEUTH_MEMORY_VECTOR_KIND=floatvector`；`body_text`/`payload_text` 为 JSONB 时设 `SLEUTH_MEMORY_TEXT_KIND=jsonb`。无向量索引不影响小数据量召回。
 
 手工建表与测试插入示例：[`docs/ddl_memory_opengauss.sql`](ddl_memory_opengauss.sql)（记忆）+ [`docs/ddl_memory_mysql.sql`](ddl_memory_mysql.sql)（目录/授权，与会话同库）。代码不执行这些 SQL。
 

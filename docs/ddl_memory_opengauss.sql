@@ -7,6 +7,10 @@
 -- 表名须与 SLEUTH_MEMORY_TABLE_ITEM / SLEUTH_MEMORY_TABLE_AUDIT 一致。
 -- embedding 维度须与 SLEUTH_EMBEDDING_DIM、建表 vector(n) 三者一致（下例 1024）。
 -- 无 vector 插件时把 embedding 改成 real[]，去掉 HNSW，并设 SLEUTH_MEMORY_VECTOR_KIND=real_array。
+-- 实例若用 FLOATVECTOR(n) 而非 pgvector 的 vector(n)，设 SLEUTH_MEMORY_VECTOR_KIND=floatvector。
+-- 实例若不能建 TEXT、把 body_text/payload_text 改成 JSONB，设 SLEUTH_MEMORY_TEXT_KIND=jsonb。
+-- 无权限建 HNSW 时可省略向量索引；数据量小时顺序扫描仍可召回，不影响读写逻辑。
+-- embedding NOT NULL 时示例插入必须带向量，不能写 NULL。
 --
 -- 插入示例与 docs/ddl_memory_mysql.sql 同一套人：emp_zhang / aml_analyst / SZ_BR。
 -- 手工插入时 embedding 可先 NULL（列表/管理端可见）；向量召回需由 Sleuth 写入时计算。

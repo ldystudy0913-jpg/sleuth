@@ -45,8 +45,12 @@ def _user_id(request) -> str:
     )
 
 
-def _memory_unavailable():
-    return _json({"error": "long-term memory is not configured"}, 503)
+def _memory_unavailable(config=None):
+    body = {"error": "long-term memory is not configured"}
+    detail = (getattr(config, "_memory_error", None) or "").strip() if config is not None else ""
+    if detail:
+        body["detail"] = detail
+    return _json(body, 503)
 
 
 async def list_or_search_memory(request, config):
@@ -54,7 +58,7 @@ async def list_or_search_memory(request, config):
     q = (request.query_params.get("q") or "").strip()
     store = memory_store_for(config)
     if store is None:
-        return _memory_unavailable()
+        return _memory_unavailable(config)
     try:
         if q:
             items = search_for_user(config, user_id, q)
@@ -63,7 +67,7 @@ async def list_or_search_memory(request, config):
 
             items = store.list_scope(identity_scopes(config, user_id), include_inactive=False)
     except MemoryUnavailable:
-        return _memory_unavailable()
+        return _memory_unavailable(config)
     except Exception as exc:
         return _json({"error": str(exc)}, 400)
     return _json({"items": [item.to_public_dict() for item in items]})
@@ -107,7 +111,7 @@ async def create_memory(request, config):
     except MemoryPrivacyError as exc:
         return _json({"error": str(exc)}, 400)
     except MemoryUnavailable:
-        return _memory_unavailable()
+        return _memory_unavailable(config)
     except ValueError as exc:
         return _json({"error": str(exc)}, 400)
     except Exception as exc:
@@ -120,7 +124,7 @@ async def patch_memory(request, config):
     item_id = request.path_params.get("memory_id") or ""
     store = memory_store_for(config)
     if store is None:
-        return _memory_unavailable()
+        return _memory_unavailable(config)
     item = store.get(item_id)
     if item is None:
         return _json({"error": "not found"}, 404)
@@ -158,7 +162,7 @@ async def patch_memory(request, config):
     except MemoryPrivacyError as exc:
         return _json({"error": str(exc)}, 400)
     except MemoryUnavailable:
-        return _memory_unavailable()
+        return _memory_unavailable(config)
     except ValueError as exc:
         return _json({"error": str(exc)}, 400)
     return _json(updated.to_public_dict())
@@ -169,7 +173,7 @@ async def delete_memory(request, config):
     item_id = request.path_params.get("memory_id") or ""
     store = memory_store_for(config)
     if store is None:
-        return _memory_unavailable()
+        return _memory_unavailable(config)
     item = store.get(item_id)
     if item is None:
         return _json({"error": "not found"}, 404)
@@ -181,7 +185,7 @@ async def delete_memory(request, config):
     try:
         forgot = forget_memory(config, item_id, actor=user_id, store=store)
     except MemoryUnavailable:
-        return _memory_unavailable()
+        return _memory_unavailable(config)
     except ValueError as exc:
         return _json({"error": str(exc)}, 404)
     return _json({"ok": True, "id": forgot.id})

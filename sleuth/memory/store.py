@@ -1,8 +1,10 @@
 """OpenGauss memory store. Schema is hand-built; this module only reads and writes rows."""
 from __future__ import annotations
 
+import json
 import logging
 import math
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -230,12 +232,24 @@ class InMemoryMemoryStore(MemoryStore):
             item.use_cnt = int(item.use_cnt or 0) + 1
 
 
+def psycopg2_missing_message() -> str:
+    exe = sys.executable or "python"
+    return (
+        f"psycopg2 is not importable in this process ({exe}). "
+        f'Install it into the same interpreter: "{exe}" -m pip install psycopg2-binary. '
+        "Do not pip install sleuth[memory] from a corporate PyPI index "
+        "(this project is not published there). "
+        f'From a local checkout: "{exe}" -m pip install -e ".[memory]".'
+    )
+
+
 class OpenGaussStore(MemoryStore):
     """Reads/writes hand-built OpenGauss tables. No schema migration."""
 
     def __init__(self, config):
         self.config = config
         self._ok: Optional[bool] = None
+        self.last_error = ""
 
     def available(self) -> bool:
         if self._ok is not None:
@@ -243,11 +257,13 @@ class OpenGaussStore(MemoryStore):
         try:
             with self._connect() as conn:
                 self._ok = self._tables_exist(conn)
+            self.last_error = ""
         except Exception as exc:
+            self.last_error = str(exc)
             log.warning("OpenGauss memory unavailable: %s", exc)
             self._ok = False
         if not self._ok:
-            log.warning("memory tables missing or unreachable; memory disabled")
+            log.warning("memory disabled: %s", self.last_error or "tables missing or unreachable")
         return bool(self._ok)
 
     def _connect_kwargs(self):
@@ -269,7 +285,7 @@ class OpenGaussStore(MemoryStore):
         try:
             import psycopg2
         except ImportError as exc:
-            raise RuntimeError("psycopg2-binary is required (pip install sleuth[memory])") from exc
+            raise RuntimeError(psycopg2_missing_message()) from exc
         conn = psycopg2.connect(**self._connect_kwargs())
         schema = settings.og_schema(self.config)
         if schema:
@@ -351,18 +367,22 @@ class OpenGaussStore(MemoryStore):
         if not item.row_status:
             item.row_status = settings.row_status_active(self.config)
         vec = _bind_embedding(item.embedding, self.config)
+        body = encode_text_field(item.body_text, self.config)
+        payload = encode_text_field(item.payload_text, self.config)
+        text_ph = _text_placeholder(self.config)
+        emb_ph = _embedding_placeholder(self.config)
         with self._connect() as conn:
             cur = conn.cursor()
             if existing:
                 cur.execute(
-                    f"UPDATE {table} SET title_text = %s, body_text = %s, payload_text = %s, "
-                    "embedding = %s, importance_score = %s, confidence_score = %s, "
+                    f"UPDATE {table} SET title_text = %s, body_text = {text_ph}, payload_text = {text_ph}, "
+                    f"embedding = {emb_ph}, importance_score = %s, confidence_score = %s, "
                     "origin_type = %s, row_status = %s, expire_at = %s, updated_by = %s, "
                     "updated_at = %s WHERE id = %s",
                     (
                         item.title_text,
-                        item.body_text,
-                        item.payload_text,
+                        body,
+                        payload,
                         vec,
                         int(item.importance_score),
                         item.confidence_score,
@@ -380,7 +400,7 @@ class OpenGaussStore(MemoryStore):
                     "item_key, title_text, body_text, payload_text, embedding, importance_score, "
                     "confidence_score, origin_type, row_status, expire_at, created_by, "
                     "updated_by, created_at, updated_at, last_used_at, use_cnt) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    f"VALUES (%s,%s,%s,%s,%s,%s,%s,{text_ph},{text_ph},{emb_ph},%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
                         item.id,
                         item.scope_kind,
@@ -389,8 +409,8 @@ class OpenGaussStore(MemoryStore):
                         item.mem_kind,
                         item.item_key,
                         item.title_text,
-                        item.body_text,
-                        item.payload_text,
+                        body,
+                        payload,
                         vec,
                         int(item.importance_score),
                         item.confidence_score,
@@ -454,8 +474,7 @@ class OpenGaussStore(MemoryStore):
     ) -> List[MemoryItem]:
         if not self.available() or not scopes:
             return []
-        kind = settings.vector_kind(self.config)
-        if kind != "vector":
+        if not settings.uses_sql_ann(self.config):
             return self._search_real_array(query_vec, scopes, limit=limit)
         table = settings.table_item_ref(self.config)
         active = settings.row_status_active(self.config)
@@ -469,19 +488,24 @@ class OpenGaussStore(MemoryStore):
         if not clauses:
             return []
         vec = format_vector(query_vec)
+        vec_cast = settings.vector_sql_type(self.config)
         sql = (
-            f"SELECT {_ITEM_COLS}, (1 - (embedding <=> %s::vector)) AS score "
+            f"SELECT {_ITEM_COLS}, (1 - (embedding <=> %s::{vec_cast})) AS score "
             f"FROM {table} WHERE row_status = %s "
             f"AND (expire_at IS NULL OR expire_at > NOW()) "
             f"AND ({' OR '.join(clauses)}) "
             f"AND embedding IS NOT NULL "
-            f"ORDER BY embedding <=> %s::vector LIMIT %s"
+            f"ORDER BY embedding <=> %s::{vec_cast} LIMIT %s"
         )
         bind = [vec, active, *params, vec, int(limit)]
-        with self._connect() as conn:
-            cur = conn.cursor()
-            cur.execute(sql, bind)
-            rows = cur.fetchall()
+        try:
+            with self._connect() as conn:
+                cur = conn.cursor()
+                cur.execute(sql, bind)
+                rows = cur.fetchall()
+        except Exception as exc:
+            log.warning("SQL ANN search failed (%s); falling back to in-process cosine", exc)
+            return self._search_real_array(query_vec, scopes, limit=limit)
         items = []
         for row in rows:
             item = _row_to_item(row[:-1])
@@ -580,9 +604,52 @@ def _parse_embedding(raw) -> Optional[List[float]]:
 def _bind_embedding(values: Optional[Sequence[float]], config):
     if values is None:
         return None
-    if settings.vector_kind(config) == "vector":
+    if settings.uses_sql_ann(config):
         return format_vector(values)
     return list(float(x) for x in values)
+
+
+def _text_placeholder(config) -> str:
+    if settings.text_kind(config) == "jsonb":
+        return "%s::jsonb"
+    return "%s"
+
+
+def _embedding_placeholder(config) -> str:
+    vec_cast = settings.vector_sql_type(config)
+    if vec_cast:
+        return f"%s::{vec_cast}"
+    return "%s"
+
+
+def encode_text_field(value, config):
+    if settings.text_kind(config) != "jsonb":
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    text = str(value)
+    stripped = text.strip()
+    if stripped[:1] in "{[":
+        try:
+            json.loads(stripped)
+            return stripped
+        except json.JSONDecodeError:
+            pass
+    return json.dumps(text, ensure_ascii=False)
+
+
+def decode_text_field(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, memoryview):
+        value = value.tobytes().decode("utf-8")
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8")
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
 
 
 def _row_to_item(row) -> Optional[MemoryItem]:
@@ -595,9 +662,9 @@ def _row_to_item(row) -> Optional[MemoryItem]:
         scenario_code=row[3],
         mem_kind=row[4],
         item_key=row[5],
-        title_text=row[6],
-        body_text=row[7],
-        payload_text=row[8],
+        title_text="" if row[6] is None else str(row[6]),
+        body_text=decode_text_field(row[7]) or "",
+        payload_text=decode_text_field(row[8]),
         embedding=_parse_embedding(row[9]),
         importance_score=int(row[10] or 0),
         confidence_score=str(row[11] if row[11] is not None else "0"),
@@ -621,12 +688,17 @@ def memory_store_for(config) -> Optional[MemoryStore]:
     if injected is not None:
         return injected
     if not settings.memory_backend_on(config):
+        setattr(config, "_memory_error", "SLEUTH_MEMORY_BACKEND is off")
         return None
     mem = settings.memory_cfg(config)
     key = (mem.og_dsn, mem.og_host, mem.og_database, mem.og_schema, mem.table_item, mem.table_audit)
     if key in _resolved_stores:
         return _resolved_stores[key]
     store = OpenGaussStore(config)
-    resolved = store if store.available() else None
-    _resolved_stores[key] = resolved
-    return resolved
+    if store.available():
+        setattr(config, "_memory_error", "")
+        _resolved_stores[key] = store
+        return store
+    setattr(config, "_memory_error", store.last_error or "memory tables missing or unreachable")
+    _resolved_stores[key] = None
+    return None

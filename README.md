@@ -53,7 +53,7 @@ py -3.12 -m sleuth --yolo "用三句话说明 sleuth/session.py 做什么"
 | `SLEUTH_COS_PATH_PREFIX` | 会话文件对象键前缀（默认 `sleuth/files`） |
 | `SLEUTH_FILES_*` / `SLEUTH_SM4_KEY` | 单文件大小、会话文件数、预签名 TTL、MIME 白名单、前端 SM4 加密与摘录抽取 |
 | `SLEUTH_KB_*` | 默认 agent（`build`）远程知识库：login Cookie `ragToken` + `serviceConfig`，与 dd_reply 同一 API |
-| `SLEUTH_MEMORY_*` / `SLEUTH_OG_*` / `SLEUTH_EMBEDDING_*` | 分层长期记忆（OpenGauss 向量库，需手工建表；`pip install sleuth[memory]`） |
+| `SLEUTH_MEMORY_*` / `SLEUTH_OG_*` / `SLEUTH_EMBEDDING_*` | 分层长期记忆（OpenGauss；需手工建表。在仓库根目录对**启动服务的同一解释器**执行 `python -m pip install -e ".[memory]"`，不要从内网 PyPI `pip install sleuth[memory]`） |
 | `SLEUTH_ACL_*` | 岗位授权过滤 agent/skill（目录表与会话同库，需手工建表） |
 
 复杂嵌套可用 [`sleuth.jsonc.example`](sleuth.jsonc.example) 叠加；同名项以 `.env` 为准。

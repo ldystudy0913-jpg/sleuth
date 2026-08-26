@@ -51,6 +51,8 @@
   "memory": {
     "backend": "off",
     "og_schema": "aml_gs",
+    "vector_kind": "vector",
+    "text_kind": "text",
     "top_k": 12,
     "min_score": "0.35",
     "table_item": "mem_item",

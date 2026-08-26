@@ -221,6 +221,7 @@ class MemoryConfig:
     kinds: str = "preference,workflow,policy,fact,pattern,forget"
     pin_kinds: str = "preference,forget"
     vector_kind: str = "vector"
+    text_kind: str = "text"
     scope_kinds: str = "user,role,org"
     origins: str = "user_explicit,agent_inferred,admin"
     row_status_active: str = "active"
@@ -679,6 +680,8 @@ class Config:
             ("pinKinds", "pin_kinds"),
             ("vector_kind", "vector_kind"),
             ("vectorKind", "vector_kind"),
+            ("text_kind", "text_kind"),
+            ("textKind", "text_kind"),
             ("scope_kinds", "scope_kinds"),
             ("scopeKinds", "scope_kinds"),
             ("origins", "origins"),
@@ -1328,6 +1331,7 @@ def _apply_env(cfg: Config) -> None:
         ("SLEUTH_MEMORY_KINDS", "kinds"),
         ("SLEUTH_MEMORY_PIN_KINDS", "pin_kinds"),
         ("SLEUTH_MEMORY_VECTOR_KIND", "vector_kind"),
+        ("SLEUTH_MEMORY_TEXT_KIND", "text_kind"),
         ("SLEUTH_MEMORY_TTL_KINDS", "ttl_kinds"),
         ("SLEUTH_MEMORY_SCOPE_KINDS", "scope_kinds"),
         ("SLEUTH_MEMORY_ORIGINS", "origins"),

@@ -128,6 +128,21 @@ def vector_kind(config) -> str:
     return (memory_cfg(config).vector_kind or "").strip().lower()
 
 
+def uses_sql_ann(config) -> bool:
+    return vector_kind(config) in ("vector", "floatvector")
+
+
+def vector_sql_type(config) -> str:
+    kind = vector_kind(config)
+    if kind in ("vector", "floatvector"):
+        return sql_ident(kind)
+    return ""
+
+
+def text_kind(config) -> str:
+    return (getattr(memory_cfg(config), "text_kind", None) or "").strip().lower()
+
+
 def row_status_active(config) -> str:
     return (memory_cfg(config).row_status_active or "").strip()
 
