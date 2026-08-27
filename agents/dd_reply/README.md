@@ -57,7 +57,7 @@ py -3.12 -m sleuth --agent dd_reply
 |------|------|
 | `lexicon.json` | 禁用词 hard/soft（本地） |
 
-流程：对每个风险编码或名称以 `question=<该项>` 检索（可选 `serviceConfig`）→ 按 `finalResponse` / `comprehended` / `rankScore` 排序后取前 `SORT_COUNT` 条 → 结合字段与附件生成框架。正文里用来源灰色括号标 `file_name` 与知识 URL；文末用虚线与正文分开，再灰色列出文件名和链接。材料清单用于判断附件是否**充分**，不要求齐套。
+流程：对每个风险编码或名称以 `question=<该项>` 检索（可选 `serviceConfig`）→ 按 `finalResponse` / `comprehended` / `rankScore` 排序后取前 `SORT_COUNT` 条 → 结合字段与附件生成框架。正文里用来源灰色括号标 `file_name` 与知识 URL；文末用虚线与正文分开，再灰色列出 `《文件名》：url`（每文件一行，链接可点，不做脱敏）。材料清单用于判断附件是否**充分**，不要求齐套。
 
 ## 本地附件测试
 

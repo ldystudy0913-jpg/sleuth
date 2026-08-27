@@ -12,7 +12,12 @@ from .base import ToolContext, ToolResult
 
 class MemoryWriteParams(BaseModel):
     item_key: str = Field(
-        description="Stable key, lowercase letters/digits/dot/underscore, e.g. output.language"
+        description=(
+            "Stable catalog key as domain.aspect. Must be one of the configured "
+            "item_keys (default: output.language, str.threshold, workflow.steps, ...). "
+            "Pass the catalog key only; do not invent suffixes. Similar text updates "
+            "the matching instance, a different meaning stores a new instance."
+        )
     )
     title_text: str = Field(description="Short title, preferably under 40 characters.")
     body_text: str = Field(description="Already-generalized note. Never include raw ID or card numbers.")
@@ -29,8 +34,11 @@ class MemoryWriteParams(BaseModel):
 class MemoryWriteTool:
     name = "memory_write"
     description = (
-        "Store a durable personal note for this user (preference, workflow, fact, or forget). "
+        "Store a durable personal note for this user using an existing catalog item_key "
+        "(domain.aspect such as output.language or str.threshold). "
         "Call this when the user states a stable preference or asks you to remember something. "
+        "Pass the catalog key only; never invent a suffix. Similar wording updates that "
+        "instance; a different meaning under the same catalog key is stored as another row. "
         "Do not store full conversations, attachments, or raw identity numbers."
     )
     params = MemoryWriteParams

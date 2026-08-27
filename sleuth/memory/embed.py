@@ -1,9 +1,12 @@
 """Query / write embeddings via an OpenAI-compatible gateway."""
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
+import urllib.error
+import urllib.request
 from typing import List, Optional, Protocol
 
 from . import settings
@@ -11,6 +14,7 @@ from . import settings
 log = logging.getLogger("sleuth.memory.embed")
 
 _TOKEN = re.compile(r"[a-z0-9\u4e00-\u9fff]+", re.I)
+_EMBED_TIMEOUT_S = 60
 
 
 class Embedder(Protocol):
@@ -37,24 +41,87 @@ class OpenAIEmbedder:
         self.config = config
 
     def embed(self, text: str) -> List[float]:
-        from openai import OpenAI
-
         mem = settings.memory_cfg(self.config)
         api_key, base_url = _embed_credentials(self.config)
         if not api_key or not mem.embedding_model:
             raise RuntimeError("embedding is not configured")
-        kwargs = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
-        client = OpenAI(**kwargs)
-        resp = client.embeddings.create(model=mem.embedding_model, input=text or "")
-        vec = list(resp.data[0].embedding)
+        endpoint = embeddings_endpoint(base_url)
+        if not endpoint:
+            raise RuntimeError("embedding base URL is not configured")
+        vec = _post_embedding(endpoint, api_key, mem.embedding_model, text or "")
         dim = settings.embedding_dim(self.config)
         if len(vec) != dim:
             raise RuntimeError(
                 f"embedding dim {len(vec)} does not match configured {dim}"
             )
         return [float(x) for x in vec]
+
+
+def embeddings_endpoint(base_url: str) -> str:
+    """Resolve the POST URL.
+
+    OpenAI's client always posts to ``{base_url}/embeddings``. Operators often
+    paste the full embeddings URL into ``SLEUTH_EMBEDDING_BASE_URL``, which
+    would otherwise become ``.../embeddings/embeddings`` (FastAPI 404).
+    """
+    url = (base_url or "").strip()
+    if not url:
+        return ""
+    url = url.rstrip("/")
+    if url.lower().endswith("/embeddings"):
+        return url
+    return url + "/embeddings"
+
+
+def parse_embedding_vector(payload) -> List[float]:
+    if isinstance(payload, list) and payload and isinstance(payload[0], (int, float)):
+        return [float(x) for x in payload]
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"unexpected embedding response type: {type(payload).__name__}"
+        )
+    data = payload.get("data")
+    if isinstance(data, list) and data:
+        first = data[0]
+        if isinstance(first, dict) and first.get("embedding") is not None:
+            return [float(x) for x in first["embedding"]]
+        if isinstance(first, (list, tuple)):
+            return [float(x) for x in first]
+    emb = payload.get("embedding")
+    if isinstance(emb, list):
+        return [float(x) for x in emb]
+    raise RuntimeError("embedding response missing vector")
+
+
+def _post_embedding(url: str, api_key: str, model: str, text: str) -> List[float]:
+    payload = {"input": text or ""}
+    if model:
+        payload["model"] = model
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_EMBED_TIMEOUT_S) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        raise RuntimeError(
+            f"embedding request failed ({exc.code}) at {url}: {detail or exc.reason}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"embedding request failed at {url}: {exc.reason}") from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"embedding response is not JSON: {raw[:200]}") from exc
+    return parse_embedding_vector(parsed)
 
 
 def _embed_credentials(config) -> tuple:

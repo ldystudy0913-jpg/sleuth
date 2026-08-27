@@ -11,9 +11,10 @@
 -- 实例若不能建 TEXT、把 body_text/payload_text 改成 JSONB，设 SLEUTH_MEMORY_TEXT_KIND=jsonb。
 -- 无权限建 HNSW 时可省略向量索引；数据量小时顺序扫描仍可召回，不影响读写逻辑。
 -- embedding NOT NULL 时示例插入必须带向量，不能写 NULL。
+-- FLOATVECTOR 列通常也不接受 NULL（报 Floatvector is not support null）；写入前必须先算出向量。
 --
 -- 插入示例与 docs/ddl_memory_mysql.sql 同一套人：emp_zhang / aml_analyst / SZ_BR。
--- 手工插入时 embedding 可先 NULL（列表/管理端可见）；向量召回需由 Sleuth 写入时计算。
+-- 手工插入：vector/real[] 可先 NULL 仅供列表可见；floatvector 必须带向量。召回需由 Sleuth 写入时计算。
 -- =============================================================================
 
 CREATE TABLE mem_item (
@@ -48,7 +49,7 @@ COMMENT ON COLUMN mem_item.scope_kind IS '归属层级：user/role/org';
 COMMENT ON COLUMN mem_item.scope_id IS '归属对象编码，对应用户或岗位或机构';
 COMMENT ON COLUMN mem_item.scenario_code IS '场景编码：general/suspicious_analysis/due_diligence/screening/rating';
 COMMENT ON COLUMN mem_item.mem_kind IS '记忆类型：preference/workflow/policy/fact/pattern/forget';
-COMMENT ON COLUMN mem_item.item_key IS '稳定业务键，同归属下原地更新，不用保留字 key';
+COMMENT ON COLUMN mem_item.item_key IS '目录键 domain.aspect，或实例键 domain.aspect.facet；POST 只传目录键，近义覆盖该实例，异义由服务端加后缀';
 COMMENT ON COLUMN mem_item.title_text IS '短标题';
 COMMENT ON COLUMN mem_item.body_text IS '已脱敏正文，注入模型并参与 embedding';
 COMMENT ON COLUMN mem_item.payload_text IS '前端结构化内容，文本存放 JSON 字符串';

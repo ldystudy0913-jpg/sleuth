@@ -103,6 +103,8 @@ class Session:
     # Session-file mailbox: which ready files apply this turn (None = all).
     _prompt_file_ids: Optional[List[str]] = None
     _turn_file_ids: List[str] = field(default_factory=list)
+    # Citation sources harvested from tool JSON ``sources[]`` this turn.
+    _turn_sources: List[dict] = field(default_factory=list)
     # HTTP parks `question` instead of blocking on stdin.
     block_on_question: bool = True
     _pending_ask: Optional[dict] = None
@@ -321,6 +323,7 @@ class Session:
         ensure_skills_fresh(self.config, self.workdir)
         sync_session_mcp(self)
         self._turn_file_ids = []
+        self._turn_sources = []
         self._ensure_persisted()
         from .trace import now_ms
 
@@ -407,6 +410,25 @@ class Session:
             is_error=result.is_error,
             attachments=list(result.attachments or []),
         )
+
+    def _harvest_turn_sources(self, result: ToolResult) -> None:
+        if result.is_error:
+            return
+        from .sources import collect_sources, merge_sources
+
+        found = collect_sources(output=result.output, metadata=result.metadata)
+        if found:
+            self._turn_sources = merge_sources(self._turn_sources, found)
+
+    def _append_sources_footer(self, text: str) -> str:
+        from .sources import format_sources_footer
+
+        footer = format_sources_footer(self._turn_sources, existing_text=text)
+        if not footer:
+            return text
+        footer = self._scrub(footer)
+        self.renderer.on_text(footer)
+        return (text or "") + footer
 
     # ---- title / compaction helpers ----
 
@@ -625,8 +647,11 @@ class Session:
             assistant_blocks: List = []
             if reasoning_buf:
                 assistant_blocks.append(ReasoningBlock(self._scrub("".join(reasoning_buf))))
-            if text_buf:
-                assistant_blocks.append(TextBlock(self._scrub("".join(text_buf))))
+            text_out = self._scrub("".join(text_buf)) if text_buf else ""
+            if (not tool_uses) and (not aborted):
+                text_out = self._append_sources_footer(text_out)
+            if text_out:
+                assistant_blocks.append(TextBlock(text_out))
             assistant_blocks.extend(tool_uses)
 
             assistant_msg = Message.assistant(
@@ -691,6 +716,7 @@ class Session:
                     )
                     continue
                 result = self._scrub_tool_result(self._execute_tool(tu))
+                self._harvest_turn_sources(result)
                 ended_at = now_ms()
                 span_ms = max(0, ended_at - exec_started)
                 span = {

@@ -114,7 +114,9 @@ class MemoryResolveTests(unittest.TestCase):
         )
         hits = search_memories(cfg, "u1", "what language for chinese replies")
         self.assertTrue(hits)
-        self.assertEqual(hits[0].item_key, "output.language")
+        from sleuth.memory import settings as memory_settings
+
+        self.assertEqual(memory_settings.catalog_item_key(hits[0].item_key), "output.language")
 
     def test_low_score_dropped_but_user_preference_pinned(self):
         cfg = _ready_cfg()

@@ -208,6 +208,12 @@ class McpBridgeMailboxTests(unittest.TestCase):
                                     "url": "https://cos.example/out.txt",
                                 }
                             ],
+                            "sources": [
+                                {
+                                    "title": "手册.pdf",
+                                    "url": "https://kb.example/manual.pdf",
+                                }
+                            ],
                         }
                     ),
                     False,
@@ -247,6 +253,10 @@ class McpBridgeMailboxTests(unittest.TestCase):
         self.assertTrue(result.attachments)
         self.assertEqual(result.attachments[0]["filename"], "out.txt")
         self.assertTrue(sess._turn_file_ids)
+        self.assertEqual(
+            result.metadata.get("sources"),
+            [{"title": "手册.pdf", "url": "https://kb.example/manual.pdf"}],
+        )
 
 
 if __name__ == "__main__":

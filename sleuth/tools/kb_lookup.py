@@ -81,7 +81,23 @@ class KbLookupTool:
                 found.append({"question": q, "hit_count": len(hits), "hits": hits})
             else:
                 missing.append({"question": q, "error": "empty_hits"})
+        sources: list[dict] = []
+        seen_url: set[str] = set()
+        for block in found:
+            for h in block.get("hits") or []:
+                if not isinstance(h, dict):
+                    continue
+                title = str(h.get("file_name") or h.get("title") or "").strip()
+                url = str(h.get("url") or "").strip()
+                url_key = url.rstrip("/")
+                if not url or url_key in seen_url:
+                    continue
+                seen_url.add(url_key)
+                sources.append({"title": title or url, "url": url})
+        payload = {"found": found, "missing": missing, "sources": sources}
+        extra = {"sources": sources} if sources else {}
         return ToolResult.success(
             self.name,
-            json.dumps({"found": found, "missing": missing}, ensure_ascii=False),
+            json.dumps(payload, ensure_ascii=False),
+            **extra,
         )

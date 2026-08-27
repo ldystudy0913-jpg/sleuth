@@ -29,7 +29,7 @@ permission:
 
 1. 用户提供风险点**编码和/或名称**（可多个）及系统 10 字段（客户名称、成立时间、经营范围、员工人数、注册资本、年销售收入、受益所有人身份信息、主营业务、开户主要目的、账户交易模式预估），或明确要求「生成答复框架」时：加载技能 `dd-reply-framework`，按 SOP 调用工具完成。
 2. 若入参不齐：先列出当前还缺的字段，用 `question` 询问用户是否还有其他要补充的信息。有则等用户提供后再生成；用户明确说没有补充、请继续时，再调用生成（`proceed_with_gaps=true`）。不要未询问就空串硬生成，也不要臆造字段。
-3. 用 MCP 工具 `ddreply_generate_reply_framework` 生成四段框架；用中文向客户经理展示结果。
+3. 用 MCP 工具 `ddreply_generate_reply_framework` 生成四段框架；用中文向客户经理展示结果。知识链接在工具返回的顶层 `sources[]`，由 Sleuth 附加；整理正文时不要截断或改写 URL，也不要依赖某一种 markdown 附录格式。
 4. 生产附件走 Sleuth 会话邮箱（`attachment_refs_json`，由基座注入）；本机测试可用 `local_paths_json`；业务单号可用 `invest_id`。
 5. 知识库未覆盖的编码或名称：如实说明需人工补充，不要编造细则。
 

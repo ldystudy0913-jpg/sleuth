@@ -85,10 +85,14 @@ class TestPipelineLocal(unittest.TestCase):
             self.assertNotIn("## 知识来源", result.markdown)
             self.assertIn("- 可排除：", result.markdown)
             self.assertIn("https://kb.example/files/risk-manual.pdf", result.markdown)
+            self.assertIn("《风险点手册.pdf》", result.markdown)
             self.assertIn("- 可缓释：", result.markdown)
             self.assertIn("- 无法排除：", result.markdown)
             self.assertEqual(result.meta.get("found_codes"), ["C001"])
             self.assertEqual(result.meta.get("missing_codes"), ["C999"])
+            self.assertTrue(result.sources)
+            self.assertEqual(result.sources[0].get("title"), "风险点手册.pdf")
+            self.assertIn("https://kb.example/files/risk-manual.pdf", result.sources[0].get("url", ""))
             self.assertGreaterEqual(result.meta.get("attachment_count", 0), 1)
             self.assertFalse(result.meta.get("llm_used"))
 
@@ -238,6 +242,7 @@ class TestPipelineLocal(unittest.TestCase):
         self.assertIn("---", result.markdown)
         self.assertIn("风险点手册.pdf", result.markdown)
         self.assertIn("https://kb.example/files/risk-manual.pdf", result.markdown)
+        self.assertIn("《风险点手册.pdf》", result.markdown)
         self.assertIn('style="color:#888"', result.markdown)
 
     def test_missing_inputs_need_input_payload(self) -> None:

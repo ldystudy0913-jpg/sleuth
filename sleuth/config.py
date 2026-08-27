@@ -213,6 +213,11 @@ class MemoryConfig:
     embedding_api_key: str = ""
     top_k: int = 12
     min_score: str = "0.35"
+    # 同一目录键（如 str.threshold）写入时：余弦 >= 此值视为同一口径并覆盖该行，否则新开实例。
+    # 与检索 min_score 分开。>1（如 1.01）等于关闭合并。
+    merge_score: str = "0.85"
+    # true：个人近义口径复用岗位/机构的完整 item_key（user 覆盖那一条）。false：只和自己名下已有行比较。
+    merge_across_scopes: bool = True
     max_items: int = 24
     max_chars: int = 6000
     pattern_ttl_days: int = 90
@@ -220,6 +225,40 @@ class MemoryConfig:
     scenarios: str = "general,suspicious_analysis,due_diligence,screening,rating"
     kinds: str = "preference,workflow,policy,fact,pattern,forget"
     pin_kinds: str = "preference,forget"
+    # item_key 写入白名单（库里仍存英文键，中文只出现在注释/配置说明里）。
+    # 作用：POST / memory_write 只能用名单中的 domain.aspect；近义覆盖该实例，异义新开
+    # domain.aspect.facet。用户/岗位/机构同一完整键按 user>role>org 覆盖。空字符串=不校验词表。
+    # 覆盖方式（整份替换，不是追加）：
+    #   SLEUTH_MEMORY_ITEM_KEY_DOMAINS  / jsonc memory.item_key_domains
+    #   SLEUTH_MEMORY_ITEM_KEYS         / jsonc memory.item_keys
+    # 域：output回复呈现 workflow作业步骤 str可疑报告 dd尽调 screening筛查
+    #     rating评级 policy制度 avoid负向约束 pattern分析套路 customer客户事实
+    item_key_domains: str = (
+        "output,workflow,str,dd,screening,rating,policy,avoid,pattern,customer"
+    )
+    # 方面（键=域.方面）：
+    # output.language 回复语言  output.structure 回复结构  output.tone 回复语气
+    # workflow.steps 个人作业步骤
+    # str.threshold 可疑口径  str.steps 可疑步骤  str.narrative 可疑叙述结构
+    # dd.steps 尽调步骤  dd.sources 尽调材料
+    # screening.steps 筛查步骤  screening.hits 命中处置
+    # rating.factors 评级因子  rating.scale 评级尺度
+    # policy.branch 分行制度  policy.head 总行制度
+    # avoid.verbose_english 避免英文长段  avoid.raw_id 避免原文证件号
+    # pattern.cash_night 夜间现金套路  pattern.mule 分散对手/骡子套路
+    # customer.segment 客群  customer.risk_note 风险备注  customer.id 客户标识口径（已脱敏）
+    item_keys: str = (
+        "output.language,output.structure,output.tone,"
+        "workflow.steps,"
+        "str.threshold,str.steps,str.narrative,"
+        "dd.steps,dd.sources,"
+        "screening.steps,screening.hits,"
+        "rating.factors,rating.scale,"
+        "policy.branch,policy.head,"
+        "avoid.verbose_english,avoid.raw_id,"
+        "pattern.cash_night,pattern.mule,"
+        "customer.segment,customer.risk_note,customer.id"
+    )
     vector_kind: str = "vector"
     text_kind: str = "text"
     scope_kinds: str = "user,role,org"
@@ -672,12 +711,18 @@ class Config:
             ("embeddingApiKey", "embedding_api_key"),
             ("min_score", "min_score"),
             ("minScore", "min_score"),
+            ("merge_score", "merge_score"),
+            ("mergeScore", "merge_score"),
             ("ttl_kinds", "ttl_kinds"),
             ("ttlKinds", "ttl_kinds"),
             ("scenarios", "scenarios"),
             ("kinds", "kinds"),
             ("pin_kinds", "pin_kinds"),
             ("pinKinds", "pin_kinds"),
+            ("item_key_domains", "item_key_domains"),
+            ("itemKeyDomains", "item_key_domains"),
+            ("item_keys", "item_keys"),
+            ("itemKeys", "item_keys"),
             ("vector_kind", "vector_kind"),
             ("vectorKind", "vector_kind"),
             ("text_kind", "text_kind"),
@@ -723,6 +768,17 @@ class Config:
                 self.memory.og_connect_timeout_s = float(timeout)
             except (TypeError, ValueError):
                 pass
+        for src, attr in (
+            ("merge_across_scopes", "merge_across_scopes"),
+            ("mergeAcrossScopes", "merge_across_scopes"),
+        ):
+            val = block.get(src)
+            if val is None:
+                continue
+            if isinstance(val, bool):
+                setattr(self.memory, attr, val)
+            else:
+                setattr(self.memory, attr, str(val).strip().lower() in ("1", "true", "yes", "on"))
 
     def _merge_acl(self, block: Dict[str, Any]) -> None:
         str_keys = (
@@ -1327,9 +1383,12 @@ def _apply_env(cfg: Config) -> None:
         ("SLEUTH_EMBEDDING_BASE_URL", "embedding_base_url"),
         ("SLEUTH_EMBEDDING_API_KEY", "embedding_api_key"),
         ("SLEUTH_MEMORY_MIN_SCORE", "min_score"),
+        ("SLEUTH_MEMORY_MERGE_SCORE", "merge_score"),
         ("SLEUTH_MEMORY_SCENARIOS", "scenarios"),
         ("SLEUTH_MEMORY_KINDS", "kinds"),
         ("SLEUTH_MEMORY_PIN_KINDS", "pin_kinds"),
+        ("SLEUTH_MEMORY_ITEM_KEY_DOMAINS", "item_key_domains"),
+        ("SLEUTH_MEMORY_ITEM_KEYS", "item_keys"),
         ("SLEUTH_MEMORY_VECTOR_KIND", "vector_kind"),
         ("SLEUTH_MEMORY_TEXT_KIND", "text_kind"),
         ("SLEUTH_MEMORY_TTL_KINDS", "ttl_kinds"),
@@ -1360,6 +1419,9 @@ def _apply_env(cfg: Config) -> None:
     ttl_days = _env_int("SLEUTH_MEMORY_PATTERN_TTL_DAYS")
     if ttl_days is not None:
         cfg.memory.pattern_ttl_days = ttl_days
+    merge_across = _env_bool("SLEUTH_MEMORY_MERGE_ACROSS_SCOPES")
+    if merge_across is not None:
+        cfg.memory.merge_across_scopes = merge_across
 
     acl_on = _env_bool("SLEUTH_ACL_ENABLED")
     if acl_on is not None:

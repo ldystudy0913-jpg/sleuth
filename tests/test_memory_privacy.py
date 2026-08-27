@@ -36,6 +36,63 @@ class MemoryPrivacyTests(unittest.TestCase):
             )
         self.assertEqual(store.items, {})
 
+    def test_item_key_must_be_catalog_domain_aspect(self):
+        cfg = Config()
+        cfg._memory_store = InMemoryMemoryStore(cfg)
+        cfg._embedder = HashEmbedder(cfg.memory.embedding_dim)
+        with self.assertRaisesRegex(ValueError, "domain.aspect"):
+            write_memory(
+                cfg,
+                actor="u1",
+                scope_kind="user",
+                scope_id="u1",
+                scenario_code="general",
+                mem_kind="preference",
+                item_key="Output-Language",
+                title_text="语言",
+                body_text="用中文回复",
+                origin_type="user_explicit",
+            )
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            write_memory(
+                cfg,
+                actor="u1",
+                scope_kind="user",
+                scope_id="u1",
+                scenario_code="general",
+                mem_kind="preference",
+                item_key="output.invented",
+                title_text="语言",
+                body_text="用中文回复",
+                origin_type="user_explicit",
+            )
+        item = write_memory(
+            cfg,
+            actor="u1",
+            scope_kind="user",
+            scope_id="u1",
+            scenario_code="general",
+            mem_kind="preference",
+            item_key="output.language",
+            title_text="语言",
+            body_text="prefer chinese replies",
+            origin_type="user_explicit",
+        )
+        again = write_memory(
+            cfg,
+            actor="u1",
+            scope_kind="user",
+            scope_id="u1",
+            scenario_code="general",
+            mem_kind="preference",
+            item_key="output.language",
+            title_text="语言",
+            body_text="prefer chinese replies shorter",
+            origin_type="user_explicit",
+        )
+        self.assertEqual(item.id, again.id)
+        self.assertEqual(again.body_text, "prefer chinese replies shorter")
+
     def test_package_has_no_create_table(self):
         root = pathlib.Path(__file__).resolve().parents[1] / "sleuth" / "memory"
         for path in root.rglob("*.py"):

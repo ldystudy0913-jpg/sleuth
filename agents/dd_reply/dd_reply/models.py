@@ -131,4 +131,7 @@ class FrameworkResult(BaseModel):
     verification_list: List[VerificationItem] = Field(default_factory=list)
     conclusion_guide: str = ""
     markdown: str = ""
+    # Sleuth contract: top-level sources[] (title + url). Display is the
+    # framework's job; do not rely on markdown headings.
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
     meta: Dict[str, Any] = Field(default_factory=dict)

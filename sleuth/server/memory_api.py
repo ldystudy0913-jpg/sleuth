@@ -70,7 +70,13 @@ async def list_or_search_memory(request, config):
         return _memory_unavailable(config)
     except Exception as exc:
         return _json({"error": str(exc)}, 400)
-    return _json({"items": [item.to_public_dict() for item in items]})
+    return _json(
+        {
+            "items": [item.to_public_dict() for item in items],
+            "item_key_domains": settings.item_key_domains(config),
+            "item_keys": settings.item_keys(config),
+        }
+    )
 
 
 async def create_memory(request, config):
@@ -158,6 +164,7 @@ async def patch_memory(request, config):
             confidence_score=str(body.get("confidence_score") or item.confidence_score),
             origin_type=item.origin_type,
             expire_at=item.expire_at,
+            lock_item_key=True,
         )
     except MemoryPrivacyError as exc:
         return _json({"error": str(exc)}, 400)

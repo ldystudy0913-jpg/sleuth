@@ -88,6 +88,33 @@ def min_score(config) -> float:
         return float(Decimal(str(memory_cfg(config).__dataclass_fields__["min_score"].default)))
 
 
+def merge_score(config) -> float:
+    raw = getattr(memory_cfg(config), "merge_score", None)
+    try:
+        return float(Decimal(str(raw)))
+    except (InvalidOperation, TypeError, ValueError):
+        return float(Decimal(str(memory_cfg(config).__dataclass_fields__["merge_score"].default)))
+
+
+def merge_across_scopes(config) -> bool:
+    return bool(getattr(memory_cfg(config), "merge_across_scopes", True))
+
+
+def catalog_item_key(item_key: str) -> str:
+    parts = [p for p in (item_key or "").strip().split(".") if p]
+    if len(parts) >= 2:
+        return parts[0] + "." + parts[1]
+    return (item_key or "").strip()
+
+
+def item_key_matches_catalog(item_key: str, catalog: str) -> bool:
+    raw = (item_key or "").strip()
+    cat = (catalog or "").strip()
+    if not raw or not cat:
+        return False
+    return raw == cat or raw.startswith(cat + ".")
+
+
 def max_items(config) -> int:
     return int(memory_cfg(config).max_items)
 
@@ -110,6 +137,14 @@ def kinds(config) -> List[str]:
 
 def pin_kinds(config) -> List[str]:
     return csv_field(memory_cfg(config).pin_kinds)
+
+
+def item_key_domains(config) -> List[str]:
+    return csv_field(getattr(memory_cfg(config), "item_key_domains", None))
+
+
+def item_keys(config) -> List[str]:
+    return csv_field(getattr(memory_cfg(config), "item_keys", None))
 
 
 def ttl_kinds(config) -> List[str]:

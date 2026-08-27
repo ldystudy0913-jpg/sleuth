@@ -81,6 +81,15 @@ def _harvest_files(text: str, ctx: ToolContext) -> List[Dict[str, Any]]:
     return https_only
 
 
+def _harvest_sources(text: str) -> List[Dict[str, Any]]:
+    payload = _parse_json_object(text)
+    if payload is None:
+        return []
+    from ..sources import harvest_tool_sources
+
+    return harvest_tool_sources(payload)
+
+
 class McpBridgeTool:
     """A Tool facade that forwards execute to McpManager.call_tool."""
 
@@ -107,8 +116,16 @@ class McpBridgeTool:
         if is_error:
             return ToolResult.error(self.name, text, server=self._info.server)
         attachments = _harvest_files(text, ctx)
+        sources = _harvest_sources(text)
+        extra: Dict[str, Any] = {}
+        if sources:
+            extra["sources"] = sources
         return ToolResult.success(
-            self.name, text, server=self._info.server, attachments=attachments
+            self.name,
+            text,
+            server=self._info.server,
+            attachments=attachments,
+            **extra,
         )
 
 

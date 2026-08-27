@@ -29,6 +29,31 @@ class OpenGaussCompatTests(unittest.TestCase):
         self.assertTrue(settings.uses_sql_ann(cfg))
         self.assertEqual(settings.vector_sql_type(cfg), "floatvector")
 
+    def test_env_loads_item_key_catalog(self):
+        cfg = Config()
+        env = {
+            "SLEUTH_MEMORY_ITEM_KEY_DOMAINS": "output,str",
+            "SLEUTH_MEMORY_ITEM_KEYS": "output.language,str.threshold",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            _apply_env(cfg)
+        self.assertEqual(cfg.memory.item_key_domains, "output,str")
+        self.assertEqual(cfg.memory.item_keys, "output.language,str.threshold")
+        self.assertEqual(settings.item_keys(cfg), ["output.language", "str.threshold"])
+
+    def test_env_loads_merge_knobs(self):
+        cfg = Config()
+        env = {
+            "SLEUTH_MEMORY_MERGE_SCORE": "0.91",
+            "SLEUTH_MEMORY_MERGE_ACROSS_SCOPES": "0",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            _apply_env(cfg)
+        self.assertEqual(cfg.memory.merge_score, "0.91")
+        self.assertFalse(cfg.memory.merge_across_scopes)
+        self.assertAlmostEqual(settings.merge_score(cfg), 0.91)
+        self.assertFalse(settings.merge_across_scopes(cfg))
+
     def test_encode_jsonb_wraps_plain_text(self):
         cfg = Config()
         cfg.memory.text_kind = "jsonb"

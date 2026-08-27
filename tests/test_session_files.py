@@ -265,6 +265,9 @@ class BuiltinToolTests(unittest.TestCase):
         self.assertFalse(result.is_error)
         payload = json.loads(result.output)
         self.assertEqual(payload["found"][0]["question"], "C001")
+        self.assertEqual(payload["sources"][0]["title"], "手册.pdf")
+        self.assertEqual(payload["sources"][0]["url"], "https://kb.example/f.pdf")
+        self.assertEqual(result.metadata["sources"][0]["url"], "https://kb.example/f.pdf")
 
         with patch(
             "sleuth.files.mailbox.object_store_from_config",

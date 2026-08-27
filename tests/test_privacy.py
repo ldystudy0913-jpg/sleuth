@@ -74,7 +74,18 @@ class TestPrivacy(unittest.TestCase):
         self.assertNotIn("13711112222", scrubbed.output)
         self.assertTrue(cfg.output_desensitize)
 
-    def test_contains_raw_pii_detects_unmasked_id(self) -> None:
+    def test_http_urls_not_masked_as_bank_or_mobile(self) -> None:
+        url = "https://kb.example/doc/6222021234567890123/file.pdf?id=13812345678"
+        raw = f"《风险点手册.pdf》：{url}"
+        out = desensitize_text(raw)
+        self.assertEqual(out, raw)
+        self.assertFalse(contains_raw_pii(raw))
+
+    def test_bank_card_outside_url_still_masked(self) -> None:
+        raw = "卡号 6222021234567890123 见 https://kb.example/doc/6222021234567890123.pdf"
+        out = desensitize_text(raw)
+        self.assertNotIn("卡号 6222021234567890123", out)
+        self.assertIn("https://kb.example/doc/6222021234567890123.pdf", out)
         self.assertTrue(contains_raw_pii("110101199001011234"))
         self.assertFalse(contains_raw_pii(desensitize_text("110101199001011234")))
 

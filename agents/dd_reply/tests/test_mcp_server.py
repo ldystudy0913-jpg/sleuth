@@ -83,6 +83,9 @@ class TestMcpServer(unittest.TestCase):
         self.assertEqual(len(looked.get("found") or []), 1)
         self.assertEqual(looked["found"][0]["code"], "C001")
         self.assertTrue(looked["found"][0]["sources"])
+        self.assertTrue(looked.get("sources"))
+        self.assertEqual(looked["sources"][0]["title"], "风险点手册.pdf")
+        self.assertEqual(looked["sources"][0]["url"], "https://kb.example/f.pdf")
         self.assertEqual(len(looked.get("missing") or []), 1)
 
         card = json.loads(tools["get_agent_card"].fn())
@@ -114,6 +117,8 @@ class TestMcpServer(unittest.TestCase):
         self.assertIn('style="color:#888"', out["markdown"])
         self.assertNotIn("## 知识来源", out["markdown"])
         self.assertIn("https://kb.example/f.pdf", out["markdown"])
+        self.assertTrue(out.get("sources"))
+        self.assertEqual(out["sources"][0]["url"], "https://kb.example/f.pdf")
 
         missing_url = build_mcp_server(Settings(kb_api_url=""))
         tools2 = {t.name: t for t in missing_url._tool_manager.list_tools()}

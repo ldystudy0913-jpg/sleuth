@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import re
+import secrets
 from datetime import timedelta
-from typing import Optional
+from typing import Optional, Sequence
 
 from ..privacy import contains_raw_pii, desensitize_text
 from . import settings
 from .embed import embedder_for
 from .models import MemoryItem
 from .resolve import identity_scopes, search_memories
-from .store import MemoryStore, memory_store_for, utc_now
+from .store import MemoryStore, cosine, memory_store_for, utc_now
 
-_ITEM_KEY = re.compile(r"^[a-z0-9._]+$")
+_ITEM_KEY_PAIR = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+_ITEM_KEY_INSTANCE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+\.[a-z0-9]+$")
 
 
 class MemoryPrivacyError(ValueError):
@@ -52,6 +54,117 @@ def prepare_text(title: str, body: str) -> tuple:
     return title, body
 
 
+def _require_item_key(config, item_key: str, *, allow_instance: bool) -> str:
+    raw = (item_key or "").strip()
+    if _ITEM_KEY_PAIR.fullmatch(raw):
+        catalog = raw
+    elif allow_instance and _ITEM_KEY_INSTANCE.fullmatch(raw):
+        catalog = settings.catalog_item_key(raw)
+    else:
+        raise ValueError(
+            "item_key must be domain.aspect using lowercase letters, digits, underscore"
+        )
+    domain = catalog.split(".", 1)[0]
+    domains = settings.item_key_domains(config)
+    if domains and domain not in domains:
+        raise ValueError("item_key domain must be one of: " + ", ".join(domains))
+    allowed = settings.item_keys(config)
+    if allowed and catalog not in allowed:
+        raise ValueError("item_key must be one of: " + ", ".join(allowed))
+    return raw
+
+
+def _catalog_candidates(
+    items: Sequence[MemoryItem],
+    *,
+    catalog: str,
+    scenario_code: str,
+    mem_kind: str,
+) -> list:
+    out = []
+    for item in items:
+        if item.scenario_code != scenario_code or item.mem_kind != mem_kind:
+            continue
+        if not settings.item_key_matches_catalog(item.item_key, catalog):
+            continue
+        out.append(item)
+    return out
+
+
+def _best_merge_hit(items: Sequence[MemoryItem], query_vec, threshold: float):
+    best = None
+    best_score = -1.0
+    for item in items:
+        if not item.embedding:
+            continue
+        score = cosine(query_vec, item.embedding)
+        if score > best_score:
+            best_score = score
+            best = item
+    if best is None or best_score < threshold:
+        return None
+    return best
+
+
+def _mint_instance_key(
+    store: MemoryStore,
+    *,
+    scope_kind: str,
+    scope_id: str,
+    scenario_code: str,
+    mem_kind: str,
+    catalog: str,
+) -> str:
+    for _ in range(8):
+        key = f"{catalog}.{secrets.token_hex(4)}"
+        if store.get_by_key(scope_kind, scope_id, scenario_code, mem_kind, key) is None:
+            return key
+    return f"{catalog}.{secrets.token_hex(8)}"
+
+
+def _resolve_instance_key(config, store: MemoryStore, item: MemoryItem) -> str:
+    catalog = settings.catalog_item_key(item.item_key)
+    threshold = settings.merge_score(config)
+    query_vec = item.embedding or []
+    same = _catalog_candidates(
+        store.list_scope([(item.scope_kind, item.scope_id)], include_inactive=False),
+        catalog=catalog,
+        scenario_code=item.scenario_code,
+        mem_kind=item.mem_kind,
+    )
+    hit = _best_merge_hit(same, query_vec, threshold)
+    if hit is not None:
+        return hit.item_key
+    if (
+        item.scope_kind == "user"
+        and settings.merge_across_scopes(config)
+        and query_vec
+    ):
+        parent_scopes = [
+            pair
+            for pair in identity_scopes(config, item.scope_id)
+            if pair != (item.scope_kind, item.scope_id)
+        ]
+        if parent_scopes:
+            parents = _catalog_candidates(
+                store.list_scope(parent_scopes, include_inactive=False),
+                catalog=catalog,
+                scenario_code=item.scenario_code,
+                mem_kind=item.mem_kind,
+            )
+            parent_hit = _best_merge_hit(parents, query_vec, threshold)
+            if parent_hit is not None:
+                return parent_hit.item_key
+    return _mint_instance_key(
+        store,
+        scope_kind=item.scope_kind,
+        scope_id=item.scope_id,
+        scenario_code=item.scenario_code,
+        mem_kind=item.mem_kind,
+        catalog=catalog,
+    )
+
+
 def write_memory(
     config,
     *,
@@ -68,14 +181,13 @@ def write_memory(
     confidence_score: str = "1.0000",
     origin_type: str = "",
     expire_at=None,
+    lock_item_key: bool = False,
 ) -> MemoryItem:
     store, embedder = ensure_ready(config)
     scope_kind = _require_enum(scope_kind, settings.scope_kinds(config), "scope_kind")
     scenario_code = _require_enum(scenario_code, settings.scenarios(config), "scenario_code")
     mem_kind = _require_enum(mem_kind, settings.kinds(config), "mem_kind")
-    item_key = (item_key or "").strip()
-    if not _ITEM_KEY.fullmatch(item_key):
-        raise ValueError("item_key must be lowercase letters, digits, dots, or underscores")
+    item_key = _require_item_key(config, item_key, allow_instance=lock_item_key)
     title_text, body_text = prepare_text(title_text, body_text)
     origins = settings.origins(config)
     origin_type = (origin_type or "").strip() or (origins[0] if origins else "")
@@ -108,7 +220,11 @@ def write_memory(
         expire_at=expire_at,
     )
     item.embedding = embedder.embed(item.embed_text())
-    existing = store.get_by_key(scope_kind, scope_id, scenario_code, mem_kind, item_key)
+    if not lock_item_key:
+        item.item_key = _resolve_instance_key(config, store, item)
+    existing = store.get_by_key(
+        scope_kind, scope_id, scenario_code, mem_kind, item.item_key
+    )
     action = "update" if existing else "create"
     return store.upsert(item, actor=actor, action_type=action)
 

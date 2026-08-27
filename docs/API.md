@@ -927,11 +927,13 @@ async function streamMessage(base, sessionId, userId, prompt) {
 
 驱动请装进**启动 HTTP 服务的同一个 Python**：在仓库根目录执行 `python -m pip install -e ".[memory]"`（或 `python -m pip install psycopg2-binary`）。不要对内网 PyPI 执行 `pip install sleuth[memory]`，本仓库未发布到该索引。装好后必须重启进程。
 
-OpenGauss 列为 `FLOATVECTOR` 时设 `SLEUTH_MEMORY_VECTOR_KIND=floatvector`；`body_text`/`payload_text` 为 JSONB 时设 `SLEUTH_MEMORY_TEXT_KIND=jsonb`。无向量索引不影响小数据量召回。
+OpenGauss 列为 `FLOATVECTOR` 时设 `SLEUTH_MEMORY_VECTOR_KIND=floatvector`；`body_text`/`payload_text` 为 JSONB 时设 `SLEUTH_MEMORY_TEXT_KIND=jsonb`。无向量索引不影响小数据量召回。`SLEUTH_EMBEDDING_BASE_URL` 可填 OpenAI 兼容根路径（`.../v1`）或完整 embeddings 地址（`.../v1/embeddings`）；写入会 POST 到该地址一次，网关 404 时记忆不会落库。
 
 手工建表与测试插入示例：[`docs/ddl_memory_opengauss.sql`](ddl_memory_opengauss.sql)（记忆）+ [`docs/ddl_memory_mysql.sql`](ddl_memory_mysql.sql)（目录/授权，与会话同库）。代码不执行这些 SQL。
 
 `GET /v1/memory?q=` — `q` 为空则列出当前用户 user+role+org 可见的未过期条目；有 `q` 则向量检索。
+
+`item_key` 必须是配置词表里的 `domain.aspect`（默认见 `MemoryConfig.item_keys`，可用 `SLEUTH_MEMORY_ITEM_KEYS` 覆盖）。`POST` / `memory_write` 只传目录键；近义（余弦 >= `memory.merge_score`，默认 0.85，env `SLEUTH_MEMORY_MERGE_SCORE`）覆盖该实例，异义新开 `domain.aspect.facet`。跨层近义复用完整键由 `memory.merge_across_scopes`（`SLEUTH_MEMORY_MERGE_ACROSS_SCOPES`）控制。`GET /v1/memory` 同时返回 `item_key_domains` 与 `item_keys` 供前端下拉。
 
 `POST /v1/memory`
 
@@ -947,7 +949,7 @@ OpenGauss 列为 `FLOATVECTOR` 时设 `SLEUTH_MEMORY_VECTOR_KIND=floatvector`；
 
 默认 `scope_kind=user`、`scope_id` 为当前 `X-User-Id`。写 role/org 层需 `X-Admin-Token`。
 
-`PATCH /v1/memory/{memory_id}` 可改 `title_text` / `body_text`（会重算 embedding）。`DELETE` 将 `row_status` 置为归档。
+`PATCH /v1/memory/{memory_id}` 的 `{memory_id}` 是该行主键 `id`（列表/POST 响应里的 `mem_...`），可改 `title_text` / `body_text`（会重算 embedding，不按近义再分面）。`DELETE` 将 `row_status` 置为归档。
 
 ### 4.12 目录与授权（Admin）
 

@@ -602,7 +602,12 @@ def _parse_embedding(raw) -> Optional[List[float]]:
 
 
 def _bind_embedding(values: Optional[Sequence[float]], config):
-    if values is None:
+    if not values:
+        if settings.uses_sql_ann(config):
+            raise RuntimeError(
+                "embedding is required before writing memory "
+                "(vector/floatvector columns do not accept NULL)"
+            )
         return None
     if settings.uses_sql_ann(config):
         return format_vector(values)

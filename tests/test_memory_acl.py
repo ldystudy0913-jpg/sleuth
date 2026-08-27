@@ -177,6 +177,8 @@ class AclGrantTests(unittest.TestCase):
                     "backend": "opengauss",
                     "top_k": 7,
                     "min_score": "0.4",
+                    "merge_score": "0.88",
+                    "merge_across_scopes": False,
                     "table_item": "mem_item",
                     "og_schema": "aml_gs",
                 },
@@ -186,7 +188,18 @@ class AclGrantTests(unittest.TestCase):
         self.assertEqual(cfg.memory.backend, "opengauss")
         self.assertEqual(cfg.memory.top_k, 7)
         self.assertEqual(cfg.memory.min_score, "0.4")
+        self.assertEqual(cfg.memory.merge_score, "0.88")
+        self.assertFalse(cfg.memory.merge_across_scopes)
         self.assertEqual(cfg.memory.og_schema, "aml_gs")
+        cfg.merge(
+            {
+                "memory": {
+                    "item_key_domains": "output,str",
+                    "item_keys": "output.language,str.threshold",
+                }
+            }
+        )
+        self.assertEqual(cfg.memory.item_keys, "output.language,str.threshold")
         self.assertTrue(cfg.acl.enabled)
         self.assertEqual(cfg.acl.default_agent_name, "build")
 

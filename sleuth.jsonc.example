@@ -55,6 +55,13 @@
     "text_kind": "text",
     "top_k": 12,
     "min_score": "0.35",
+    "merge_score": "0.85",
+    "merge_across_scopes": true,
+    "pin_kinds": "preference,forget",
+    // 域：output回复呈现 workflow作业步骤 str可疑 dd尽调 screening筛查 rating评级 policy制度 avoid负向 pattern套路 customer客户
+    "item_key_domains": "output,workflow,str,dd,screening,rating,policy,avoid,pattern,customer",
+    // 方面：output.language回复语言 / str.threshold可疑口径 / workflow.steps作业步骤（完整对照见 sleuth/config.py MemoryConfig）
+    "item_keys": "output.language,output.structure,output.tone,workflow.steps,str.threshold,str.steps,str.narrative,dd.steps,dd.sources,screening.steps,screening.hits,rating.factors,rating.scale,policy.branch,policy.head,avoid.verbose_english,avoid.raw_id,pattern.cash_night,pattern.mule,customer.segment,customer.risk_note,customer.id",
     "table_item": "mem_item",
     "table_audit": "mem_audit"
   },

@@ -14,6 +14,9 @@ _RE_PASSWORD = re.compile(
     r"(?i)((?:密码|口令|pwd|password)\s*[：:=]\s*)(\S+)",
 )
 
+# http(s) URLs — digit masks must not run inside these (file ids look like cards).
+_RE_URL = re.compile(r"https?://[^\s<>\"')\]]+", re.I)
+
 # Mainland 18-digit ID (allow trailing X)
 _RE_ID = re.compile(
     r"(?<![\d*Xx])"
@@ -83,24 +86,43 @@ def _mask_address(m: re.Match[str]) -> str:
     return m.group(1) + "***"
 
 
+def _protect_urls(text: str) -> tuple:
+    urls: list[str] = []
+
+    def _stash(m: re.Match[str]) -> str:
+        urls.append(m.group(0))
+        return f"\x00URL{len(urls) - 1}\x00"
+
+    return _RE_URL.sub(_stash, text), urls
+
+
+def _restore_urls(text: str, urls: list[str]) -> str:
+    for i, url in enumerate(urls):
+        text = text.replace(f"\x00URL{i}\x00", url)
+    return text
+
+
 def contains_raw_pii(text: str) -> bool:
     """True when text still contains an unmasked ID, mobile, or bank-card run."""
     if not text:
         return False
-    return bool(_RE_ID.search(text) or _RE_MOBILE.search(text) or _RE_BANK.search(text))
+    protected, _ = _protect_urls(text)
+    return bool(
+        _RE_ID.search(protected) or _RE_MOBILE.search(protected) or _RE_BANK.search(protected)
+    )
 
 
 def desensitize_text(text: str) -> str:
     """Return text with common PII patterns masked. Empty/None-safe for str only."""
     if not text:
         return text
-    out = text
+    out, urls = _protect_urls(text)
     out = _RE_PASSWORD.sub(_mask_password, out)
     out = _RE_ID.sub(_mask_id, out)
     out = _RE_MOBILE.sub(_mask_mobile, out)
     out = _RE_BANK.sub(_mask_bank, out)
     out = _RE_ADDRESS.sub(_mask_address, out)
-    return out
+    return _restore_urls(out, urls)
 
 
 def desensitize_optional(text: Optional[str]) -> Optional[str]:

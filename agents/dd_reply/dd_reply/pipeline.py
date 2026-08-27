@@ -409,21 +409,21 @@ def _source_display_line(item: Dict[str, str]) -> str:
     name = (item.get("file_name") or item.get("title") or "未命名知识").strip()
     url = (item.get("url") or "").strip()
     if url:
-        return f"{name} · {url}"
-    return name
+        return f"《{name}》：{url}"
+    return f"《{name}》"
 
 
-def _gray_source_item(index: int, item: Dict[str, str]) -> str:
+def _gray_source_item(item: Dict[str, str]) -> str:
     name = _html_escape(
         (item.get("file_name") or item.get("title") or "未命名知识").strip()
     )
     url = (item.get("url") or "").strip()
     if url:
         href = _html_escape(url)
-        inner = f'{name} · <a href="{href}" style="{_GRAY_STYLE}">{href}</a>'
+        inner = f'《{name}》：<a href="{href}" style="{_GRAY_STYLE}">{href}</a>'
     else:
-        inner = name
-    return f'<span style="{_GRAY_STYLE}">{index}. {inner}</span>'
+        inner = f"《{name}》"
+    return f'<span style="{_GRAY_STYLE}">{inner}</span>'
 
 
 def _strip_source_appendix(markdown: str) -> str:
@@ -432,14 +432,14 @@ def _strip_source_appendix(markdown: str) -> str:
 
 
 def _sources_markdown(sources: List[Dict[str, str]]) -> str:
-    """Dashed, gray appendix: file_name · url. Not a fifth answer heading."""
+    """Dashed, gray appendix: 《文件名》：url, one file per line."""
     if not sources:
         return ""
     seen: set[str] = set()
     lines = [
         "---",
         "",
-        _gray_md("知识来源（仅供核对原文，不属于答复正文）"),
+        _gray_md("知识来源"),
         "",
     ]
     n = 0
@@ -453,7 +453,7 @@ def _sources_markdown(sources: List[Dict[str, str]]) -> str:
             continue
         seen.add(key)
         n += 1
-        lines.append(_gray_source_item(n, item))
+        lines.append(_gray_source_item(item))
     if n == 0:
         return ""
     return "\n".join(lines)
@@ -638,11 +638,28 @@ def generate_framework(
         "report_id": req.report_id,
         "bank_id": req.bank_id,
     }
+    raw_sources = list(kb_meta.get("sources") or [])
+    contract_sources: List[Dict[str, Any]] = []
+    seen_src: set[str] = set()
+    for item in raw_sources:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("file_name") or item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        key = f"{title}|{url}"
+        if (not title and not url) or key in seen_src:
+            continue
+        seen_src.add(key)
+        row = dict(item)
+        row["title"] = title or url
+        row["url"] = url
+        contract_sources.append(row)
     return FrameworkResult(
         pre_analysis=sections.get("pre_analysis", ""),
         reply_body=sections.get("reply_body", ""),
         verification_list=verification,
         conclusion_guide=sections.get("conclusion_guide", ""),
         markdown=markdown,
+        sources=contract_sources,
         meta=meta,
     )

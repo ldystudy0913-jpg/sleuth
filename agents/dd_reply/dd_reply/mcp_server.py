@@ -237,6 +237,8 @@ def build_mcp_server(
         retrievals = retrieve_risk_codes([str(c) for c in codes], settings)
         found = []
         missing = []
+        sources: list[dict[str, str]] = []
+        seen_src: set[str] = set()
         for r in retrievals:
             if r.ok:
                 found.append(
@@ -257,9 +259,20 @@ def build_mcp_server(
                         ],
                     }
                 )
+                for h in r.hits:
+                    title = (h.file_name or h.title or "").strip()
+                    url = (h.source_url() or "").strip()
+                    key = f"{title}|{url}"
+                    if (not title and not url) or key in seen_src:
+                        continue
+                    seen_src.add(key)
+                    sources.append({"title": title or url, "url": url})
             else:
                 missing.append({"code": r.code, "error": r.error or "empty_hits"})
-        return json.dumps({"found": found, "missing": missing}, ensure_ascii=False)
+        return json.dumps(
+            {"found": found, "missing": missing, "sources": sources},
+            ensure_ascii=False,
+        )
 
     @server.tool(
         name="list_risk_codes",
