@@ -37,6 +37,7 @@ class SkillInfo:
     content: str
     required_mcp: List[str] = field(default_factory=list)
     required_tools: List[str] = field(default_factory=list)
+    owner_agent: Optional[str] = None
 
 
 @dataclass
@@ -582,10 +583,16 @@ def _refresh_single_flight(
     try:
         skills = discover_skills(cfg, work, force=force)
         set_skills(skills)
+        try:
+            from ..catalog import merge_live_mcp_skills
+
+            merge_live_mcp_skills(cfg)
+        except Exception as exc:
+            log.debug("mcp card skill merge skipped: %s", exc)
         _CONFIG_REF = cfg
         _CWD = work
         _LAST_REFRESH = time.time()
-        return skills
+        return get_skills()
     finally:
         with _REFRESH_GATE:
             ev = _REFRESH_EVENT

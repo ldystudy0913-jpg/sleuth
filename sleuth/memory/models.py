@@ -66,6 +66,10 @@ class MemoryItem:
     updated_at: Optional[datetime] = None
     last_used_at: Optional[datetime] = None
     use_cnt: int = 0
+    kb_status: str = ""
+    kb_ref: Optional[str] = None
+    kb_ingested_at: Optional[datetime] = None
+    kb_ingested_by: str = ""
     score: Optional[float] = None
 
     def embed_text(self) -> str:
@@ -92,5 +96,9 @@ class MemoryItem:
             "row_status": self.row_status,
             "expire_at": self.expire_at.isoformat() if self.expire_at else None,
             "use_cnt": self.use_cnt,
+            "kb_status": self.kb_status,
+            "kb_ref": self.kb_ref,
+            "kb_ingested_at": self.kb_ingested_at.isoformat() if self.kb_ingested_at else None,
+            "kb_ingested_by": self.kb_ingested_by or None,
             "score": self.score,
         }

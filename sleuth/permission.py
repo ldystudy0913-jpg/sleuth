@@ -178,7 +178,6 @@ def build_rules() -> Ruleset:
         Rule("memory_search", "*", "allow"),
         Rule("memory_write", "*", "allow"),
         Rule("memory_forget", "*", "allow"),
-        Rule("ddreply_*", "*", "allow"),
     ]
 
 

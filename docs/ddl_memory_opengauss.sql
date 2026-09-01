@@ -8,6 +8,7 @@
 -- embedding 维度须与 SLEUTH_EMBEDDING_DIM、建表 vector(n) 三者一致（下例 1024）。
 -- 无 vector 插件时把 embedding 改成 real[]，去掉 HNSW，并设 SLEUTH_MEMORY_VECTOR_KIND=real_array。
 -- 实例若用 FLOATVECTOR(n) 而非 pgvector 的 vector(n)，设 SLEUTH_MEMORY_VECTOR_KIND=floatvector。
+-- FLOATVECTOR 余弦距离用 cosine_distance() / <+>，没有 pgvector 的 <=> ；配错算子时 Sleuth 会回退到进程内余弦，写入仍成功。
 -- 实例若不能建 TEXT、把 body_text/payload_text 改成 JSONB，设 SLEUTH_MEMORY_TEXT_KIND=jsonb。
 -- 无权限建 HNSW 时可省略向量索引；数据量小时顺序扫描仍可召回，不影响读写逻辑。
 -- embedding NOT NULL 时示例插入必须带向量，不能写 NULL。
@@ -15,6 +16,14 @@
 --
 -- 插入示例与 docs/ddl_memory_mysql.sql 同一套人：emp_zhang / aml_analyst / SZ_BR。
 -- 手工插入：vector/real[] 可先 NULL 仅供列表可见；floatvector 必须带向量。召回需由 Sleuth 写入时计算。
+--
+-- 已有 mem_item 升级（手工执行一次；代码不跑 DDL）：
+--   ALTER TABLE mem_item ADD COLUMN kb_status VARCHAR(16) NOT NULL DEFAULT 'none';
+--   ALTER TABLE mem_item ADD COLUMN kb_ref VARCHAR(512);
+--   ALTER TABLE mem_item ADD COLUMN kb_ingested_at TIMESTAMP;
+--   ALTER TABLE mem_item ADD COLUMN kb_ingested_by VARCHAR(64);
+--   CREATE INDEX idx_mem_item_kb_status ON mem_item (kb_status);
+-- kb_status：none未收纳 / nominated建议入库 / ingested已入知识库 / stale入库存档后正文又改了。
 -- =============================================================================
 
 CREATE TABLE mem_item (
@@ -39,6 +48,10 @@ CREATE TABLE mem_item (
   updated_at TIMESTAMP NOT NULL,
   last_used_at TIMESTAMP,
   use_cnt INTEGER NOT NULL DEFAULT 0,
+  kb_status VARCHAR(16) NOT NULL DEFAULT 'none',
+  kb_ref VARCHAR(512),
+  kb_ingested_at TIMESTAMP,
+  kb_ingested_by VARCHAR(64),
   PRIMARY KEY (id),
   CONSTRAINT uk_mem_item UNIQUE (scope_kind, scope_id, scenario_code, mem_kind, item_key)
 );
@@ -65,8 +78,13 @@ COMMENT ON COLUMN mem_item.created_at IS '创建时间';
 COMMENT ON COLUMN mem_item.updated_at IS '最后修改时间';
 COMMENT ON COLUMN mem_item.last_used_at IS '最近一次被召回注入的时间';
 COMMENT ON COLUMN mem_item.use_cnt IS '被召回次数';
+COMMENT ON COLUMN mem_item.kb_status IS '知识库收纳：none未收纳/nominated建议入库/ingested已入库/stale入库后正文已改';
+COMMENT ON COLUMN mem_item.kb_ref IS '知识库文档标识或 URL，ingested 后填写';
+COMMENT ON COLUMN mem_item.kb_ingested_at IS '标记 ingested 的时间';
+COMMENT ON COLUMN mem_item.kb_ingested_by IS '标记 ingested 的用户编码';
 
 CREATE INDEX idx_mem_item_embedding ON mem_item USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_mem_item_kb_status ON mem_item (kb_status);
 
 -- -- 个人偏好（保底注入，即使向量分一般也会进 prompt）
 -- INSERT INTO mem_item (
@@ -146,7 +164,7 @@ CREATE TABLE mem_audit (
 COMMENT ON TABLE mem_audit IS '记忆审计，不给模型看，不存正文与向量';
 COMMENT ON COLUMN mem_audit.audit_id IS '审计主键';
 COMMENT ON COLUMN mem_audit.memory_id IS '对应 mem_item.id';
-COMMENT ON COLUMN mem_audit.action_type IS '操作类型：create/update/archive/forget/retrieve';
+COMMENT ON COLUMN mem_audit.action_type IS '操作类型：create/update/archive/forget/retrieve/kb_harvest';
 COMMENT ON COLUMN mem_audit.actor_user_id IS '操作人用户编码';
 COMMENT ON COLUMN mem_audit.acted_at IS '操作时间';
 COMMENT ON COLUMN mem_audit.detail_text IS '短说明，如 item_key=output.language';

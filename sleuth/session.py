@@ -176,6 +176,11 @@ class Session:
         self.permission = build_permission(self.config, agent, yolo=self.yolo)
         if not self.is_default_agent():
             self.skill_names = []
+        mgr = getattr(self, "_mcp_manager", None)
+        if mgr is not None:
+            from .app import _bind_session_mcp
+
+            _bind_session_mcp(self, mgr)
         try:
             self._update_record()
         except Exception as exc:
@@ -251,6 +256,10 @@ class Session:
             if info.name in seen:
                 continue
             seen.add(info.name)
+            if (getattr(info, "owner_agent", None) or "").strip():
+                raise ValueError(
+                    f"skill {info.name!r} is not pinnable (private to an agent)"
+                )
             resolved.append(info.name)
         from .memory.acl import assert_resource_allowed
 
@@ -398,7 +407,11 @@ class Session:
         return bool(getattr(self.config, "output_desensitize", True))
 
     def _scrub(self, text: str) -> str:
-        return maybe_desensitize(text, enabled=self._desensitize_on())
+        return maybe_desensitize(
+            text,
+            enabled=self._desensitize_on(),
+            privacy=getattr(self.config, "privacy", None),
+        )
 
     def _scrub_tool_result(self, result: ToolResult) -> ToolResult:
         if not self._desensitize_on():
@@ -449,6 +462,52 @@ class Session:
         from .tools.skill_tool import pinned_skills_system_block
 
         return pinned_skills_system_block(self.skill_names, session=self)
+
+    def _bound_skill_names(self) -> List[str]:
+        """Skill names auto-injected for a non-default agent (card/config + private)."""
+        if self.is_default_agent():
+            return []
+        from .skill import get_skill, get_skills
+        from .memory.acl import resource_allowed
+
+        cfg = self.config
+        user_id = self.user_id or ""
+        canon = cfg.resolve_agent_name(self.agent_name)
+        agent = cfg.agent(self.agent_name)
+        names: List[str] = list(agent.skill_names or [])
+        seen = set(names)
+        for sk in get_skills().values():
+            owner = (getattr(sk, "owner_agent", None) or "").strip()
+            if not owner:
+                continue
+            if cfg.resolve_agent_name(owner) != canon:
+                continue
+            if sk.name not in seen:
+                names.append(sk.name)
+                seen.add(sk.name)
+        allowed: List[str] = []
+        for name in names:
+            info = get_skill(name)
+            if info is None:
+                continue
+            owner = (getattr(info, "owner_agent", None) or "").strip()
+            if owner:
+                if cfg.resolve_agent_name(owner) != canon:
+                    continue
+                if not resource_allowed(cfg, user_id, "agent", canon):
+                    continue
+            elif not resource_allowed(cfg, user_id, "skill", name):
+                continue
+            allowed.append(name)
+        return allowed
+
+    def _agent_skill_prompt(self) -> str:
+        names = self._bound_skill_names()
+        if not names:
+            return ""
+        from .tools.skill_tool import pinned_skills_system_block
+
+        return pinned_skills_system_block(names, session=self)
 
     def _maybe_title(self) -> None:
         if self.parent_id:
@@ -503,10 +562,14 @@ class Session:
             model=self.model_id,
             tool_specs=tools,
             guardrails=self.config.guardrails,
+            session=self,
         )
         pinned = self._pinned_skill_prompt()
         if pinned:
             system = system + "\n\n" + pinned
+        bound = self._agent_skill_prompt()
+        if bound:
+            system = system + "\n\n" + bound
         from .files.ingest import ensure_session_excerpts
         from .files.mailbox import files_prompt_block
 

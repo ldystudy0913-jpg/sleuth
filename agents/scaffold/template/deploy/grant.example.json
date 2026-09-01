@@ -1,0 +1,18 @@
+{
+  "grants": [
+    {
+      "scope_kind": "role",
+      "scope_id": "aml_analyst",
+      "resource_kind": "agent",
+      "resource_id": "__AGENT_NAME__",
+      "grant_effect": "allow"
+    },
+    {
+      "scope_kind": "role",
+      "scope_id": "aml_analyst",
+      "resource_kind": "skill",
+      "resource_id": "__COS_SKILL__",
+      "grant_effect": "allow"
+    }
+  ]
+}

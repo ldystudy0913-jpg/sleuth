@@ -11,8 +11,10 @@ from ..memory.service import (
     MemoryPrivacyError,
     MemoryUnavailable,
     can_access_item,
+    filter_by_kb_status,
     forget_memory,
     search_for_user,
+    set_kb_harvest,
     write_memory,
 )
 from ..memory.store import memory_store_for
@@ -70,11 +72,17 @@ async def list_or_search_memory(request, config):
         return _memory_unavailable(config)
     except Exception as exc:
         return _json({"error": str(exc)}, 400)
+    kb_status = (request.query_params.get("kb_status") or "").strip()
+    try:
+        items = filter_by_kb_status(config, items, kb_status)
+    except ValueError as exc:
+        return _json({"error": str(exc)}, 400)
     return _json(
         {
             "items": [item.to_public_dict() for item in items],
             "item_key_domains": settings.item_key_domains(config),
             "item_keys": settings.item_keys(config),
+            "kb_statuses": settings.kb_statuses(config),
         }
     )
 
@@ -148,24 +156,45 @@ async def patch_memory(request, config):
     title = str(body.get("title_text") if "title_text" in body else item.title_text)
     text = str(body.get("body_text") if "body_text" in body else item.body_text)
     payload = body.get("payload_text") if "payload_text" in body else item.payload_text
+    content_keys = (
+        "title_text",
+        "body_text",
+        "payload_text",
+        "importance_score",
+        "confidence_score",
+    )
+    content_touched = any(key in body for key in content_keys)
+    kb_touched = "kb_status" in body or "kb_ref" in body
     try:
-        updated = write_memory(
-            config,
-            actor=user_id,
-            scope_kind=item.scope_kind,
-            scope_id=item.scope_id,
-            scenario_code=item.scenario_code,
-            mem_kind=item.mem_kind,
-            item_key=item.item_key,
-            title_text=title,
-            body_text=text,
-            payload_text=payload,
-            importance_score=int(body.get("importance_score") or item.importance_score),
-            confidence_score=str(body.get("confidence_score") or item.confidence_score),
-            origin_type=item.origin_type,
-            expire_at=item.expire_at,
-            lock_item_key=True,
-        )
+        updated = item
+        if content_touched or not kb_touched:
+            updated = write_memory(
+                config,
+                actor=user_id,
+                scope_kind=item.scope_kind,
+                scope_id=item.scope_id,
+                scenario_code=item.scenario_code,
+                mem_kind=item.mem_kind,
+                item_key=item.item_key,
+                title_text=title,
+                body_text=text,
+                payload_text=payload,
+                importance_score=int(body.get("importance_score") or item.importance_score),
+                confidence_score=str(body.get("confidence_score") or item.confidence_score),
+                origin_type=item.origin_type,
+                expire_at=item.expire_at,
+                lock_item_key=True,
+            )
+        if kb_touched:
+            updated = set_kb_harvest(
+                config,
+                updated.id,
+                actor=user_id,
+                kb_status=str(body["kb_status"]) if "kb_status" in body else None,
+                kb_ref=body.get("kb_ref") if "kb_ref" in body else None,
+                update_ref="kb_ref" in body,
+                store=store,
+            )
     except MemoryPrivacyError as exc:
         return _json({"error": str(exc)}, 400)
     except MemoryUnavailable:

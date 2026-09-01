@@ -12,12 +12,7 @@ from .base import ToolContext, ToolResult
 
 class MemoryWriteParams(BaseModel):
     item_key: str = Field(
-        description=(
-            "Stable catalog key as domain.aspect. Must be one of the configured "
-            "item_keys (default: output.language, str.threshold, workflow.steps, ...). "
-            "Pass the catalog key only; do not invent suffixes. Similar text updates "
-            "the matching instance, a different meaning stores a new instance."
-        )
+        description=memory_settings.item_key_write_guide()
     )
     title_text: str = Field(description="Short title, preferably under 40 characters.")
     body_text: str = Field(description="Already-generalized note. Never include raw ID or card numbers.")
@@ -34,8 +29,12 @@ class MemoryWriteParams(BaseModel):
 class MemoryWriteTool:
     name = "memory_write"
     description = (
-        "Store a durable personal note for this user using an existing catalog item_key "
-        "(domain.aspect such as output.language or str.threshold). "
+        "Store a durable personal note for this user. "
+        "item_key is a catalog domain.aspect chosen by meaning: "
+        "口径/定义/时间窗口/门槛 use str.threshold; "
+        "回复语言 use output.language; "
+        "常用表/字段/用数习惯 use usage.tables, usage.fields, usage.habit; "
+        "夜间现金分析套路 use pattern.cash_night. "
         "Call this when the user states a stable preference or asks you to remember something. "
         "Pass the catalog key only; never invent a suffix. Similar wording updates that "
         "instance; a different meaning under the same catalog key is stored as another row. "

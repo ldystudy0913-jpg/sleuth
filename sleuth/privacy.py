@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from .config import PrivacyConfig
+
 # Password / credential labels
 _RE_PASSWORD = re.compile(
     r"(?i)((?:密码|口令|pwd|password)\s*[：:=]\s*)(\S+)",
@@ -61,13 +63,27 @@ def _digits_only(s: str) -> str:
     return re.sub(r"\D", "", s)
 
 
-def _mask_bank(m: re.Match[str]) -> str:
+def _is_unix_ms(digits: str, privacy: PrivacyConfig) -> bool:
+    if not privacy.skip_unix_ms:
+        return False
+    if len(digits) != 13:
+        return False
+    try:
+        n = int(digits)
+    except ValueError:
+        return False
+    return privacy.unix_ms_min <= n <= privacy.unix_ms_max
+
+
+def _mask_bank(m: re.Match[str], privacy: PrivacyConfig) -> str:
     raw = m.group(1)
     if "*" in raw:
         return raw
     digits = _digits_only(raw)
     # Skip 18-digit ID-shaped numbers (already handled); skip short runs
     if len(digits) < 13 or len(digits) > 19:
+        return raw
+    if _is_unix_ms(digits, privacy):
         return raw
     if len(digits) == 18 and re.fullmatch(
         r"[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]",
@@ -102,25 +118,36 @@ def _restore_urls(text: str, urls: list[str]) -> str:
     return text
 
 
-def contains_raw_pii(text: str) -> bool:
+def contains_raw_pii(text: str, *, privacy: Optional[PrivacyConfig] = None) -> bool:
     """True when text still contains an unmasked ID, mobile, or bank-card run."""
     if not text:
         return False
+    priv = privacy or PrivacyConfig()
     protected, _ = _protect_urls(text)
-    return bool(
-        _RE_ID.search(protected) or _RE_MOBILE.search(protected) or _RE_BANK.search(protected)
-    )
+    if _RE_ID.search(protected) or _RE_MOBILE.search(protected):
+        return True
+    for m in _RE_BANK.finditer(protected):
+        digits = _digits_only(m.group(1))
+        if "*" in m.group(1):
+            continue
+        if _is_unix_ms(digits, priv):
+            continue
+        if len(digits) < 13 or len(digits) > 19:
+            continue
+        return True
+    return False
 
 
-def desensitize_text(text: str) -> str:
+def desensitize_text(text: str, *, privacy: Optional[PrivacyConfig] = None) -> str:
     """Return text with common PII patterns masked. Empty/None-safe for str only."""
     if not text:
         return text
+    priv = privacy or PrivacyConfig()
     out, urls = _protect_urls(text)
     out = _RE_PASSWORD.sub(_mask_password, out)
     out = _RE_ID.sub(_mask_id, out)
     out = _RE_MOBILE.sub(_mask_mobile, out)
-    out = _RE_BANK.sub(_mask_bank, out)
+    out = _RE_BANK.sub(lambda m: _mask_bank(m, priv), out)
     out = _RE_ADDRESS.sub(_mask_address, out)
     return _restore_urls(out, urls)
 
@@ -131,7 +158,9 @@ def desensitize_optional(text: Optional[str]) -> Optional[str]:
     return desensitize_text(text)
 
 
-def maybe_desensitize(text: str, *, enabled: bool = True) -> str:
+def maybe_desensitize(
+    text: str, *, enabled: bool = True, privacy: Optional[PrivacyConfig] = None
+) -> str:
     if not enabled or not text:
         return text
-    return desensitize_text(text)
+    return desensitize_text(text, privacy=privacy)

@@ -184,8 +184,9 @@ def public_tools_block(tool_specs: Sequence[dict]) -> str:
     return "\n".join(lines)
 
 
-def public_skills_block() -> str:
+def public_skills_block(session=None) -> str:
     from .skill import get_skills
+    from .memory.acl import resource_allowed
 
     skills = get_skills()
     lines = [
@@ -193,15 +194,32 @@ def public_skills_block() -> str:
         "You may describe these skills (name + description). "
         "Load full content only via the `skill` tool when the user needs it:",
     ]
-    if not skills:
-        lines.append("- (none loaded)")
-        return "\n".join(lines)
+    visible = []
+    cfg = getattr(session, "config", None) if session is not None else None
+    user_id = (getattr(session, "user_id", None) or "") if session is not None else ""
+    agent_name = ""
+    if session is not None and cfg is not None:
+        agent_name = cfg.resolve_agent_name(getattr(session, "agent_name", None) or "")
     for name in sorted(skills):
         info = skills[name]
+        owner = (getattr(info, "owner_agent", None) or "").strip()
+        if cfg is not None and session is not None:
+            if owner:
+                if cfg.resolve_agent_name(owner) != agent_name:
+                    continue
+                if not resource_allowed(cfg, user_id, "agent", agent_name):
+                    continue
+            elif not resource_allowed(cfg, user_id, "skill", name):
+                continue
+        visible.append(info)
+    if not visible:
+        lines.append("- (none loaded)")
+        return "\n".join(lines)
+    for info in visible:
         desc = (info.description or "").strip().replace("\n", " ")
         if len(desc) > 160:
             desc = desc[:157] + "..."
-        lines.append(f"- `{name}`: {desc}")
+        lines.append(f"- `{info.name}`: {desc}")
     return "\n".join(lines)
 
 

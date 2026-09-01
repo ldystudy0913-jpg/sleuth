@@ -17,6 +17,7 @@ from .mailbox import (
     session_files,
     write_session_files,
 )
+from . import settings as file_settings
 
 
 class ExtractScheduler:
@@ -102,6 +103,7 @@ class ExtractScheduler:
                     session_id,
                     file_id,
                     Excerpt(skipped="extract timeout waiting for slot"),
+                    config,
                 )
                 return
             with self._lock:
@@ -118,6 +120,7 @@ class ExtractScheduler:
                 session_id,
                 file_id,
                 Excerpt(skipped=f"extract failed: {exc}"),
+                config,
             )
         finally:
             if acquired:
@@ -140,24 +143,27 @@ class ExtractScheduler:
         item = get_file(record_files(rec), file_id)
         if item is None:
             return
-        if str(item.get("excerpt_status") or "") in ("ok", "skipped"):
+        if str(item.get("excerpt_status") or "") in file_settings.excerpt_done(config):
             return
         excerpt = extract_item(config=config, item=item, object_store=object_store)
-        self._apply_excerpt(store, session_id, file_id, excerpt)
+        self._apply_excerpt(store, session_id, file_id, excerpt, config)
 
-    def _apply_excerpt(self, store, session_id: str, file_id: str, excerpt: Excerpt) -> None:
+    def _apply_excerpt(self, store, session_id: str, file_id: str, excerpt: Excerpt, config=None) -> None:
         if store is None:
             return
-        with self.session_lock(session_id):
-            rec = store.get_session(session_id)
-            if rec is None:
-                return
-            files = record_files(rec)
-            item = get_file(files, file_id)
-            if item is None:
-                return
-            write_excerpt_fields(item, excerpt)
-            save_record_files(store, rec, files)
+        try:
+            with self.session_lock(session_id):
+                rec = store.get_session(session_id)
+                if rec is None:
+                    return
+                files = record_files(rec)
+                item = get_file(files, file_id)
+                if item is None:
+                    return
+                write_excerpt_fields(item, excerpt, config)
+                save_record_files(store, rec, files)
+        except Exception:
+            return
 
 
 _SCHEDULER: Optional[ExtractScheduler] = None
@@ -186,7 +192,7 @@ def wait_extracts(timeout: float = 5.0) -> bool:
     return scheduler().wait_idle(timeout)
 
 
-def write_excerpt_fields(item: Dict[str, Any], excerpt: Excerpt) -> None:
+def write_excerpt_fields(item: Dict[str, Any], excerpt: Excerpt, config=None) -> None:
     payload: Dict[str, Any] = {
         "text": excerpt.text or "",
         "truncated": bool(excerpt.truncated),
@@ -194,9 +200,9 @@ def write_excerpt_fields(item: Dict[str, Any], excerpt: Excerpt) -> None:
     }
     if excerpt.skipped:
         payload["skipped"] = excerpt.skipped
-        item["excerpt_status"] = "skipped"
+        item["excerpt_status"] = file_settings.excerpt_skipped(config)
     else:
-        item["excerpt_status"] = "ok"
+        item["excerpt_status"] = file_settings.excerpt_ok(config)
     item["excerpt"] = payload
 
 
@@ -205,6 +211,8 @@ def extract_item(
     config: Config,
     item: Dict[str, Any],
     object_store: Optional[ObjectStore] = None,
+    max_chars: int = 0,
+    vision_prompt: Optional[str] = None,
 ) -> Excerpt:
     fcfg = files_config(config)
     key = str(item.get("object_key") or "")
@@ -223,7 +231,7 @@ def extract_item(
         if item.get("encrypted"):
             sm4_key = (fcfg.sm4_key or "").strip()
             if not sm4_key:
-                return Excerpt(skipped="SM4 key not configured")
+                return Excerpt(skipped=file_settings.err_sm4_key(config))
             data = sm4_cbc_decrypt(raw, sm4_key)
         else:
             data = raw
@@ -232,6 +240,8 @@ def extract_item(
             mime=str(item.get("mime") or ""),
             filename=str(item.get("filename") or ""),
             config=config,
+            max_chars=max_chars,
+            vision_prompt=vision_prompt,
         )
     except Sm4CbcError as exc:
         return Excerpt(skipped=f"sm4 decrypt failed: {exc}")
@@ -261,10 +271,11 @@ def schedule_extract(
     )
 
 
-def _needs_extract(item: Dict[str, Any]) -> bool:
-    if str(item.get("status") or "") != "ready":
+def _needs_extract(item: Dict[str, Any], config=None) -> bool:
+    if str(item.get("status") or "") != file_settings.status_ready(config):
         return False
-    return str(item.get("excerpt_status") or "pending") not in ("ok", "skipped")
+    pending = file_settings.excerpt_pending(config)
+    return str(item.get("excerpt_status") or pending) not in file_settings.excerpt_done(config)
 
 
 def ensure_session_excerpts(
@@ -273,11 +284,11 @@ def ensure_session_excerpts(
     timeout_s: float = 8.0,
     object_store: Optional[ObjectStore] = None,
 ) -> None:
+    config = getattr(session, "config", None) or Config()
     files = session_files(session)
-    pending = [f for f in files if _needs_extract(f)]
+    pending = [f for f in files if _needs_extract(f, config)]
     if not pending:
         return
-    config = getattr(session, "config", None) or Config()
     store_impl = object_store or getattr(session, "_object_store", None)
     store = getattr(session, "store", None)
     sid = str(getattr(session, "id", "") or "")
@@ -299,5 +310,5 @@ def ensure_session_excerpts(
         return
     for item in pending:
         excerpt = extract_item(config=config, item=item, object_store=store_impl)
-        write_excerpt_fields(item, excerpt)
+        write_excerpt_fields(item, excerpt, config)
     write_session_files(session, files)

@@ -58,6 +58,8 @@ class ProjectTraceTests(unittest.TestCase):
         self.assertEqual(payload["records"][2]["id"], "call_1")
         self.assertEqual(payload["records"][2]["duration_ms"], 800)
         self.assertFalse(payload["records"][2]["is_error"])
+        self.assertIn("started_at_iso", payload["records"][1])
+        self.assertTrue(str(payload["records"][1]["started_at_iso"]).startswith("1970-"))
 
     def test_legacy_messages_null_timing(self):
         user = Message.user_text("hello")

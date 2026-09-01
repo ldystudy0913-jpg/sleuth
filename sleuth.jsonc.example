@@ -10,6 +10,7 @@
   "compaction": { "auto": true, "reserved": 20000 },
   "subagent_depth": 1,
   "default_agent": "build",
+  "timezone": "Asia/Shanghai",
   "max_steps": 50,
   // MCP Agent 的展示名写在各包 agent.md（get_agent_card.title），不必在此重复。
   // 未配 title 时，内置 build 对外显示为「通用助手」。
@@ -58,22 +59,49 @@
     "merge_score": "0.85",
     "merge_across_scopes": true,
     "pin_kinds": "preference,forget",
-    // 域：output回复呈现 workflow作业步骤 str可疑 dd尽调 screening筛查 rating评级 policy制度 avoid负向 pattern套路 customer客户
-    "item_key_domains": "output,workflow,str,dd,screening,rating,policy,avoid,pattern,customer",
-    // 方面：output.language回复语言 / str.threshold可疑口径 / workflow.steps作业步骤（完整对照见 sleuth/config.py MemoryConfig）
-    "item_keys": "output.language,output.structure,output.tone,workflow.steps,str.threshold,str.steps,str.narrative,dd.steps,dd.sources,screening.steps,screening.hits,rating.factors,rating.scale,policy.branch,policy.head,avoid.verbose_english,avoid.raw_id,pattern.cash_night,pattern.mule,customer.segment,customer.risk_note,customer.id",
+    // 域：output回复呈现 workflow作业步骤 str可疑 dd尽调 screening筛查 rating评级 policy制度 avoid负向 pattern套路 customer客户 usage用数习惯
+    "item_key_domains": "output,workflow,str,dd,screening,rating,policy,avoid,pattern,customer,usage",
+    // 方面：output.language回复语言 / str.threshold可疑口径 / usage.tables常用表（完整对照见 sleuth/config.py MemoryConfig）
+    "item_keys": "output.language,output.structure,output.tone,workflow.steps,str.threshold,str.steps,str.narrative,dd.steps,dd.sources,screening.steps,screening.hits,rating.factors,rating.scale,policy.branch,policy.head,avoid.verbose_english,avoid.raw_id,pattern.cash_night,pattern.mule,customer.segment,customer.risk_note,customer.id,usage.tables,usage.fields,usage.habit",
     "table_item": "mem_item",
     "table_audit": "mem_audit"
+    // 知识库收纳：none未收纳 nominated建议入库 ingested已入库 stale入库后正文已改
+    // "kb_status_none": "none",
+    // "kb_status_nominated": "nominated",
+    // "kb_status_ingested": "ingested",
+    // "kb_status_stale": "stale"
   },
   "acl": {
     "enabled": false,
     "default_agent_open": true,
+    "wildcard_id": "*",
     "table_org": "mem_org",
     "table_role": "mem_role",
     "table_user": "mem_user",
     "table_grant": "mem_grant"
+  },
+  "privacy": {
+    "skip_unix_ms": true,
+    "unix_ms_min": 946684800000,
+    "unix_ms_max": 4102444800000
   }
   // files / kb / OpenGauss DSN via .env
-  // "files": { "max_bytes": 52428800, "max_count": 20, "image_mode": "vision" },
+  // Dedicated agents auto-inject skills listed on the Agent Card (or agent.skills in this file).
+  // Example: "agent": { "dd_reply": { "skills": ["kyc-shared"] } }
+  // "files": {
+  //   "max_bytes": 52428800,
+  //   "max_count": 20,
+  //   "require_encrypt": true,
+  //   "enc_algo": "sm4-cbc-kiv",
+  //   "cipher_mime": "application/octet-stream",
+  //   "upload_form_field": "file",
+  //   "download_path_template": "/v1/sessions/{session_id}/files/{file_id}",
+  //   "inline_query_param": "inline",
+  //   "image_mode": "vision",
+  //   "vision_prompt": "先用一两段话说明图片在展示什么（场景、界面或人物、正在发生的动作）；再列出图中全部可见文字。证件或表单按字段列出。看不清的不要编造。",
+  //   "vision_focus_prompt": "先回答下面的用户问题，再列出图中全部可见文字。看不清的不要编造。\n用户问题：{question}",
+  //   "pdf_render_dpi": 110,
+  //   "pdf_vision_max_pages": 8
+  // },
   // "kb": { "api_url": "" }
 }

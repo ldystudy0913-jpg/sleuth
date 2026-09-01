@@ -10,16 +10,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sleuth.config import Config
+from sleuth.config import Config, FilesConfig
 from sleuth.files.cos import MemoryObjectStore
-from sleuth.files.crypto_sm4 import sm4_cbc_encrypt
-from sleuth.files.extract import Excerpt, extract_bytes
+from sleuth.files.extract import Excerpt, extract_bytes, resolve_vision_prompt
 from sleuth.files.ingest import reset_scheduler, wait_extracts
 from sleuth.files.mailbox import (
     attachment_refs,
-    complete_upload,
-    create_upload,
     files_prompt_block,
+    ingest_user_file,
 )
 from sleuth.permission import Permission, Rule
 from sleuth.storage.base import SessionRecord
@@ -118,6 +116,89 @@ class ExtractKindTests(unittest.TestCase):
         self.assertEqual(out.parser, "vision")
         self.assertIn("110", out.text)
 
+    def test_default_vision_prompt_describes_scene(self):
+        prompt = FilesConfig().vision_prompt
+        self.assertIn("展示", prompt)
+        self.assertIn("可见文字", prompt)
+        preamble = FilesConfig().prompt_preamble
+        self.assertIn("vision description", preamble.lower())
+        self.assertIn("question", preamble.lower())
+        self.assertIn("parser={parser}", FilesConfig().prompt_item_line)
+
+    def test_files_prompt_includes_parser_and_description(self):
+        cfg = _cfg()
+
+        class Sess:
+            config = cfg
+            id = "sess_p"
+            _files = [
+                {
+                    "id": "file_img",
+                    "role": "user",
+                    "filename": "AI生成.jpg",
+                    "mime": "image/jpeg",
+                    "size": 12,
+                    "status": "ready",
+                    "excerpt_status": "ok",
+                    "excerpt": {
+                        "text": "画面里有人在厨房炒菜。水印：豆包AI生成",
+                        "parser": "vision",
+                        "truncated": False,
+                    },
+                }
+            ]
+            _prompt_file_ids = None
+
+        block = files_prompt_block(Sess())
+        self.assertIn("炒菜", block)
+        self.assertIn("parser=vision", block)
+        self.assertIn("vision description", block.lower())
+        self.assertIn("do not say the system failed to attach", block.lower())
+
+    def test_empty_pdf_rasters_then_vision(self):
+        cfg = _cfg()
+        from types import ModuleType, SimpleNamespace
+        import sys
+
+        fake = ModuleType("pypdf")
+
+        class PdfReader:
+            def __init__(self, _buf):
+                page = SimpleNamespace(extract_text=lambda: "")
+                self.pages = [page]
+
+        fake.PdfReader = PdfReader
+        captured = {}
+
+        def vis(_data, _mime, _config, prompt=None):
+            captured["prompt"] = prompt
+            return "a person waving"
+
+        with patch.dict(sys.modules, {"pypdf": fake}), patch(
+            "sleuth.files.extract.render_pdf_pages",
+            return_value=([b"\x89PNG" + b"\x00" * 8], "", False),
+        ), patch(
+            "sleuth.files.extract.vision_image_text", vis
+        ), patch(
+            "sleuth.files.extract.ocr_image_text",
+            side_effect=AssertionError("ocr should not run"),
+        ):
+            out = extract_bytes(
+                b"%PDF-1.4 empty",
+                mime="application/pdf",
+                filename="scan.pdf",
+                config=cfg,
+            )
+        self.assertIn("waving", out.text)
+        self.assertIn("pypdfium2", out.parser)
+        self.assertIn("vision", out.parser)
+        self.assertIn("展示", captured.get("prompt") or "")
+
+    def test_resolve_focus_prompt_includes_question(self):
+        cfg = _cfg()
+        text = resolve_vision_prompt(cfg, "这张图片在做什么")
+        self.assertIn("这张图片在做什么", text)
+
 
 class EncryptedIngestTests(unittest.TestCase):
     def setUp(self):
@@ -128,35 +209,25 @@ class EncryptedIngestTests(unittest.TestCase):
 
     def test_complete_pending_then_excerpt(self):
         cfg = _cfg()
+        cfg.files.require_encrypt = True
         cfg.files.sm4_key = "0123456789abcdef"
-        key = cfg.files.sm4_key
         plain = "客户姓名：余某".encode("utf-8")
-        cipher = sm4_cbc_encrypt(plain, key)
         mem = MemoryObjectStore()
         with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             rec = _rec(store)
-            payload = create_upload(
+            item = ingest_user_file(
                 config=cfg,
                 store=store,
                 rec=rec,
                 filename="kyc.txt",
                 mime="text/plain",
-                size=len(cipher),
-                encrypted=True,
-                object_store=mem,
-            )
-            mem.put_bytes(key=payload["object_key"], data=cipher, mime="text/plain")
-            rec = store.get_session(rec.id)
-            item = complete_upload(
-                config=cfg,
-                store=store,
-                rec=rec,
-                file_id=payload["file_id"],
+                data=plain,
                 object_store=mem,
             )
             self.assertEqual(item["status"], "ready")
             self.assertEqual(item["excerpt_status"], "pending")
+            self.assertNotEqual(mem.get_bytes(item["object_key"]), plain)
             self.assertTrue(wait_extracts(3.0))
             rec = store.get_session(rec.id)
             stored = rec.metadata["files"][0]
@@ -186,23 +257,13 @@ class EncryptedIngestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             rec = _rec(store, sid="sess_extract00000000000002")
-            payload = create_upload(
+            ingest_user_file(
                 config=cfg,
                 store=store,
                 rec=rec,
                 filename="notes.txt",
                 mime="text/plain",
-                size=5,
-                encrypted=False,
-                object_store=mem,
-            )
-            mem.put_bytes(key=payload["object_key"], data=b"hello", mime="text/plain")
-            rec = store.get_session(rec.id)
-            complete_upload(
-                config=cfg,
-                store=store,
-                rec=rec,
-                file_id=payload["file_id"],
+                data=b"hello",
                 object_store=mem,
             )
             self.assertTrue(wait_extracts(3.0))
@@ -243,6 +304,113 @@ class EncryptedIngestTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["text"], "body-text")
         self.assertEqual(payload["excerpt_status"], "ok")
+        self.assertFalse(payload["focused"])
+
+    def test_question_reruns_vision_without_overwriting_excerpt(self):
+        cfg = _cfg()
+        mem = MemoryObjectStore()
+        mem.put_bytes(
+            key="k/pic.jpg",
+            data=b"\xff\xd8\xff" + b"\x00" * 20,
+            mime="image/jpeg",
+        )
+        captured = {}
+
+        def vis(_data, _mime, _config, prompt=None):
+            captured["prompt"] = prompt
+            return "someone cooking in a kitchen"
+
+        class Sess:
+            config = cfg
+            id = "sess_focus"
+            user_id = "alice"
+            store = None
+            _files = [
+                {
+                    "id": "file_img1",
+                    "role": "user",
+                    "filename": "AI生成.jpg",
+                    "mime": "image/jpeg",
+                    "size": 23,
+                    "object_key": "k/pic.jpg",
+                    "status": "ready",
+                    "excerpt_status": "ok",
+                    "excerpt": {
+                        "text": "豆包AI生成",
+                        "parser": "rapidocr",
+                        "truncated": False,
+                    },
+                }
+            ]
+            _object_store = mem
+
+        ctx = ToolContext(
+            workdir=Path("."),
+            permission=Permission(rules=[Rule("*", "*", "allow")]),
+            session=Sess(),
+        )
+        with patch("sleuth.files.extract.vision_image_text", vis), patch(
+            "sleuth.files.extract.ocr_image_text",
+            side_effect=AssertionError("ocr should not run"),
+        ):
+            result = ReadSessionFileTool().execute(
+                {"file_id": "file_img1", "question": "这张图片在做什么"},
+                ctx,
+            )
+        self.assertFalse(result.is_error)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["focused"])
+        self.assertIn("cooking", payload["text"])
+        self.assertIn("这张图片在做什么", captured.get("prompt") or "")
+        self.assertEqual(Sess._files[0]["excerpt"]["text"], "豆包AI生成")
+
+    def test_question_rereads_long_text_without_overwriting(self):
+        cfg = _cfg()
+        cfg.files.excerpt_max_chars = 20
+        cfg.files.excerpt_reread_max_chars = 200
+        full = "abcdefghijklmnopqrstuvwxyz0123456789"
+        mem = MemoryObjectStore()
+        mem.put_bytes(key="k/long.txt", data=full.encode("utf-8"), mime="text/plain")
+
+        class Sess:
+            config = cfg
+            id = "sess_long"
+            user_id = "alice"
+            store = None
+            _files = [
+                {
+                    "id": "file_long",
+                    "role": "user",
+                    "filename": "long.txt",
+                    "mime": "text/plain",
+                    "size": len(full),
+                    "object_key": "k/long.txt",
+                    "status": "ready",
+                    "excerpt_status": "ok",
+                    "excerpt": {
+                        "text": full[:20],
+                        "parser": "text",
+                        "truncated": True,
+                    },
+                }
+            ]
+            _object_store = mem
+
+        ctx = ToolContext(
+            workdir=Path("."),
+            permission=Permission(rules=[Rule("*", "*", "allow")]),
+            session=Sess(),
+        )
+        cached = ReadSessionFileTool().execute({"file_id": "file_long"}, ctx)
+        self.assertEqual(json.loads(cached.output)["text"], full[:20])
+        focused = ReadSessionFileTool().execute(
+            {"file_id": "file_long", "question": "文件后半段写了什么"},
+            ctx,
+        )
+        payload = json.loads(focused.output)
+        self.assertTrue(payload["focused"])
+        self.assertEqual(payload["text"], full)
+        self.assertEqual(Sess._files[0]["excerpt"]["text"], full[:20])
 
 
 class ExtractConcurrencyTests(unittest.TestCase):
@@ -278,23 +446,13 @@ class ExtractConcurrencyTests(unittest.TestCase):
             rec = _rec(store, sid="sess_extract00000000000003")
             for i in range(4):
                 rec = store.get_session(rec.id)
-                payload = create_upload(
+                ingest_user_file(
                     config=cfg,
                     store=store,
                     rec=rec,
                     filename=f"n{i}.txt",
                     mime="text/plain",
-                    size=1,
-                    encrypted=False,
-                    object_store=mem,
-                )
-                mem.put_bytes(key=payload["object_key"], data=b"x", mime="text/plain")
-                rec = store.get_session(rec.id)
-                complete_upload(
-                    config=cfg,
-                    store=store,
-                    rec=rec,
-                    file_id=payload["file_id"],
+                    data=b"x",
                     object_store=mem,
                 )
             self.assertTrue(wait_extracts(5.0))

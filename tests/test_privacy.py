@@ -89,6 +89,13 @@ class TestPrivacy(unittest.TestCase):
         self.assertTrue(contains_raw_pii("110101199001011234"))
         self.assertFalse(contains_raw_pii(desensitize_text("110101199001011234")))
 
+    def test_unix_ms_timestamp_not_masked_as_bank(self) -> None:
+        stamp = "1724751234567"
+        raw = f'"started_at": {stamp}'
+        out = desensitize_text(raw)
+        self.assertIn(stamp, out)
+        self.assertFalse(contains_raw_pii(raw))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -218,6 +218,7 @@ def write_memory(
         origin_type=origin_type,
         row_status=settings.row_status_active(config),
         expire_at=expire_at,
+        kb_status=settings.kb_status_none(config),
     )
     item.embedding = embedder.embed(item.embed_text())
     if not lock_item_key:
@@ -225,6 +226,8 @@ def write_memory(
     existing = store.get_by_key(
         scope_kind, scope_id, scenario_code, mem_kind, item.item_key
     )
+    if existing is not None:
+        _apply_kb_on_content_write(config, item, existing)
     action = "update" if existing else "create"
     return store.upsert(item, actor=actor, action_type=action)
 
@@ -242,6 +245,65 @@ def forget_memory(config, item_id: str, *, actor: str, store: Optional[MemorySto
 def can_access_item(config, user_id: str, item: MemoryItem) -> bool:
     scopes = {(s, i) for s, i in identity_scopes(config, user_id)}
     return (item.scope_kind, item.scope_id) in scopes
+
+
+def _apply_kb_on_content_write(config, item: MemoryItem, existing: MemoryItem) -> None:
+    item.kb_status = settings.effective_kb_status(existing, config)
+    item.kb_ref = existing.kb_ref
+    item.kb_ingested_at = existing.kb_ingested_at
+    item.kb_ingested_by = existing.kb_ingested_by
+    content_changed = (
+        (item.title_text or "") != (existing.title_text or "")
+        or (item.body_text or "") != (existing.body_text or "")
+        or (item.payload_text or "") != (existing.payload_text or "")
+    )
+    if content_changed and item.kb_status == settings.kb_status_ingested(config):
+        item.kb_status = settings.kb_status_stale(config)
+
+
+def filter_by_kb_status(config, items: Sequence[MemoryItem], kb_status: str) -> list:
+    raw = (kb_status or "").strip()
+    if not raw:
+        return list(items)
+    allowed = settings.kb_statuses(config)
+    if raw not in allowed:
+        raise ValueError("invalid kb_status: " + raw)
+    return [item for item in items if settings.effective_kb_status(item, config) == raw]
+
+
+def set_kb_harvest(
+    config,
+    item_id: str,
+    *,
+    actor: str,
+    kb_status: Optional[str] = None,
+    kb_ref=None,
+    update_ref: bool = False,
+    store: Optional[MemoryStore] = None,
+) -> MemoryItem:
+    store = store or memory_store_for(config)
+    if store is None:
+        raise MemoryUnavailable("long-term memory is not configured")
+    item = store.get(item_id)
+    if item is None:
+        raise ValueError("memory not found")
+    if kb_status is not None:
+        item.kb_status = _require_enum(kb_status, settings.kb_statuses(config), "kb_status")
+    else:
+        item.kb_status = settings.effective_kb_status(item, config)
+    if update_ref:
+        if kb_ref is None:
+            item.kb_ref = None
+        else:
+            ref = str(kb_ref).strip()
+            if len(ref) > 512:
+                raise ValueError("kb_ref is too long")
+            item.kb_ref = ref or None
+    if item.kb_status == settings.kb_status_ingested(config):
+        now = utc_now()
+        item.kb_ingested_at = now
+        item.kb_ingested_by = actor
+    return store.set_kb_harvest(item, actor=actor)
 
 
 def write_user_memory(config, user_id: str, **kwargs) -> MemoryItem:

@@ -28,6 +28,17 @@ class OpenGaussCompatTests(unittest.TestCase):
         self.assertEqual(cfg.memory.text_kind, "jsonb")
         self.assertTrue(settings.uses_sql_ann(cfg))
         self.assertEqual(settings.vector_sql_type(cfg), "floatvector")
+        score_sql, dist_sql = settings.ann_distance_sql(cfg)
+        self.assertIn("cosine_distance", dist_sql)
+        self.assertNotIn("<=>", dist_sql)
+        self.assertIn("cosine_distance", score_sql)
+
+    def test_pgvector_ann_uses_cosine_ops(self):
+        cfg = Config()
+        cfg.memory.vector_kind = "vector"
+        _, dist_sql = settings.ann_distance_sql(cfg)
+        self.assertIn("<=>", dist_sql)
+        self.assertNotIn("cosine_distance", dist_sql)
 
     def test_env_loads_item_key_catalog(self):
         cfg = Config()
@@ -40,6 +51,14 @@ class OpenGaussCompatTests(unittest.TestCase):
         self.assertEqual(cfg.memory.item_key_domains, "output,str")
         self.assertEqual(cfg.memory.item_keys, "output.language,str.threshold")
         self.assertEqual(settings.item_keys(cfg), ["output.language", "str.threshold"])
+
+    def test_default_catalog_includes_usage_habits(self):
+        cfg = Config()
+        self.assertIn("usage", settings.item_key_domains(cfg))
+        keys = settings.item_keys(cfg)
+        self.assertIn("usage.tables", keys)
+        self.assertIn("usage.fields", keys)
+        self.assertIn("usage.habit", keys)
 
     def test_env_loads_merge_knobs(self):
         cfg = Config()

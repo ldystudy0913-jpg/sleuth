@@ -147,6 +147,49 @@ def item_keys(config) -> List[str]:
     return csv_field(getattr(memory_cfg(config), "item_keys", None))
 
 
+# DB keys stay English; labels help the model pick the catalog key.
+ITEM_KEY_LABELS = {
+    "output.language": "回复语言",
+    "output.structure": "回复结构",
+    "output.tone": "回复语气",
+    "workflow.steps": "个人作业步骤",
+    "str.threshold": "口径/定义/门槛（夜间交易时间窗口、金额阈值等）",
+    "str.steps": "可疑步骤",
+    "str.narrative": "可疑叙述结构",
+    "dd.steps": "尽调步骤",
+    "dd.sources": "尽调材料",
+    "screening.steps": "筛查步骤",
+    "screening.hits": "命中处置",
+    "rating.factors": "评级因子",
+    "rating.scale": "评级尺度",
+    "policy.branch": "分行制度",
+    "policy.head": "总行制度",
+    "avoid.verbose_english": "避免英文长段",
+    "avoid.raw_id": "避免原文证件号",
+    "pattern.cash_night": "夜间现金分析套路（不是时间窗口口径）",
+    "pattern.mule": "分散对手/骡子套路",
+    "customer.segment": "客群",
+    "customer.risk_note": "风险备注",
+    "customer.id": "客户标识口径（已脱敏）",
+    "usage.tables": "常用表（库表名、schema、常查的业务表）",
+    "usage.fields": "常用字段（列名、码值、常筛维度）",
+    "usage.habit": "其他用数习惯（默认筛选、常用关联、取数路径等）",
+}
+
+
+def item_key_write_guide() -> str:
+    lines = [
+        "Catalog key domain.aspect. Choose by meaning, not the first example: "
+        "口径/定义/时间窗口/门槛 → str.threshold; "
+        "回复语言/语气/结构 → output.language|structure|tone; "
+        "常用表 → usage.tables; 常用字段 → usage.fields; 其他用数习惯 → usage.habit; "
+        "夜间现金分析套路 → pattern.cash_night. "
+        "Pass the catalog key only; do not invent suffixes.",
+    ]
+    lines.extend(f"{key}: {label}" for key, label in ITEM_KEY_LABELS.items())
+    return "\n".join(lines)
+
+
 def ttl_kinds(config) -> List[str]:
     return csv_field(memory_cfg(config).ttl_kinds)
 
@@ -174,6 +217,21 @@ def vector_sql_type(config) -> str:
     return ""
 
 
+def ann_distance_sql(config) -> tuple:
+    """SQL snippets: (score_expr, order_expr). Each contains one ``%s`` for the query vector.
+
+    pgvector ``vector`` uses ``<=>`` (cosine distance). GaussDB/OpenGauss
+    ``floatvector`` has no ``<=>``; cosine distance is ``<+>`` / ``cosine_distance``.
+    Similarity score is ``1 - distance`` in both cases.
+    """
+    cast = vector_sql_type(config)
+    if vector_kind(config) == "floatvector":
+        dist = f"cosine_distance(embedding, %s::{cast})"
+    else:
+        dist = f"(embedding <=> %s::{cast})"
+    return f"(1 - {dist})", dist
+
+
 def text_kind(config) -> str:
     return (getattr(memory_cfg(config), "text_kind", None) or "").strip().lower()
 
@@ -184,6 +242,36 @@ def row_status_active(config) -> str:
 
 def row_status_archived(config) -> str:
     return (memory_cfg(config).row_status_archived or "").strip()
+
+
+def kb_status_none(config) -> str:
+    return (memory_cfg(config).kb_status_none or "").strip() or "none"
+
+
+def kb_status_nominated(config) -> str:
+    return (memory_cfg(config).kb_status_nominated or "").strip() or "nominated"
+
+
+def kb_status_ingested(config) -> str:
+    return (memory_cfg(config).kb_status_ingested or "").strip() or "ingested"
+
+
+def kb_status_stale(config) -> str:
+    return (memory_cfg(config).kb_status_stale or "").strip() or "stale"
+
+
+def kb_statuses(config) -> List[str]:
+    return [
+        kb_status_none(config),
+        kb_status_nominated(config),
+        kb_status_ingested(config),
+        kb_status_stale(config),
+    ]
+
+
+def effective_kb_status(item, config) -> str:
+    raw = (getattr(item, "kb_status", None) or "").strip()
+    return raw or kb_status_none(config)
 
 
 def acl_enabled(config) -> bool:
@@ -205,6 +293,10 @@ def grant_allow(config) -> str:
 
 def grant_deny(config) -> str:
     return (acl_cfg(config).grant_deny or "").strip()
+
+
+def grant_wildcard_id(config) -> str:
+    return (acl_cfg(config).wildcard_id or "").strip()
 
 
 def default_agent_name(config) -> str:

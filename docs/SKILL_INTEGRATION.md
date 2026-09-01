@@ -58,10 +58,13 @@ SLEUTH_SKILLS_REFRESH_SECONDS=300
 
 ### 2.4 HTTP
 
-- `GET /v1/skills` → `[{ name, description, location }, …]`
+- `GET /v1/skills` → `[{ name, description, location, pinnable, owner_agent? }, …]`  
+  `pinnable: true` 给默认 agent 选择器；`pinnable: false` 是有权限的 agent 私有 SOP，不要放进 build 选择器。
 - `POST /v1/skills/reload` → 强制重载
 - 创建 / 发消息 body 带 `skills`（推荐）或旧字段 `skill`：默认 agent 下非空名会把对应 SKILL.md **按顺序全部**注入系统提示；`[]` / `""` 表示不绑定。两个字段都出现时以 `skills` 为准。
-- **Skill 选择器仅当 `agent === GET /v1/agents` 的 `default` 时可用**。专用 agent 必须传 `skills: []`（及 `skill: ""`），否则 `400`。
+- **Skill 选择器仅当 `agent === GET /v1/agents` 的 `default` 时可用**。专用 agent 必须传 `skills: []`（及 `skill: ""`），否则 `400`。专用 agent 会自动注入 Agent Card / `agent.skills` 点名的目录 skill（COS 复用）或 Card 内嵌私有 SOP，不走 pin。
+
+`mcp:` frontmatter 只表示依赖，不参与授权。
 
 前端：每轮带 `agent` / `model` / `skills`。未选 skill 用默认 agent 正常对话。多选会增加系统提示长度。
 
@@ -124,6 +127,7 @@ tools:
 
 样例：
 
+- 脚手架（私有 / COS 两种 SOP）：[`agents/scaffold/template/skills`](../agents/scaffold/template/)
 - [`agents/dd_analyst/skills/dd-report-check/SKILL.md`](../agents/dd_analyst/skills/dd-report-check/SKILL.md)
 - [`agents/dd_reply/skills/dd-reply-framework/SKILL.md`](../agents/dd_reply/skills/dd-reply-framework/SKILL.md)
 

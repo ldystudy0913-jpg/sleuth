@@ -121,6 +121,102 @@ class AclGrantTests(unittest.TestCase):
         d.users["u1"].role_id = "dd_officer"
         self.assertTrue(resource_allowed(cfg, "u1", "agent", "dd_reply"))
 
+    def test_role_wildcard_covers_future_agent_and_skill(self):
+        cfg = _cfg()
+        d = _dir(cfg)
+        d.roles["hq_admin"] = RoleRecord(
+            role_id="hq_admin", role_name="总行平台管理员", row_status="active"
+        )
+        d.users["u1"].role_id = "hq_admin"
+        d.upsert_grant(
+            GrantRecord(
+                grant_id="wa",
+                scope_kind="role",
+                scope_id="hq_admin",
+                resource_kind="agent",
+                resource_id="*",
+                grant_effect="allow",
+                row_status="active",
+            )
+        )
+        d.upsert_grant(
+            GrantRecord(
+                grant_id="ws",
+                scope_kind="role",
+                scope_id="hq_admin",
+                resource_kind="skill",
+                resource_id="*",
+                grant_effect="allow",
+                row_status="active",
+            )
+        )
+        self.assertTrue(resource_allowed(cfg, "u1", "agent", "dd_reply"))
+        self.assertTrue(resource_allowed(cfg, "u1", "agent", "future_agent"))
+        self.assertTrue(resource_allowed(cfg, "u1", "skill", "kyc-shared"))
+        self.assertTrue(resource_allowed(cfg, "u1", "skill", "future-skill"))
+        payload = agents_payload(cfg, user_id="u1")
+        names = {a["name"] for a in payload["agents"]}
+        self.assertIn("dd_reply", names)
+
+    def test_user_deny_overrides_role_wildcard(self):
+        cfg = _cfg()
+        d = _dir(cfg)
+        d.roles["hq_admin"] = RoleRecord(
+            role_id="hq_admin", role_name="总行平台管理员", row_status="active"
+        )
+        d.users["u1"].role_id = "hq_admin"
+        d.upsert_grant(
+            GrantRecord(
+                grant_id="wa",
+                scope_kind="role",
+                scope_id="hq_admin",
+                resource_kind="agent",
+                resource_id="*",
+                grant_effect="allow",
+                row_status="active",
+            )
+        )
+        d.upsert_grant(
+            GrantRecord(
+                grant_id="ud",
+                scope_kind="user",
+                scope_id="u1",
+                resource_kind="agent",
+                resource_id="dd_reply",
+                grant_effect="deny",
+                row_status="active",
+            )
+        )
+        self.assertFalse(resource_allowed(cfg, "u1", "agent", "dd_reply"))
+        self.assertTrue(resource_allowed(cfg, "u1", "agent", "future_agent"))
+
+    def test_analyst_without_wildcard_still_hidden(self):
+        cfg = _cfg()
+        _dir(cfg)
+        self.assertFalse(resource_allowed(cfg, "u1", "agent", "future_agent"))
+        self.assertFalse(resource_allowed(cfg, "u1", "skill", "kyc-shared"))
+
+    def test_empty_wildcard_id_disables_star(self):
+        cfg = _cfg()
+        cfg.acl.wildcard_id = ""
+        d = _dir(cfg)
+        d.roles["hq_admin"] = RoleRecord(
+            role_id="hq_admin", role_name="总行平台管理员", row_status="active"
+        )
+        d.users["u1"].role_id = "hq_admin"
+        d.upsert_grant(
+            GrantRecord(
+                grant_id="wa",
+                scope_kind="role",
+                scope_id="hq_admin",
+                resource_kind="agent",
+                resource_id="*",
+                grant_effect="allow",
+                row_status="active",
+            )
+        )
+        self.assertFalse(resource_allowed(cfg, "u1", "agent", "dd_reply"))
+
     def test_catalog_hides_unauthorized_agent(self):
         cfg = _cfg()
         _dir(cfg)
@@ -182,7 +278,7 @@ class AclGrantTests(unittest.TestCase):
                     "table_item": "mem_item",
                     "og_schema": "aml_gs",
                 },
-                "acl": {"enabled": True, "default_agent_name": "build"},
+                "acl": {"enabled": True, "default_agent_name": "build", "wildcard_id": "*"},
             }
         )
         self.assertEqual(cfg.memory.backend, "opengauss")
@@ -202,6 +298,7 @@ class AclGrantTests(unittest.TestCase):
         self.assertEqual(cfg.memory.item_keys, "output.language,str.threshold")
         self.assertTrue(cfg.acl.enabled)
         self.assertEqual(cfg.acl.default_agent_name, "build")
+        self.assertEqual(cfg.acl.wildcard_id, "*")
 
 
 class SqlDirectoryProbeTests(unittest.TestCase):

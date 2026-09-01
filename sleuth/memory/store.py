@@ -50,6 +50,20 @@ def _is_active_unexpired(item: MemoryItem, config, now: datetime) -> bool:
     return True
 
 
+def _carry_kb(item: MemoryItem, existing: Optional[MemoryItem], config) -> None:
+    if existing is not None:
+        if not item.kb_status:
+            item.kb_status = existing.kb_status
+        if item.kb_ref is None:
+            item.kb_ref = existing.kb_ref
+        if item.kb_ingested_at is None:
+            item.kb_ingested_at = existing.kb_ingested_at
+        if not item.kb_ingested_by:
+            item.kb_ingested_by = existing.kb_ingested_by
+    if not item.kb_status:
+        item.kb_status = settings.kb_status_none(config)
+
+
 class MemoryStore:
     def available(self) -> bool:
         return True
@@ -92,6 +106,9 @@ class MemoryStore:
         raise NotImplementedError
 
     def mark_used(self, item_ids: Sequence[str]) -> None:
+        raise NotImplementedError
+
+    def set_kb_harvest(self, item: MemoryItem, *, actor: str) -> MemoryItem:
         raise NotImplementedError
 
 
@@ -147,6 +164,7 @@ class InMemoryMemoryStore(MemoryStore):
         item.updated_by = actor
         if not item.row_status:
             item.row_status = settings.row_status_active(self.config)
+        _carry_kb(item, existing, self.config)
         self.items[item.id] = item
         self.audits.append(
             {
@@ -230,6 +248,29 @@ class InMemoryMemoryStore(MemoryStore):
                 continue
             item.last_used_at = now
             item.use_cnt = int(item.use_cnt or 0) + 1
+
+    def set_kb_harvest(self, item: MemoryItem, *, actor: str) -> MemoryItem:
+        now = utc_now()
+        stored = self.items.get(item.id)
+        if stored is None:
+            raise ValueError("memory not found")
+        stored.kb_status = item.kb_status
+        stored.kb_ref = item.kb_ref
+        stored.kb_ingested_at = item.kb_ingested_at
+        stored.kb_ingested_by = item.kb_ingested_by
+        stored.updated_at = now
+        stored.updated_by = actor
+        self.audits.append(
+            {
+                "audit_id": audit_id(),
+                "memory_id": stored.id,
+                "action_type": "kb_harvest",
+                "actor_user_id": actor,
+                "acted_at": now,
+                "detail_text": f"item_key={stored.item_key}; kb_status={stored.kb_status}",
+            }
+        )
+        return stored
 
 
 def psycopg2_missing_message() -> str:
@@ -366,6 +407,7 @@ class OpenGaussStore(MemoryStore):
         item.updated_by = actor
         if not item.row_status:
             item.row_status = settings.row_status_active(self.config)
+        _carry_kb(item, existing, self.config)
         vec = _bind_embedding(item.embedding, self.config)
         body = encode_text_field(item.body_text, self.config)
         payload = encode_text_field(item.payload_text, self.config)
@@ -378,7 +420,8 @@ class OpenGaussStore(MemoryStore):
                     f"UPDATE {table} SET title_text = %s, body_text = {text_ph}, payload_text = {text_ph}, "
                     f"embedding = {emb_ph}, importance_score = %s, confidence_score = %s, "
                     "origin_type = %s, row_status = %s, expire_at = %s, updated_by = %s, "
-                    "updated_at = %s WHERE id = %s",
+                    "updated_at = %s, kb_status = %s, kb_ref = %s, kb_ingested_at = %s, "
+                    "kb_ingested_by = %s WHERE id = %s",
                     (
                         item.title_text,
                         body,
@@ -391,6 +434,10 @@ class OpenGaussStore(MemoryStore):
                         item.expire_at,
                         item.updated_by,
                         item.updated_at,
+                        item.kb_status,
+                        item.kb_ref,
+                        item.kb_ingested_at,
+                        item.kb_ingested_by or None,
                         item.id,
                     ),
                 )
@@ -399,8 +446,9 @@ class OpenGaussStore(MemoryStore):
                     f"INSERT INTO {table} (id, scope_kind, scope_id, scenario_code, mem_kind, "
                     "item_key, title_text, body_text, payload_text, embedding, importance_score, "
                     "confidence_score, origin_type, row_status, expire_at, created_by, "
-                    "updated_by, created_at, updated_at, last_used_at, use_cnt) "
-                    f"VALUES (%s,%s,%s,%s,%s,%s,%s,{text_ph},{text_ph},{emb_ph},%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "updated_by, created_at, updated_at, last_used_at, use_cnt, "
+                    "kb_status, kb_ref, kb_ingested_at, kb_ingested_by) "
+                    f"VALUES (%s,%s,%s,%s,%s,%s,%s,{text_ph},{text_ph},{emb_ph},%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (
                         item.id,
                         item.scope_kind,
@@ -423,6 +471,10 @@ class OpenGaussStore(MemoryStore):
                         item.updated_at,
                         item.last_used_at,
                         int(item.use_cnt or 0),
+                        item.kb_status,
+                        item.kb_ref,
+                        item.kb_ingested_at,
+                        item.kb_ingested_by or None,
                     ),
                 )
             cur.execute(
@@ -488,14 +540,14 @@ class OpenGaussStore(MemoryStore):
         if not clauses:
             return []
         vec = format_vector(query_vec)
-        vec_cast = settings.vector_sql_type(self.config)
+        score_sql, dist_sql = settings.ann_distance_sql(self.config)
         sql = (
-            f"SELECT {_ITEM_COLS}, (1 - (embedding <=> %s::{vec_cast})) AS score "
+            f"SELECT {_ITEM_COLS}, {score_sql} AS score "
             f"FROM {table} WHERE row_status = %s "
             f"AND (expire_at IS NULL OR expire_at > NOW()) "
             f"AND ({' OR '.join(clauses)}) "
             f"AND embedding IS NOT NULL "
-            f"ORDER BY embedding <=> %s::{vec_cast} LIMIT %s"
+            f"ORDER BY {dist_sql} LIMIT %s"
         )
         bind = [vec, active, *params, vec, int(limit)]
         try:
@@ -577,12 +629,49 @@ class OpenGaussStore(MemoryStore):
                 (now, ids),
             )
 
+    def set_kb_harvest(self, item: MemoryItem, *, actor: str) -> MemoryItem:
+        if not self.available():
+            raise RuntimeError("memory store is unavailable")
+        now = utc_now()
+        table = settings.table_item_ref(self.config)
+        audit_table = settings.table_audit_ref(self.config)
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"UPDATE {table} SET kb_status = %s, kb_ref = %s, kb_ingested_at = %s, "
+                "kb_ingested_by = %s, updated_by = %s, updated_at = %s WHERE id = %s",
+                (
+                    item.kb_status,
+                    item.kb_ref,
+                    item.kb_ingested_at,
+                    item.kb_ingested_by or None,
+                    actor,
+                    now,
+                    item.id,
+                ),
+            )
+            cur.execute(
+                f"INSERT INTO {audit_table} (audit_id, memory_id, action_type, actor_user_id, "
+                "acted_at, detail_text) VALUES (%s,%s,%s,%s,%s,%s)",
+                (
+                    audit_id(),
+                    item.id,
+                    "kb_harvest",
+                    actor,
+                    now,
+                    f"item_key={item.item_key}; kb_status={item.kb_status}",
+                ),
+            )
+        item.updated_at = now
+        item.updated_by = actor
+        return item
+
 
 _ITEM_COLS = (
     "id, scope_kind, scope_id, scenario_code, mem_kind, item_key, title_text, "
     "body_text, payload_text, embedding, importance_score, confidence_score, "
     "origin_type, row_status, expire_at, created_by, updated_by, created_at, "
-    "updated_at, last_used_at, use_cnt"
+    "updated_at, last_used_at, use_cnt, kb_status, kb_ref, kb_ingested_at, kb_ingested_by"
 )
 
 
@@ -682,6 +771,10 @@ def _row_to_item(row) -> Optional[MemoryItem]:
         updated_at=row[18],
         last_used_at=row[19],
         use_cnt=int(row[20] or 0),
+        kb_status="" if row[21] is None else str(row[21]),
+        kb_ref=None if row[22] is None else str(row[22]),
+        kb_ingested_at=row[23],
+        kb_ingested_by="" if row[24] is None else str(row[24]),
     )
 
 

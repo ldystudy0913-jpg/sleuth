@@ -40,6 +40,26 @@ class SkillTool:
                 f'Skill "{p.name}" not found. Available skills: {available}',
             )
 
+        session = getattr(ctx, "session", None)
+        cfg = getattr(session, "config", None) if session is not None else None
+        if session is not None and cfg is not None:
+            from ..memory.acl import resource_allowed
+
+            owner = (getattr(info, "owner_agent", None) or "").strip()
+            user_id = getattr(session, "user_id", None) or ""
+            if owner:
+                current = cfg.resolve_agent_name(getattr(session, "agent_name", None) or "")
+                if cfg.resolve_agent_name(owner) != current:
+                    return ToolResult.error(
+                        "skill",
+                        f'permission denied: skill "{info.name}" is private to another agent',
+                    )
+            elif not resource_allowed(cfg, user_id, "skill", info.name):
+                return ToolResult.error(
+                    "skill",
+                    f'permission denied: skill not authorized: {info.name}',
+                )
+
         # Dependency warnings (mcp / tools frontmatter)
         tool_names: list = []
         session = getattr(ctx, "session", None)

@@ -109,6 +109,16 @@ class MemoryPrivacyTests(unittest.TestCase):
         self.assertIn("memory_search", names)
         self.assertIn("memory_write", names)
         self.assertIn("memory_forget", names)
+        from sleuth.tools.base import to_provider_spec
+        from sleuth.tools.memory_write import MemoryWriteTool
+
+        spec = to_provider_spec(MemoryWriteTool())
+        guide = spec["parameters_json_schema"]["properties"]["item_key"]["description"]
+        self.assertIn("str.threshold", guide)
+        self.assertIn("口径", guide)
+        self.assertIn("usage.tables", guide)
+        self.assertIn("常用表", guide)
+        self.assertNotIn("output.language, str.threshold, workflow.steps", guide)
 
     def test_og_schema_qualifies_table_and_skips_information_schema(self):
         from sleuth.memory import settings as memory_settings

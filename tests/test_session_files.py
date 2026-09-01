@@ -13,10 +13,10 @@ from sleuth.files.cos import CosNotConfigured, MemoryObjectStore
 from sleuth.files.ingest import wait_extracts
 from sleuth.files.mailbox import (
     MailboxError,
-    complete_upload,
-    create_upload,
     harvest_tool_files,
+    ingest_user_file,
     object_key,
+    open_plaintext,
     public_files,
     put_generated_text,
 )
@@ -41,6 +41,7 @@ def _cfg() -> Config:
     cfg.cos.path_prefix = "mailbox"
     cfg.files.max_bytes = 1024
     cfg.files.max_count = 4
+    cfg.files.require_encrypt = False
     cfg.kb.api_url = "http://kb.test/search"
     cfg.kb.login_url = "http://kb.test/login"
     cfg.kb.openid = "oid"
@@ -126,53 +127,70 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(key, "sleuth/files/alice/sess_abc/file_xyz/notes.txt")
         self.assertFalse(key.startswith("sleuth/alice/"))
 
-    def test_upload_complete_and_oversize(self):
+    def test_ingest_and_oversize(self):
         cfg = _cfg()
         mem = MemoryObjectStore()
         with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             rec = _rec(store)
             with self.assertRaises(MailboxError) as ctx:
-                create_upload(
+                ingest_user_file(
                     config=cfg,
                     store=store,
                     rec=rec,
                     filename="big.txt",
                     mime="text/plain",
-                    size=5000,
+                    data=b"x" * 5000,
                     object_store=mem,
                 )
             self.assertEqual(ctx.exception.status, 413)
 
             rec = store.get_session(rec.id)
-            payload = create_upload(
+            item = ingest_user_file(
                 config=cfg,
                 store=store,
                 rec=rec,
                 filename="notes.txt",
                 mime="text/plain",
-                size=5,
-                object_store=mem,
-            )
-            self.assertIn("upload_url", payload)
-            self.assertTrue(payload["object_key"].startswith("mailbox/"))
-            mem.put_bytes(key=payload["object_key"], data=b"hello", mime="text/plain")
-            rec = store.get_session(rec.id)
-            item = complete_upload(
-                config=cfg,
-                store=store,
-                rec=rec,
-                file_id=payload["file_id"],
+                data=b"hello",
                 object_store=mem,
             )
             self.assertEqual(item["status"], "ready")
+            self.assertTrue(item["object_key"].startswith("mailbox/"))
             self.assertEqual(item["size"], 5)
-            self.assertEqual(item.get("excerpt_status"), "pending")
-            wait_extracts(3.0)
+            stored = mem.get_bytes(item["object_key"])
+            self.assertEqual(stored, b"hello")
             rec = store.get_session(rec.id)
-            listed = public_files(rec)
+            listed = public_files(rec, config=cfg)
             self.assertEqual(len(listed), 1)
-            self.assertEqual(listed[0]["id"], payload["file_id"])
+            self.assertEqual(listed[0]["id"], item["id"])
+            wait_extracts(3.0)
+
+    def test_encrypt_at_rest_download_is_plaintext(self):
+        cfg = _cfg()
+        cfg.files.require_encrypt = True
+        cfg.files.sm4_key = "0123456789abcdef"
+        mem = MemoryObjectStore()
+        with tempfile.TemporaryDirectory() as td:
+            store = SQLiteStore(Path(td) / "t.db")
+            rec = _rec(store)
+            item = ingest_user_file(
+                config=cfg,
+                store=store,
+                rec=rec,
+                filename="notes.txt",
+                mime="text/plain",
+                data=b"hello",
+                object_store=mem,
+            )
+            cipher = mem.get_bytes(item["object_key"])
+            self.assertNotEqual(cipher, b"hello")
+            rec = store.get_session(rec.id)
+            _meta, plain = open_plaintext(
+                config=cfg, rec=rec, file_id=item["id"], object_store=mem
+            )
+            self.assertEqual(plain, b"hello")
+            wait_extracts(3.0)
 
     def test_put_generated_text_and_harvest(self):
         cfg = _cfg()
@@ -216,13 +234,13 @@ class MailboxTests(unittest.TestCase):
 
 
 class PermissionBuildTests(unittest.TestCase):
-    def test_default_agent_allows_kb_and_mailbox_and_ddreply(self):
+    def test_default_agent_allows_kb_and_mailbox(self):
         rules = build_rules()
         self.assertEqual(evaluate("kb_lookup", "*", rules).action, "allow")
         self.assertEqual(evaluate("save_output_file", "*", rules).action, "allow")
         self.assertEqual(evaluate("read_session_file", "*", rules).action, "allow")
         self.assertEqual(
-            evaluate("ddreply_lookup_risk_kb", "*", rules).action, "allow"
+            evaluate("ddreply_lookup_risk_kb", "*", rules).action, "ask"
         )
 
 
@@ -283,6 +301,39 @@ class BuiltinToolTests(unittest.TestCase):
         self.assertIn("download_url", body)
 
 
+class DownloadDispositionTests(unittest.TestCase):
+    def _req(self, **query):
+        class Req:
+            query_params = query
+
+        return Req()
+
+    def test_ascii_filename_stays_simple(self):
+        from sleuth.files.http_io import download_disposition_header
+
+        header = download_disposition_header(self._req(), _cfg(), "notes.txt")
+        self.assertEqual(header, 'attachment; filename="notes.txt"')
+        header.encode("latin-1")
+
+    def test_non_ascii_filename_uses_rfc5987(self):
+        from urllib.parse import quote
+
+        from sleuth.files.http_io import download_disposition_header
+
+        header = download_disposition_header(self._req(), _cfg(), "报告.pdf")
+        self.assertIn('filename="_.pdf"', header)
+        self.assertIn("filename*=UTF-8''", header)
+        self.assertIn(quote("报告.pdf", safe=""), header)
+        header.encode("latin-1")
+
+    def test_inline_query_still_works(self):
+        from sleuth.files.http_io import download_disposition_header
+
+        header = download_disposition_header(self._req(inline="1"), _cfg(), "a.txt")
+        self.assertTrue(header.startswith("inline;"))
+        header.encode("latin-1")
+
+
 class HttpFileRouteTests(unittest.TestCase):
     def test_uploads_complete_list_download_and_413(self):
         try:
@@ -292,6 +343,17 @@ class HttpFileRouteTests(unittest.TestCase):
 
         cfg = _cfg()
         mem = MemoryObjectStore()
+
+        payloads = iter(
+            [
+                ("big.bin", "application/octet-stream", b"x" * 5000),
+                ("notes.txt", "text/plain", b"hello"),
+            ]
+        )
+
+        async def _mp(_request, _config):
+            return next(payloads)
+
         with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             rec = _rec(store, sid="sess_httptest000000000001")
@@ -301,32 +363,35 @@ class HttpFileRouteTests(unittest.TestCase):
                 "sleuth.server.app.load", return_value=cfg
             ), patch(
                 "sleuth.files.mailbox.object_store_from_config", return_value=mem
+            ), patch(
+                "sleuth.files.http_io.read_multipart_upload",
+                side_effect=_mp,
             ):
                 app = create_app(workdir=Path(td))
                 client = TestClient(app)
                 headers = {"X-User-Id": "alice"}
-                too_big = client.post(
-                    f"/v1/sessions/{rec.id}/files/uploads",
-                    headers=headers,
-                    json={"filename": "big.bin", "mime": "application/octet-stream", "size": 99999},
-                )
-                self.assertEqual(too_big.status_code, 413)
-
-                up = client.post(
+                gone = client.post(
                     f"/v1/sessions/{rec.id}/files/uploads",
                     headers=headers,
                     json={"filename": "notes.txt", "mime": "text/plain", "size": 5},
                 )
+                self.assertEqual(gone.status_code, 410)
+
+                too_big = client.post(
+                    f"/v1/sessions/{rec.id}/files",
+                    headers=headers,
+                )
+                self.assertEqual(too_big.status_code, 413)
+
+                up = client.post(
+                    f"/v1/sessions/{rec.id}/files",
+                    headers=headers,
+                )
                 self.assertEqual(up.status_code, 200, up.text)
                 body = up.json()
-                mem.put_bytes(key=body["object_key"], data=b"hello", mime="text/plain")
-                done = client.post(
-                    f"/v1/sessions/{rec.id}/files/complete",
-                    headers=headers,
-                    json={"file_id": body["file_id"]},
-                )
-                self.assertEqual(done.status_code, 200, done.text)
-                self.assertEqual(done.json()["status"], "ready")
+                self.assertEqual(body["status"], "ready")
+                self.assertEqual(body["size"], 5)
+                fid = body["id"]
                 wait_extracts(3.0)
 
                 listed = client.get(f"/v1/sessions/{rec.id}/files", headers=headers)
@@ -334,12 +399,22 @@ class HttpFileRouteTests(unittest.TestCase):
                 self.assertEqual(len(listed.json()["files"]), 1)
 
                 dl = client.get(
-                    f"/v1/sessions/{rec.id}/files/{body['file_id']}?json=1",
+                    f"/v1/sessions/{rec.id}/files/{fid}",
                     headers=headers,
                 )
                 self.assertEqual(dl.status_code, 200)
-                self.assertIn("download_url", dl.json())
-                self.assertTrue(dl.json()["download_url"].startswith("https://"))
+                self.assertEqual(dl.content, b"hello")
+
+                deleted = client.delete(
+                    f"/v1/sessions/{rec.id}/files/{fid}",
+                    headers=headers,
+                )
+                self.assertEqual(deleted.status_code, 200)
+                missing = client.get(
+                    f"/v1/sessions/{rec.id}/files/{fid}",
+                    headers=headers,
+                )
+                self.assertEqual(missing.status_code, 404)
 
     def test_uploads_without_cos_is_503(self):
         try:
@@ -348,6 +423,11 @@ class HttpFileRouteTests(unittest.TestCase):
             self.skipTest("starlette TestClient not available")
 
         cfg = Config()
+        cfg.files.require_encrypt = False
+
+        async def _mp(_request, _config):
+            return "a.txt", "text/plain", b"x"
+
         with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             rec = _rec(store, sid="sess_httptest000000000002")
@@ -358,13 +438,15 @@ class HttpFileRouteTests(unittest.TestCase):
             ), patch(
                 "sleuth.files.mailbox.object_store_from_config",
                 side_effect=CosNotConfigured("COS is not configured"),
+            ), patch(
+                "sleuth.files.http_io.read_multipart_upload",
+                side_effect=_mp,
             ):
                 app = create_app(workdir=Path(td))
                 client = TestClient(app)
                 res = client.post(
-                    f"/v1/sessions/{rec.id}/files/uploads",
+                    f"/v1/sessions/{rec.id}/files",
                     headers={"X-User-Id": "alice"},
-                    json={"filename": "a.txt", "mime": "text/plain", "size": 1},
                 )
             self.assertEqual(res.status_code, 503)
 

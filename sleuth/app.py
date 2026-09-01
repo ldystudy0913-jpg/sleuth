@@ -119,7 +119,18 @@ def _bind_session_mcp(session: Session, mgr) -> None:
     prev = getattr(session, "_mcp_tool_names", set()) or set()
     for name in prev:
         session.registry._tools.pop(name, None)
-    tools = bridge_tools(mgr)
+    # Also drop any MCP tools that were registered before the first bind
+    # (build_registry attaches the unfiltered set).
+    from .mcp.bridge import McpBridgeTool
+
+    extra = [
+        name
+        for name, tool in list(session.registry._tools.items())
+        if isinstance(tool, McpBridgeTool) and name not in prev
+    ]
+    for name in extra:
+        session.registry._tools.pop(name, None)
+    tools = bridge_tools(mgr, session=session)
     session.registry.register_many(tools)
     session._mcp_tool_names = {t.name for t in tools}
     session._mcp_card_names = set(mgr.agent_cards.keys())
@@ -180,8 +191,7 @@ def build_session(
             sess.role_id = None
             sess.org_id = None
         if mcp_manager is not None:
-            sess._mcp_tool_names = set(mcp_manager.tools.keys())
-            sess._mcp_card_names = set(mcp_manager.agent_cards.keys())
+            _bind_session_mcp(sess, mcp_manager)
         else:
             sess._mcp_tool_names = set()
             sess._mcp_card_names = set()
@@ -251,4 +261,15 @@ def build_session(
 
 
 def reload_skills(config: Optional[Config] = None, workdir: Optional[Path] = None):
-    return refresh_skills(config, workdir, force=True)
+    from .skill import get_skills
+
+    workdir = workdir or Path.cwd()
+    config = config or load(workdir)
+    refresh_skills(config, workdir, force=True)
+    try:
+        from .mcp import get_manager
+
+        _apply_mcp_cards(config, get_manager(config))
+    except Exception:
+        pass
+    return get_skills()

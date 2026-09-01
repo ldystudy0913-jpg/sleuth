@@ -105,8 +105,26 @@ class McpBridgeTool:
         }
         self._info = info
         self._manager = manager
+        self.owner_agent = None
 
     def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
+        session = getattr(ctx, "session", None)
+        owner = getattr(self, "owner_agent", None)
+        if owner is None and session is not None and self._manager is not None:
+            from .access import mcp_server_owner_agent
+
+            owner = mcp_server_owner_agent(
+                session.config, self._manager, self._info.server
+            )
+        if session is not None:
+            from .access import session_may_use_owner_agent
+
+            if not session_may_use_owner_agent(session, owner):
+                return ToolResult.error(
+                    self.name,
+                    "permission denied: agent MCP not allowed for this session",
+                    server=self._info.server,
+                )
         try:
             ctx.ask(self.name, ["*"], ["*"])
         except Exception as exc:
@@ -129,5 +147,19 @@ class McpBridgeTool:
         )
 
 
-def bridge_tools(manager: McpManager) -> List["Tool"]:
-    return [McpBridgeTool(info, manager) for info in manager.tools.values()]
+def bridge_tools(manager: McpManager, session=None) -> List["Tool"]:
+    tools = [McpBridgeTool(info, manager) for info in manager.tools.values()]
+    if session is None:
+        return tools
+    from .access import mcp_server_owner_agent, session_may_use_owner_agent
+
+    kept: List["Tool"] = []
+    cfg = getattr(session, "config", None)
+    for tool in tools:
+        owner = None
+        if cfg is not None:
+            owner = mcp_server_owner_agent(cfg, manager, tool._info.server)
+        tool.owner_agent = owner
+        if session_may_use_owner_agent(session, owner):
+            kept.append(tool)
+    return kept

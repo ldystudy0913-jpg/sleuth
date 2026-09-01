@@ -29,6 +29,8 @@ class AgentConfig:
     description: Optional[str] = None
     mode: str = "all"  # "primary" | "subagent" | "all"
     hidden: bool = False
+    # Catalog skill names this agent auto-injects (COS/local reuse). Not a user pin list.
+    skill_names: List[str] = field(default_factory=list)
 
     def merge(self, other: Dict[str, Any]) -> "AgentConfig":
         if "title" in other and other["title"] is not None:
@@ -49,6 +51,22 @@ class AgentConfig:
             self.mode = str(other["mode"])
         if "hidden" in other and other["hidden"] is not None:
             self.hidden = bool(other["hidden"])
+        raw_sk = other.get("skills")
+        if isinstance(raw_sk, list):
+            names: List[str] = []
+            seen = set()
+            for item in raw_sk:
+                if isinstance(item, str):
+                    n = item.strip()
+                elif isinstance(item, dict):
+                    n = str(item.get("name") or "").strip()
+                else:
+                    n = ""
+                if n and n not in seen:
+                    seen.add(n)
+                    names.append(n)
+            if names:
+                self.skill_names = names
         return self
 
 
@@ -125,6 +143,7 @@ class CosConfig:
     path_prefix: str = "sleuth/files"
     addressing_style: str = ""
     signature_version: str = ""
+    read_chunk_bytes: int = 262144
 
     def configured(self) -> bool:
         return bool(
@@ -137,7 +156,7 @@ class CosConfig:
 
 @dataclass
 class FilesConfig:
-    """Session file mailbox limits (upload / complete / generated return)."""
+    """Session file mailbox. Defaults live here only — business code reads Config."""
 
     max_bytes: int = 52_428_800
     max_count: int = 20
@@ -145,11 +164,89 @@ class FilesConfig:
     presign_get_expires: int = 300
     # Empty or "*" = any MIME; otherwise CSV / JSONC list (supports "image/*").
     mime_allow: List[str] = field(default_factory=list)
+    # 白名单里表示「任意 MIME」的记号（CSV）
+    mime_wildcard: str = "*,*/*"
     sm4_key: str = ""
     require_encrypt: bool = True
+    enc_algo: str = "sm4-cbc-kiv"
+    cipher_mime: str = "application/octet-stream"
+    default_mime: str = "application/octet-stream"
+    fallback_filename: str = "file"
+    anonymous_user_id: str = "anonymous"
+    filename_max_chars: int = 180
+    object_key_seg_max_chars: int = 80
+    harvest_filename: str = "output"
+    allowed_url_schemes: str = "https"
+    blocked_url_prefixes: str = "data:,file:"
+    upload_form_field: str = "file"
+    upload_filename_field: str = "filename"
+    upload_mime_field: str = "mime"
+    download_path_template: str = "/v1/sessions/{session_id}/files/{file_id}"
+    download_disposition: str = "attachment"
+    inline_disposition: str = "inline"
+    inline_query_param: str = "inline"
+    inline_query_truthy: str = "1,true,yes,on"
+    include_pending_query: str = "include_pending"
+    generated_mime: str = "text/plain; charset=utf-8"
+    deprecated_presign_message: str = (
+        "presigned COS upload is retired; POST multipart /v1/sessions/{session_id}/files"
+    )
+    status_ready: str = "ready"
+    excerpt_pending: str = "pending"
+    excerpt_ok: str = "ok"
+    excerpt_skipped: str = "skipped"
+    role_user: str = "user"
+    role_assistant: str = "assistant"
+    missing_upload_message: str = "file is required"
+    err_file_not_found: str = "file not found"
+    err_no_object_key: str = "file has no object_key"
+    err_sm4_key: str = "SM4 key not configured"
+    err_filename_required: str = "filename required"
+    prompt_preamble: str = (
+        "# Session files\n"
+        "The user attached files to this session. Excerpts were extracted in-process "
+        "after decrypting ciphertext. For images and scanned PDFs with no text layer, "
+        "the excerpt is a vision description of what the file shows plus visible text. "
+        "Answer questions such as what the picture is doing from that excerpt. "
+        "Do not say the system failed to attach the image. Do not recite full ID numbers.\n"
+        "If the excerpt is missing what the user asked, call `read_session_file` with "
+        "the user's question in `question`. If truncated or still pending and you only "
+        "need the cached text, call `read_session_file` without `question`. "
+        "MCP tools receive `attachment_refs_json` (including excerpt). "
+        "Use `kb_lookup` to search the knowledge base.\n"
+        "To return a generated text file, call `save_output_file`. Do not embed file bytes or data-URLs.\n"
+        "Attached:"
+    )
+    prompt_item_line: str = (
+        "- `{id}` {filename} ({mime}, {size} bytes) excerpt_status={status} parser={parser}"
+    )
+    prompt_excerpt_prefix: str = "  excerpt{mark}:"
+    prompt_truncated_mark: str = " (truncated)"
+    prompt_skipped_line: str = "  skipped: {skipped}"
+    prompt_pending_line: str = (
+        "  excerpt: still parsing; use the filename or call read_session_file"
+    )
     excerpt_max_chars: int = 8000
+    excerpt_reread_max_chars: int = 50000
     image_mode: str = "vision"
     vision_model: str = ""
+    vision_prompt: str = (
+        "先用一两段话说明图片在展示什么（场景、界面或人物、正在发生的动作）；"
+        "再列出图中全部可见文字。证件或表单按字段列出。看不清的不要编造。"
+    )
+    vision_focus_prompt: str = (
+        "先回答下面的用户问题，再列出图中全部可见文字。看不清的不要编造。\n"
+        "用户问题：{question}"
+    )
+    pdf_render_dpi: int = 110
+    pdf_vision_max_pages: int = 8
+    pdf_page_prefix: str = "# page {n}\n"
+    image_exts: str = ".jpg,.jpeg,.png,.webp,.gif"
+    pdf_exts: str = ".pdf"
+    xlsx_exts: str = ".xlsx"
+    xls_exts: str = ".xls"
+    docx_exts: str = ".docx"
+    text_exts: str = ".txt,.md,.csv,.json,.xml,.html,.htm,.log,.yaml,.yml"
     extract_concurrency: int = 2
     extract_timeout_s: float = 45.0
     prompt_wait_s: float = 8.0
@@ -233,8 +330,9 @@ class MemoryConfig:
     #   SLEUTH_MEMORY_ITEM_KEYS         / jsonc memory.item_keys
     # 域：output回复呈现 workflow作业步骤 str可疑报告 dd尽调 screening筛查
     #     rating评级 policy制度 avoid负向约束 pattern分析套路 customer客户事实
+    #     usage用数习惯（常用表/字段等）
     item_key_domains: str = (
-        "output,workflow,str,dd,screening,rating,policy,avoid,pattern,customer"
+        "output,workflow,str,dd,screening,rating,policy,avoid,pattern,customer,usage"
     )
     # 方面（键=域.方面）：
     # output.language 回复语言  output.structure 回复结构  output.tone 回复语气
@@ -247,6 +345,7 @@ class MemoryConfig:
     # avoid.verbose_english 避免英文长段  avoid.raw_id 避免原文证件号
     # pattern.cash_night 夜间现金套路  pattern.mule 分散对手/骡子套路
     # customer.segment 客群  customer.risk_note 风险备注  customer.id 客户标识口径（已脱敏）
+    # usage.tables 常用表  usage.fields 常用字段  usage.habit 其他用数习惯
     item_keys: str = (
         "output.language,output.structure,output.tone,"
         "workflow.steps,"
@@ -257,7 +356,8 @@ class MemoryConfig:
         "policy.branch,policy.head,"
         "avoid.verbose_english,avoid.raw_id,"
         "pattern.cash_night,pattern.mule,"
-        "customer.segment,customer.risk_note,customer.id"
+        "customer.segment,customer.risk_note,customer.id,"
+        "usage.tables,usage.fields,usage.habit"
     )
     vector_kind: str = "vector"
     text_kind: str = "text"
@@ -265,6 +365,11 @@ class MemoryConfig:
     origins: str = "user_explicit,agent_inferred,admin"
     row_status_active: str = "active"
     row_status_archived: str = "archived"
+    # 知识库收纳生命周期（不要并进 row_status）。已入库后若正文再改，写入会把 ingested 打成 stale。
+    kb_status_none: str = "none"
+    kb_status_nominated: str = "nominated"
+    kb_status_ingested: str = "ingested"
+    kb_status_stale: str = "stale"
 
 
 @dataclass
@@ -282,8 +387,18 @@ class AclConfig:
     row_status_disabled: str = "disabled"
     grant_allow: str = "allow"
     grant_deny: str = "deny"
+    wildcard_id: str = "*"
     scope_kinds: str = "role,org,user"
     resource_kinds: str = "agent,skill"
+
+
+@dataclass
+class PrivacyConfig:
+    """Output PII masks. Window values are unix epoch milliseconds."""
+
+    skip_unix_ms: bool = True
+    unix_ms_min: int = 946_684_800_000  # 2000-01-01T00:00:00Z
+    unix_ms_max: int = 4_102_444_800_000  # 2100-01-01T00:00:00Z
 
 
 @dataclass
@@ -324,6 +439,9 @@ class Config:
     kb: KbConfig = field(default_factory=KbConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     acl: AclConfig = field(default_factory=AclConfig)
+    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
+    # Session list / trace display timezone (env SLEUTH_TIMEZONE wins).
+    timezone: str = "Asia/Shanghai"
     # Product disclosure guardrails (block sleuth internals / secrets).
     guardrails: bool = True
     # Scrub PII (ID / mobile / bank / password / labeled address) on outputs.
@@ -495,6 +613,11 @@ class Config:
             self._merge_memory(raw["memory"])
         if "acl" in raw and isinstance(raw["acl"], dict):
             self._merge_acl(raw["acl"])
+        if "privacy" in raw and isinstance(raw["privacy"], dict):
+            self._merge_privacy(raw["privacy"])
+        tz = raw.get("timezone")
+        if tz is not None and str(tz).strip():
+            self.timezone = str(tz).strip()
         self._merge_mcp(raw)
         self._merge_skills(raw)
         return self
@@ -546,6 +669,14 @@ class Config:
             if val is None or val == "":
                 continue
             setattr(self.cos, attr, str(val))
+        chunk = block.get("read_chunk_bytes")
+        if chunk is None:
+            chunk = block.get("readChunkBytes")
+        if chunk is not None and chunk != "":
+            try:
+                self.cos.read_chunk_bytes = int(chunk)
+            except (TypeError, ValueError):
+                pass
 
     def _merge_files(self, block: Dict[str, Any]) -> None:
         for src, attr in (
@@ -559,8 +690,18 @@ class Config:
             ("presignGetExpires", "presign_get_expires"),
             ("excerpt_max_chars", "excerpt_max_chars"),
             ("excerptMaxChars", "excerpt_max_chars"),
+            ("excerpt_reread_max_chars", "excerpt_reread_max_chars"),
+            ("excerptRereadMaxChars", "excerpt_reread_max_chars"),
+            ("pdf_render_dpi", "pdf_render_dpi"),
+            ("pdfRenderDpi", "pdf_render_dpi"),
+            ("pdf_vision_max_pages", "pdf_vision_max_pages"),
+            ("pdfVisionMaxPages", "pdf_vision_max_pages"),
             ("extract_concurrency", "extract_concurrency"),
             ("extractConcurrency", "extract_concurrency"),
+            ("filename_max_chars", "filename_max_chars"),
+            ("filenameMaxChars", "filename_max_chars"),
+            ("object_key_seg_max_chars", "object_key_seg_max_chars"),
+            ("objectKeySegMaxChars", "object_key_seg_max_chars"),
         ):
             val = block.get(src)
             if val is None or val == "":
@@ -589,6 +730,98 @@ class Config:
             ("imageMode", "image_mode"),
             ("vision_model", "vision_model"),
             ("visionModel", "vision_model"),
+            ("vision_prompt", "vision_prompt"),
+            ("visionPrompt", "vision_prompt"),
+            ("vision_focus_prompt", "vision_focus_prompt"),
+            ("visionFocusPrompt", "vision_focus_prompt"),
+            ("pdf_page_prefix", "pdf_page_prefix"),
+            ("pdfPagePrefix", "pdf_page_prefix"),
+            ("image_exts", "image_exts"),
+            ("imageExts", "image_exts"),
+            ("pdf_exts", "pdf_exts"),
+            ("pdfExts", "pdf_exts"),
+            ("xlsx_exts", "xlsx_exts"),
+            ("xlsxExts", "xlsx_exts"),
+            ("xls_exts", "xls_exts"),
+            ("xlsExts", "xls_exts"),
+            ("docx_exts", "docx_exts"),
+            ("docxExts", "docx_exts"),
+            ("text_exts", "text_exts"),
+            ("textExts", "text_exts"),
+            ("enc_algo", "enc_algo"),
+            ("encAlgo", "enc_algo"),
+            ("cipher_mime", "cipher_mime"),
+            ("cipherMime", "cipher_mime"),
+            ("upload_form_field", "upload_form_field"),
+            ("uploadFormField", "upload_form_field"),
+            ("upload_filename_field", "upload_filename_field"),
+            ("uploadFilenameField", "upload_filename_field"),
+            ("upload_mime_field", "upload_mime_field"),
+            ("uploadMimeField", "upload_mime_field"),
+            ("download_path_template", "download_path_template"),
+            ("downloadPathTemplate", "download_path_template"),
+            ("download_disposition", "download_disposition"),
+            ("downloadDisposition", "download_disposition"),
+            ("inline_disposition", "inline_disposition"),
+            ("inlineDisposition", "inline_disposition"),
+            ("inline_query_param", "inline_query_param"),
+            ("inlineQueryParam", "inline_query_param"),
+            ("inline_query_truthy", "inline_query_truthy"),
+            ("inlineQueryTruthy", "inline_query_truthy"),
+            ("include_pending_query", "include_pending_query"),
+            ("includePendingQuery", "include_pending_query"),
+            ("generated_mime", "generated_mime"),
+            ("generatedMime", "generated_mime"),
+            ("deprecated_presign_message", "deprecated_presign_message"),
+            ("deprecatedPresignMessage", "deprecated_presign_message"),
+            ("mime_wildcard", "mime_wildcard"),
+            ("mimeWildcard", "mime_wildcard"),
+            ("default_mime", "default_mime"),
+            ("defaultMime", "default_mime"),
+            ("fallback_filename", "fallback_filename"),
+            ("fallbackFilename", "fallback_filename"),
+            ("anonymous_user_id", "anonymous_user_id"),
+            ("anonymousUserId", "anonymous_user_id"),
+            ("harvest_filename", "harvest_filename"),
+            ("harvestFilename", "harvest_filename"),
+            ("allowed_url_schemes", "allowed_url_schemes"),
+            ("allowedUrlSchemes", "allowed_url_schemes"),
+            ("blocked_url_prefixes", "blocked_url_prefixes"),
+            ("blockedUrlPrefixes", "blocked_url_prefixes"),
+            ("status_ready", "status_ready"),
+            ("statusReady", "status_ready"),
+            ("excerpt_pending", "excerpt_pending"),
+            ("excerptPending", "excerpt_pending"),
+            ("excerpt_ok", "excerpt_ok"),
+            ("excerptOk", "excerpt_ok"),
+            ("excerpt_skipped", "excerpt_skipped"),
+            ("excerptSkipped", "excerpt_skipped"),
+            ("role_user", "role_user"),
+            ("roleUser", "role_user"),
+            ("role_assistant", "role_assistant"),
+            ("roleAssistant", "role_assistant"),
+            ("missing_upload_message", "missing_upload_message"),
+            ("missingUploadMessage", "missing_upload_message"),
+            ("err_file_not_found", "err_file_not_found"),
+            ("errFileNotFound", "err_file_not_found"),
+            ("err_no_object_key", "err_no_object_key"),
+            ("errNoObjectKey", "err_no_object_key"),
+            ("err_sm4_key", "err_sm4_key"),
+            ("errSm4Key", "err_sm4_key"),
+            ("err_filename_required", "err_filename_required"),
+            ("errFilenameRequired", "err_filename_required"),
+            ("prompt_preamble", "prompt_preamble"),
+            ("promptPreamble", "prompt_preamble"),
+            ("prompt_item_line", "prompt_item_line"),
+            ("promptItemLine", "prompt_item_line"),
+            ("prompt_excerpt_prefix", "prompt_excerpt_prefix"),
+            ("promptExcerptPrefix", "prompt_excerpt_prefix"),
+            ("prompt_truncated_mark", "prompt_truncated_mark"),
+            ("promptTruncatedMark", "prompt_truncated_mark"),
+            ("prompt_skipped_line", "prompt_skipped_line"),
+            ("promptSkippedLine", "prompt_skipped_line"),
+            ("prompt_pending_line", "prompt_pending_line"),
+            ("promptPendingLine", "prompt_pending_line"),
         ):
             val = block.get(src)
             if val is None:
@@ -734,6 +967,14 @@ class Config:
             ("rowStatusActive", "row_status_active"),
             ("row_status_archived", "row_status_archived"),
             ("rowStatusArchived", "row_status_archived"),
+            ("kb_status_none", "kb_status_none"),
+            ("kbStatusNone", "kb_status_none"),
+            ("kb_status_nominated", "kb_status_nominated"),
+            ("kbStatusNominated", "kb_status_nominated"),
+            ("kb_status_ingested", "kb_status_ingested"),
+            ("kbStatusIngested", "kb_status_ingested"),
+            ("kb_status_stale", "kb_status_stale"),
+            ("kbStatusStale", "kb_status_stale"),
         )
         for src, attr in str_keys:
             val = block.get(src)
@@ -800,6 +1041,8 @@ class Config:
             ("grantAllow", "grant_allow"),
             ("grant_deny", "grant_deny"),
             ("grantDeny", "grant_deny"),
+            ("wildcard_id", "wildcard_id"),
+            ("wildcardId", "wildcard_id"),
             ("scope_kinds", "scope_kinds"),
             ("scopeKinds", "scope_kinds"),
             ("resource_kinds", "resource_kinds"),
@@ -822,6 +1065,34 @@ class Config:
                 setattr(self.acl, attr, val)
             else:
                 setattr(self.acl, attr, str(val).strip().lower() in ("1", "true", "yes", "on"))
+
+    def _merge_privacy(self, block: Dict[str, Any]) -> None:
+        skip = block.get("skip_unix_ms")
+        if skip is None:
+            skip = block.get("skipUnixMs")
+        if skip is not None:
+            if isinstance(skip, bool):
+                self.privacy.skip_unix_ms = skip
+            else:
+                self.privacy.skip_unix_ms = str(skip).strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+        for src, attr in (
+            ("unix_ms_min", "unix_ms_min"),
+            ("unixMsMin", "unix_ms_min"),
+            ("unix_ms_max", "unix_ms_max"),
+            ("unixMsMax", "unix_ms_max"),
+        ):
+            val = block.get(src)
+            if val is None:
+                continue
+            try:
+                setattr(self.privacy, attr, int(val))
+            except (TypeError, ValueError):
+                continue
 
     def _merge_mcp(self, raw: Dict[str, Any]) -> None:
         if "mcpServers" in raw and isinstance(raw["mcpServers"], dict):
@@ -1221,6 +1492,18 @@ def _apply_env(cfg: Config) -> None:
     user = os.environ.get("SLEUTH_USER_ID") or os.environ.get("OPENCODE_USER_ID")
     if user:
         cfg.user_id = user
+    tz = os.environ.get("SLEUTH_TIMEZONE")
+    if tz and tz.strip():
+        cfg.timezone = tz.strip()
+    skip_ms = _env_bool("SLEUTH_PRIVACY_SKIP_UNIX_MS")
+    if skip_ms is not None:
+        cfg.privacy.skip_unix_ms = skip_ms
+    ms_min = _env_int("SLEUTH_PRIVACY_UNIX_MS_MIN")
+    if ms_min is not None:
+        cfg.privacy.unix_ms_min = ms_min
+    ms_max = _env_int("SLEUTH_PRIVACY_UNIX_MS_MAX")
+    if ms_max is not None:
+        cfg.privacy.unix_ms_max = ms_max
 
     guard = _env_bool("SLEUTH_GUARDRAILS")
     if guard is not None:
@@ -1290,6 +1573,9 @@ def _apply_env(cfg: Config) -> None:
         val = os.environ.get(env_key)
         if val:
             setattr(cfg.cos, attr, val)
+    chunk = _env_int("SLEUTH_COS_READ_CHUNK_BYTES")
+    if chunk is not None:
+        cfg.cos.read_chunk_bytes = chunk
 
     for env_key, attr in (
         ("SLEUTH_FILES_MAX_BYTES", "max_bytes"),
@@ -1297,7 +1583,12 @@ def _apply_env(cfg: Config) -> None:
         ("SLEUTH_FILES_PRESIGN_PUT_EXPIRES", "presign_put_expires"),
         ("SLEUTH_FILES_PRESIGN_GET_EXPIRES", "presign_get_expires"),
         ("SLEUTH_FILES_EXCERPT_MAX_CHARS", "excerpt_max_chars"),
+        ("SLEUTH_FILES_EXCERPT_REREAD_MAX_CHARS", "excerpt_reread_max_chars"),
+        ("SLEUTH_FILES_PDF_RENDER_DPI", "pdf_render_dpi"),
+        ("SLEUTH_FILES_PDF_VISION_MAX_PAGES", "pdf_vision_max_pages"),
         ("SLEUTH_FILES_EXTRACT_CONCURRENCY", "extract_concurrency"),
+        ("SLEUTH_FILES_FILENAME_MAX_CHARS", "filename_max_chars"),
+        ("SLEUTH_FILES_OBJECT_KEY_SEG_MAX_CHARS", "object_key_seg_max_chars"),
     ):
         val = _env_int(env_key)
         if val is not None:
@@ -1311,9 +1602,60 @@ def _apply_env(cfg: Config) -> None:
     if os.environ.get("SLEUTH_SM4_KEY") is not None:
         cfg.files.sm4_key = os.environ.get("SLEUTH_SM4_KEY") or ""
     if os.environ.get("SLEUTH_FILES_IMAGE_MODE"):
-        cfg.files.image_mode = os.environ["SLEUTH_FILES_IMAGE_MODE"].strip() or "vision"
+        cfg.files.image_mode = os.environ["SLEUTH_FILES_IMAGE_MODE"].strip() or FilesConfig().image_mode
     if os.environ.get("SLEUTH_FILES_VISION_MODEL") is not None:
         cfg.files.vision_model = os.environ.get("SLEUTH_FILES_VISION_MODEL") or ""
+    for env_key, attr in (
+        ("SLEUTH_FILES_VISION_PROMPT", "vision_prompt"),
+        ("SLEUTH_FILES_VISION_FOCUS_PROMPT", "vision_focus_prompt"),
+        ("SLEUTH_FILES_PDF_PAGE_PREFIX", "pdf_page_prefix"),
+        ("SLEUTH_FILES_IMAGE_EXTS", "image_exts"),
+        ("SLEUTH_FILES_PDF_EXTS", "pdf_exts"),
+        ("SLEUTH_FILES_XLSX_EXTS", "xlsx_exts"),
+        ("SLEUTH_FILES_XLS_EXTS", "xls_exts"),
+        ("SLEUTH_FILES_DOCX_EXTS", "docx_exts"),
+        ("SLEUTH_FILES_TEXT_EXTS", "text_exts"),
+        ("SLEUTH_FILES_ENC_ALGO", "enc_algo"),
+        ("SLEUTH_FILES_CIPHER_MIME", "cipher_mime"),
+        ("SLEUTH_FILES_UPLOAD_FORM_FIELD", "upload_form_field"),
+        ("SLEUTH_FILES_UPLOAD_FILENAME_FIELD", "upload_filename_field"),
+        ("SLEUTH_FILES_UPLOAD_MIME_FIELD", "upload_mime_field"),
+        ("SLEUTH_FILES_DOWNLOAD_PATH_TEMPLATE", "download_path_template"),
+        ("SLEUTH_FILES_DOWNLOAD_DISPOSITION", "download_disposition"),
+        ("SLEUTH_FILES_INLINE_DISPOSITION", "inline_disposition"),
+        ("SLEUTH_FILES_INLINE_QUERY_PARAM", "inline_query_param"),
+        ("SLEUTH_FILES_INLINE_QUERY_TRUTHY", "inline_query_truthy"),
+        ("SLEUTH_FILES_INCLUDE_PENDING_QUERY", "include_pending_query"),
+        ("SLEUTH_FILES_GENERATED_MIME", "generated_mime"),
+        ("SLEUTH_FILES_DEPRECATED_PRESIGN_MESSAGE", "deprecated_presign_message"),
+        ("SLEUTH_FILES_MIME_WILDCARD", "mime_wildcard"),
+        ("SLEUTH_FILES_DEFAULT_MIME", "default_mime"),
+        ("SLEUTH_FILES_FALLBACK_FILENAME", "fallback_filename"),
+        ("SLEUTH_FILES_ANONYMOUS_USER_ID", "anonymous_user_id"),
+        ("SLEUTH_FILES_HARVEST_FILENAME", "harvest_filename"),
+        ("SLEUTH_FILES_ALLOWED_URL_SCHEMES", "allowed_url_schemes"),
+        ("SLEUTH_FILES_BLOCKED_URL_PREFIXES", "blocked_url_prefixes"),
+        ("SLEUTH_FILES_STATUS_READY", "status_ready"),
+        ("SLEUTH_FILES_EXCERPT_PENDING", "excerpt_pending"),
+        ("SLEUTH_FILES_EXCERPT_OK", "excerpt_ok"),
+        ("SLEUTH_FILES_EXCERPT_SKIPPED", "excerpt_skipped"),
+        ("SLEUTH_FILES_ROLE_USER", "role_user"),
+        ("SLEUTH_FILES_ROLE_ASSISTANT", "role_assistant"),
+        ("SLEUTH_FILES_MISSING_UPLOAD_MESSAGE", "missing_upload_message"),
+        ("SLEUTH_FILES_ERR_FILE_NOT_FOUND", "err_file_not_found"),
+        ("SLEUTH_FILES_ERR_NO_OBJECT_KEY", "err_no_object_key"),
+        ("SLEUTH_FILES_ERR_SM4_KEY", "err_sm4_key"),
+        ("SLEUTH_FILES_ERR_FILENAME_REQUIRED", "err_filename_required"),
+        ("SLEUTH_FILES_PROMPT_PREAMBLE", "prompt_preamble"),
+        ("SLEUTH_FILES_PROMPT_ITEM_LINE", "prompt_item_line"),
+        ("SLEUTH_FILES_PROMPT_EXCERPT_PREFIX", "prompt_excerpt_prefix"),
+        ("SLEUTH_FILES_PROMPT_TRUNCATED_MARK", "prompt_truncated_mark"),
+        ("SLEUTH_FILES_PROMPT_SKIPPED_LINE", "prompt_skipped_line"),
+        ("SLEUTH_FILES_PROMPT_PENDING_LINE", "prompt_pending_line"),
+    ):
+        val = os.environ.get(env_key)
+        if val is not None and str(val).strip() != "":
+            setattr(cfg.files, attr, val)
     req_enc = _env_bool("SLEUTH_FILES_REQUIRE_ENCRYPT")
     if req_enc is not None:
         cfg.files.require_encrypt = req_enc
@@ -1431,6 +1773,8 @@ def _apply_env(cfg: Config) -> None:
         cfg.acl.default_agent_open = acl_open
     if os.environ.get("SLEUTH_ACL_DEFAULT_AGENT_NAME") is not None:
         cfg.acl.default_agent_name = os.environ.get("SLEUTH_ACL_DEFAULT_AGENT_NAME") or ""
+    if os.environ.get("SLEUTH_ACL_WILDCARD_ID") is not None:
+        cfg.acl.wildcard_id = os.environ.get("SLEUTH_ACL_WILDCARD_ID") or ""
     for env_key, attr in (
         ("SLEUTH_ACL_TABLE_ORG", "table_org"),
         ("SLEUTH_ACL_TABLE_ROLE", "table_role"),
@@ -1564,6 +1908,8 @@ def load(cwd: Optional[Path] = None) -> Config:
 
     # .env / process env applied last so they win over JSONC
     _apply_env(cfg)
+    if (cfg.timezone or "").strip():
+        os.environ.setdefault("SLEUTH_TIMEZONE", cfg.timezone.strip())
     return cfg
 
 

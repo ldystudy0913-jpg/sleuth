@@ -8,8 +8,11 @@
 --   机构 SZ_BR（深圳分行）
 --   岗位 aml_analyst（可疑分析岗）
 --   用户 emp_zhang（请求头 X-User-Id: emp_zhang）
---   该岗允许 agent=dd_reply、skill=dd-reply-framework
+--   该岗允许 agent=dd_reply
+--   COS 上被 Card 引用的共享 skill 另授 skill grant；仅 Card 内嵌的私有 SOP 跟 agent 走，不必单独授 skill。
 -- 测默认助手：SLEUTH_ACL_DEFAULT_AGENT_OPEN=1 时不必给 build 再插 grant。
+-- resource_id 填 acl.wildcard_id（默认 *）表示该 kind 下全部名字，含以后新上的 agent/skill。
+-- 总行超管：用独立岗位 hq_admin 挂两条 *，不要对整个总行机构开通配。
 -- =============================================================================
 
 CREATE TABLE mem_org (
@@ -65,7 +68,7 @@ CREATE TABLE mem_grant (
   scope_kind VARCHAR(16) NOT NULL COMMENT '授权主体类别：role岗位/org机构/user用户例外',
   scope_id VARCHAR(64) NOT NULL COMMENT '主体编码，对应 role_id 或 org_id 或 user_id',
   resource_kind VARCHAR(16) NOT NULL COMMENT '资源类别：agent 或 skill',
-  resource_id VARCHAR(128) NOT NULL COMMENT '资源名，如 build、dd_reply、dd-reply-framework',
+  resource_id VARCHAR(128) NOT NULL COMMENT '资源名，如 build、dd_reply；填 *（acl.wildcard_id）表示该 kind 下全部含后续新增',
   grant_effect VARCHAR(16) NOT NULL COMMENT '效力：allow允许/deny拒绝（deny仅用于用户例外）',
   row_status VARCHAR(16) NOT NULL DEFAULT 'active' COMMENT '行状态：active生效/disabled停用',
   created_at DATETIME NOT NULL COMMENT '创建时间',
@@ -77,10 +80,31 @@ CREATE TABLE mem_grant (
 -- INSERT INTO mem_grant
 --   (grant_id, scope_kind, scope_id, resource_kind, resource_id, grant_effect, row_status, created_at, updated_at)
 -- VALUES
---   ('grant_demo_role_agent', 'role', 'aml_analyst', 'agent', 'dd_reply', 'allow', 'active', NOW(), NOW()),
---   ('grant_demo_role_skill', 'role', 'aml_analyst', 'skill', 'dd-reply-framework', 'allow', 'active', NOW(), NOW());
+--   ('grant_demo_role_agent', 'role', 'aml_analyst', 'agent', 'dd_reply', 'allow', 'active', NOW(), NOW());
+--   -- 仅当 dd_reply 要复用 COS 上的共享 skill 时才需要下面这条（私有 Card SOP 不需要）
+--   -- ('grant_demo_role_skill', 'role', 'aml_analyst', 'skill', 'kyc-shared', 'allow', 'active', NOW(), NOW());
 -- -- 用户例外（可选）：临时禁止张三使用尽调 agent，岗位其他人不受影响
 -- -- INSERT INTO mem_grant
 -- --   (grant_id, scope_kind, scope_id, resource_kind, resource_id, grant_effect, row_status, created_at, updated_at)
 -- -- VALUES
 -- --   ('grant_demo_user_deny', 'user', 'emp_zhang', 'agent', 'dd_reply', 'deny', 'active', NOW(), NOW());
+--
+-- -- 总行平台管理员：任意 agent/skill（含后续扩展）。HQ 为占位机构编码，查到行内编码后改 mem_org.org_id 与 mem_user.org_id。
+-- -- 不要对 org_id=HQ 开通配。有 * 仍须把会话切到对应 agent 才能调其 MCP；yolo 不能代替授权。
+-- -- INSERT INTO mem_org
+-- --   (org_id, parent_id, org_category, org_name, row_status, created_at, updated_at)
+-- -- VALUES
+-- --   ('HQ', NULL, 'head', '总行', 'active', NOW(), NOW());
+-- -- INSERT INTO mem_role (role_id, role_name, scenario_list, row_status, created_at, updated_at)
+-- -- VALUES ('hq_admin', '总行平台管理员', NULL, 'active', NOW(), NOW());
+-- -- INSERT INTO mem_grant
+-- --   (grant_id, scope_kind, scope_id, resource_kind, resource_id, grant_effect, row_status, created_at, updated_at)
+-- -- VALUES
+-- --   ('grant_hq_admin_agent_all', 'role', 'hq_admin', 'agent', '*', 'allow', 'active', NOW(), NOW()),
+-- --   ('grant_hq_admin_skill_all', 'role', 'hq_admin', 'skill', '*', 'allow', 'active', NOW(), NOW());
+-- -- INSERT INTO mem_user
+-- --   (user_id, display_name, role_id, org_id, row_status, created_at, updated_at)
+-- -- VALUES
+-- --   ('80362611', NULL, 'hq_admin', 'HQ', 'active', NOW(), NOW()),
+-- --   ('80362612', NULL, 'hq_admin', 'HQ', 'active', NOW(), NOW()),
+-- --   ('80451232', NULL, 'hq_admin', 'HQ', 'active', NOW(), NOW());

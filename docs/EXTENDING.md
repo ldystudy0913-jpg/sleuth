@@ -7,6 +7,7 @@
 
 - [MCP 对接（Tool / Agent Card）](MCP_INTEGRATION.md)
 - [Skill 接入与开发规范](SKILL_INTEGRATION.md)
+- [Agent 脚手架（新 Agent 项目包）](../agents/scaffold/README.md)
 - [Agent 场景内部流程（dd_analyst / dd_reply）](AGENT_SCENARIOS.md)
 - [HTTP API](API.md)
 
@@ -20,6 +21,7 @@
 | 能力在**外部服务**里，或希望独立部署/多语言 | **MCP**（`SLEUTH_MCP_SERVERS`） | 除非必须本地强集成，否则别写 Python Tool |
 | 给模型一段**可复用流程/规范**（怎么排查、怎么发版） | **Skill**（`SKILL.md`） | Tool（除非还要执行） |
 | 换一套权限/提示词/工具可见性 | **Agent**（`build` / `plan` / 自定义） | 硬改全局 permission |
+| 新做一个要对接到 Sleuth 的业务 Agent | [`agents/scaffold`](../agents/scaffold/) 生成独立 MCP 包 | 从 dd_analyst / dd_reply 复制业务代码 |
 | 会话、用量、todo 换库或加字段 | **Store** | 在 Tool 里自己写文件当库 |
 | 新开关、密钥、路径 | **Config / `.env`** | 在业务代码里写死 |
 | 对外暴露 HTTP | **`sleuth/server/`**，内部仍调 `build_session` | 复制一套 CLI 逻辑 |
@@ -108,7 +110,7 @@ CLI / HTTP
    py -3.12 -c "from sleuth.tools.registry import ToolRegistry; print(ToolRegistry().names())"
    py -3.12 -m sleuth --yolo "调用 <tool> 做一次最小演示"
    ```
-   - `--yolo` 会 `allow_all`，适合冒烟；正式路径再测 `ask`/`deny`。
+   - `--yolo` 会自动批准 bash/edit 的 ask，**不能**绕过岗位 ACL，也不能让当前 agent 调用其他 `agent:true` MCP 的工具。
 
 ### 最小骨架
 
@@ -375,7 +377,7 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
    curl http://127.0.0.1:8787/health
    ```
 
-现有路由：`/v1/sessions`、`.../trace`、`.../files/uploads|complete`、`.../files`、`.../messages`、`/v1/users/{id}/usage`、`/v1/skills`、`/v1/skills/reload`。
+现有路由：`/v1/sessions`、`.../trace`、`POST .../files`（multipart）、`GET|DELETE .../files/{id}`、`.../messages`、`/v1/users/{id}/usage`、`/v1/skills`、`/v1/skills/reload`。旧 `.../files/uploads|complete` 返回 410。
 
 ---
 
@@ -383,11 +385,11 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
 
 会话文件走 COS 邮箱；基座解密后抽出文本（PDF/xlsx/docx/图片），摘录注入默认 agent 与 MCP refs：
 
-- **入参**：若工具 JSON Schema 含 `attachment_refs_json`，`McpBridgeTool` 在调用前注入 `[{file_id, filename, mime, size, object_key, url, excerpt, truncated, encrypted, excerpt_status}]`（`url` 为短时 HTTPS GET，对象仍是密文）。专用 agent 应优先用 `excerpt`，不要 GET 密文当文本。
+- **入参**：若工具 JSON Schema 含 `attachment_refs_json`，`McpBridgeTool` 在调用前注入 `[{file_id, filename, mime, size, object_key, url, excerpt, truncated, encrypted, excerpt_status}]`（`url` 为 Sleuth `GET /v1/sessions/.../files/{id}` 明文下载路径，不是 COS 密文 URL）。专用 agent 应优先用 `excerpt`。
 - **出参**：工具返回 JSON 若含 `files[]`（`filename` / `mime` / `object_key` 或 `https` `url`），基座登记为会话 `role: assistant` 文件，并出现在同步响应 / SSE `done.files`。禁止 data-URL。
 - **出参**：工具返回 JSON 若含顶层 `sources[]`（`title` / `file_name` / `name` + `http(s)` `url`），基座在本轮**最终**助手答复末尾附加灰色可点击清单（`《标题》：url`）。同一 URL（忽略末尾 `/`）只保留首次出现的标题；正文里已出现的 URL 不再重复。`sources` 缺省、空数组或无有效链接时**不附加**「知识来源」段，答复就是模型正文。禁止 data-URL / file-URL。任意 agent 只要遵守该字段即可；基座**不解析**各 agent 的 markdown。默认 agent `build` 的 `kb_lookup` 同样输出 `sources[]`，检索命中后也会附来源。
 
-默认 agent `build` 另有内置 `kb_lookup`（`SLEUTH_KB_API_URL` + 登录 Cookie `ragToken`）、`read_session_file`（读摘录）与 `save_output_file`（把生成文本写入同一 COS 邮箱）。
+默认 agent `build` 另有内置 `kb_lookup`（`SLEUTH_KB_API_URL` + 登录 Cookie `ragToken`）、`read_session_file`（读摘录；传入 `question` 可按用户问题再解析图片/扫描 PDF 或加长文档抽取，不覆盖已存 excerpt）与 `save_output_file`（把生成文本写入同一 COS 邮箱）。
 
 ---
 

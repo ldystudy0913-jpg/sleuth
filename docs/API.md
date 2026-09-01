@@ -75,11 +75,14 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 - **同步发消息**：`POST .../messages` 会阻塞到整轮 Agent（含工具调用）跑完再返回整包 JSON。前端需设足够长的超时（建议 ≥ 5–15 分钟），并做好 loading。
 - **流式发消息**：`POST .../messages/stream` 使用 **SSE**（`text/event-stream`），边跑边推 `text` / 工具事件，最后以 `done` 收尾。**每条 `data` 事件均含 `session_id`**。原生 `EventSource` 只支持 GET，请用 `fetch` + `ReadableStream`。
 - **模型 / Agent / Skill 选择**：每次创建会话和发消息都应带 `agent`、`model`、`skills`（推荐）或旧字段 `skill`。未选 agent / model 时传 `GET /v1/agents`、`GET /v1/models` 的 `default`；未选 skill、或当前不是默认 agent 时传 `skills: []` 且 `skill: ""`。Skill **仅当 `agent` 等于默认 agent** 时可选并注入 SKILL.md（可同时钉多个，按数组顺序注入全文）；专用 agent 带非空 `skills` / `skill` 返回 `400`。两个字段都出现时以 `skills` 为准。字段省略时兼容旧客户端（沿用会话已存值），前端主路径不要依赖省略。MCP 可晚于 Sleuth 启动，后台会重试；也可 `POST /v1/mcp/reload` 立即重连后再拉 agents。
+- **Agent 型 MCP 隔离**：`agent:true` 的 MCP 工具只在当前会话就是该 agent、且用户有对应 agent grant 时可见/可执行。`yolo` 只跳过 bash/edit 确认，**不能**让 `build` 调用尽调工具。通用 MCP（`agent:false`）仍挂在所有 agent 上。
+- **`GET /v1/skills`**：返回当前用户可见的目录 skill（`pinnable: true`，走 skill grant）以及有权限的 agent 私有 skill（`pinnable: false`）。前端只用 `pinnable: true` 填充 build 选择器。
 - **无 CORS 中间件**：浏览器跨域需自行在网关加 CORS，或同域反代。
 - **会话 id** 形如：`sess_` + 24 位 hex（例：`sess_a1b2c3d4e5f678901234abcd`）。
 - 时间字段：
   - `time_updated`：Unix **毫秒**
-  - `time_updated_local`：按 `SLEUTH_TIMEZONE` 格式化的字符串，如 `2026-08-08 18:09:12`
+  - `time_updated_local`：按 `timezone` / `SLEUTH_TIMEZONE` 格式化的字符串，如 `2026-08-08 18:09:12`
+  - 台账 `started_at` 等仍为毫秒数字；同时提供 `started_at_iso` / `ended_at_iso` / `completed_at_iso` / `first_token_at_iso`（ISO-8601 字符串），避免 13 位数字被网关当卡号屏蔽。
 
 ### 2.5 `model` 对象形态（注意两处略有不同）
 
@@ -118,10 +121,12 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `GET` | `/v1/sessions` | 用户头 | 会话列表（含预览） |
 | `GET` | `/v1/sessions/{session_id}` | 用户头 | 会话详情 + 消息 |
 | `GET` | `/v1/sessions/{session_id}/trace` | 用户头 | 会话执行台账（轮次 / 工具 / 计时） |
-| `POST` | `/v1/sessions/{session_id}/files/uploads` | 用户头 | 预签名上传（COS PUT URL） |
-| `POST` | `/v1/sessions/{session_id}/files/complete` | 用户头 | 绑定已上传对象到会话 |
+| `POST` | `/v1/sessions/{session_id}/files` | 用户头 | multipart 上传明文（服务端 SM4 后写入 COS） |
 | `GET` | `/v1/sessions/{session_id}/files` | 用户头 | 列出会话文件 |
-| `GET` | `/v1/sessions/{session_id}/files/{file_id}` | 用户头 | 下载（默认 302 到预签名 GET） |
+| `GET` | `/v1/sessions/{session_id}/files/{file_id}` | 用户头 | 下载**明文**（`?inline=1` 可预览） |
+| `DELETE` | `/v1/sessions/{session_id}/files/{file_id}` | 用户头 | 删除元数据与 COS 对象 |
+| `POST` | `/v1/sessions/{session_id}/files/uploads` | 用户头 | **已废弃** `410`（原预签名 PUT） |
+| `POST` | `/v1/sessions/{session_id}/files/complete` | 用户头 | **已废弃** `410` |
 | `POST` | `/v1/sessions/{session_id}/messages` | 用户头 | 发送一轮对话（**同步 JSON**） |
 | `POST` | `/v1/sessions/{session_id}/messages/stream` | 用户头 | 发送一轮对话（**SSE 流式**） |
 | `GET` | `/v1/models` | 无 | 模型目录（选择器用；不含密钥） |
@@ -131,9 +136,9 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `GET` | `/v1/users/{user_id}/usage` | 本人或 Admin | 用量汇总 |
 | `GET` | `/v1/skills` | 用户头 | Skill 目录（开启 ACL 时按岗位授权过滤） |
 | `POST` | `/v1/skills/reload` | Admin | 强制重载 Skill |
-| `GET` | `/v1/memory` | 用户头 | 列出或向量检索当前用户可见记忆（`?q=`） |
+| `GET` | `/v1/memory` | 用户头 | 列出或向量检索当前用户可见记忆（`?q=` / `?kb_status=`） |
 | `POST` | `/v1/memory` | 用户头 | 写入记忆（默认 user 层；role/org 需 Admin） |
-| `PATCH` | `/v1/memory/{memory_id}` | 用户头 | 更新正文并重算向量 |
+| `PATCH` | `/v1/memory/{memory_id}` | 用户头 | 更新正文并重算向量，或改 `kb_status` / `kb_ref` |
 | `DELETE` | `/v1/memory/{memory_id}` | 用户头 | 归档（忘记） |
 | `GET`/`PUT` | `/v1/directory/users/{user_id}` | Admin | 维护一人一岗一机构 |
 | `GET`/`PUT` | `/v1/directory/grants` | Admin | 维护岗位/机构/用户例外授权 |
@@ -419,54 +424,52 @@ X-User-Id: alice
 
 默认 agent 是 `build`。用户**不必切换**到 `dd_reply` 等专用 agent 也能：上传附件、把生成文件回传给前端、检索远程知识库（`kb_lookup`，需 `SLEUTH_KB_API_URL` + `SLEUTH_KB_LOGIN_URL` + `SLEUTH_KB_OPENID` + `SLEUTH_KB_SERVICEID`）。
 
-字节**不经过** Sleuth：浏览器用预签名 URL 直传 COS。生产路径：前端用与 Sleuth 相同的 `SLEUTH_SM4_KEY` 做 SM4-CBC（key == IV，PKCS7）后 **PUT 密文**；`size` 为密文长度（16 的倍数）。COS 只存密文。Sleuth 在解析时进程内解密、抽文本、写入 `files[].excerpt`，明文不落盘、不写 SSE。预签名 GET 仍是密文，预览由前端自行解密。
+字节**经过** Sleuth：前端 `POST` multipart **明文**；Sleuth 用本机 `SLEUTH_SM4_KEY` 做 SM4-CBC（key == IV，PKCS7）后写入 COS。COS 只存密文。`GET` 同一路径时进程内解密，响应为明文（`Content-Type` 为原始 mime）。明文不落盘、不写 SSE。前端**不做** SM4。Agent 只用摘录，不要把 COS URL 交给模型。
 
-配置（`.env`）：会话文件与 Skill 共用 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` / `SLEUTH_S3_ENDPOINT`，桶名取 `SLEUTH_SKILLS_S3` 的 `s3://桶/...`。另加 `SLEUTH_COS_PATH_PREFIX`（默认 `sleuth/files`）、`SLEUTH_SM4_KEY` 与可选 `SLEUTH_FILES_*`。对象存储客户端随核心依赖安装（boto3）。PDF/xlsx/docx 解析：`pip install sleuth[files]`；图片 RapidOCR 回退：`pip install sleuth[ocr]`。图片默认走多模态视觉抽取（`SLEUTH_FILES_IMAGE_MODE=vision`）。
+可调项全部在 `FilesConfig`（默认）/ `.env` 的 `SLEUTH_FILES_*` / `sleuth.jsonc` 的 `files`，不要改业务代码。常用：`SLEUTH_SM4_KEY`、`SLEUTH_FILES_REQUIRE_ENCRYPT`、`SLEUTH_FILES_MAX_BYTES`、`SLEUTH_FILES_UPLOAD_FORM_FIELD`（默认 `file`）、`SLEUTH_FILES_DOWNLOAD_PATH_TEMPLATE`、`SLEUTH_FILES_INLINE_QUERY_PARAM`（默认 `inline`）。
 
-#### 申请上传
+配置：会话文件与 Skill 共用 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` / `SLEUTH_S3_ENDPOINT`，桶名取 `SLEUTH_SKILLS_S3` 的 `s3://桶/...`。另加 `SLEUTH_COS_PATH_PREFIX`（默认 `sleuth/files`）。对象存储客户端随核心依赖安装（boto3）。PDF/xlsx/docx 解析与扫描 PDF 渲染：`pip install sleuth[files]`（含 pypdfium2）；图片 RapidOCR 回退：`pip install sleuth[ocr]`。图片默认走多模态视觉抽取（`SLEUTH_FILES_IMAGE_MODE=vision`）：先描述场景再列可见文字（`SLEUTH_FILES_VISION_PROMPT`）。无文字层的 PDF 会逐页渲染后走同一视觉/OCR（页数/DPI：`SLEUTH_FILES_PDF_VISION_MAX_PAGES` / `SLEUTH_FILES_PDF_RENDER_DPI`）。对话模型看到的是 excerpt，不是原图像素；excerpt 不够时对 `read_session_file` 传入用户原话 `question` 会再解析，不覆盖已存 excerpt。看图需视觉模型（可配 `SLEUTH_FILES_VISION_MODEL`）；纯 OCR 回退仍可能只有字。
 
-`POST /v1/sessions/{session_id}/files/uploads`
+#### 上传
 
-```json
-{ "filename": "notes.txt", "mime": "text/plain", "size": 128, "encrypted": true }
-```
+`POST /v1/sessions/{session_id}/files`（`multipart/form-data`，字段名见 `SLEUTH_FILES_UPLOAD_FORM_FIELD`，默认 `file`）
 
 **响应 `200`**
 
 ```json
 {
-  "file_id": "file_...",
-  "object_key": "sleuth/files/alice/sess_.../file_.../notes.txt",
-  "upload_url": "https://...",
-  "expires_at": "2026-08-19T13:20:00Z",
-  "headers": { "Content-Type": "text/plain" }
+  "id": "file_...",
+  "filename": "notes.txt",
+  "mime": "text/plain",
+  "size": 5,
+  "role": "user",
+  "status": "ready",
+  "download_url": "/v1/sessions/sess_.../files/file_...",
+  "excerpt_status": "pending",
+  "encrypted": true
 }
 ```
 
-前端对 `upload_url` 发 **PUT**（body 为**密文**，`Content-Type` 与申请时一致）。配了 `SLEUTH_SM4_KEY` 且 `SLEUTH_FILES_REQUIRE_ENCRYPT=1` 时，未传 `encrypted` 则默认 `true`。
+`download_url` 是 **Sleuth API 路径**，不是 COS URL。前端带 `X-User-Id` 访问即可拿到明文。配了 `SLEUTH_FILES_REQUIRE_ENCRYPT=1` 但未配 `SLEUTH_SM4_KEY` 时返回 `503`。
 
 | 状态 | 说明 |
 |------|------|
-| `413` | `size` 超过 `SLEUTH_FILES_MAX_BYTES`，或会话文件数超过 `SLEUTH_FILES_MAX_COUNT` |
-| `503` | 未配置共享 COS（`AWS_*` / `SLEUTH_S3_ENDPOINT` / `SLEUTH_SKILLS_S3`） |
+| `413` | 超过 `SLEUTH_FILES_MAX_BYTES`，或会话文件数超过 `SLEUTH_FILES_MAX_COUNT` |
+| `503` | 未配置共享 COS，或强制加密但未配 SM4 密钥 |
 
-#### 确认上传
+`POST .../files/uploads` 与 `POST .../files/complete` 返回 **`410`**，文案见 `SLEUTH_FILES_DEPRECATED_PRESIGN_MESSAGE`。
 
-`POST /v1/sessions/{session_id}/files/complete`
+抽取在进程内限流队列中进行（`SLEUTH_FILES_EXTRACT_CONCURRENCY`），完成后 `excerpt_status` 为 `ok` 或 `skipped`。`done` / system prompt 使用的是摘录，不是 COS 明文。
 
-```json
-{ "file_id": "file_..." }
-```
+#### 列表 / 下载 / 删除
 
-服务端 HEAD 对象，状态变为 `ready`（`role: user`），`excerpt_status` 为 `pending`。抽取在进程内限流队列中进行（默认同时 2 个），完成后为 `ok` 或 `skipped`。`done` / system prompt 使用的是摘录，不是 COS 明文。
+`GET /v1/sessions/{session_id}/files` → `{ "files": [{ "id", "filename", "mime", "size", "role", "status", "download_url", "excerpt_status", "encrypted" }] }`。`?include_pending=1`（参数名可配 `SLEUTH_FILES_INCLUDE_PENDING_QUERY`）会带上未 ready 的项。
 
-#### 列表 / 下载
+`GET /v1/sessions/{session_id}/files/{file_id}`：返回**明文字节**。默认 `Content-Disposition: attachment`。`?inline=1`（真值列表见 `SLEUTH_FILES_INLINE_QUERY_TRUTHY`）改为 inline，便于预览。
 
-`GET /v1/sessions/{session_id}/files` → `{ "files": [{ "id", "filename", "mime", "size", "role", "status", "download_url", "excerpt_status", "encrypted" }] }`
+`DELETE /v1/sessions/{session_id}/files/{file_id}`：删会话元数据并删 COS 对象。
 
-`GET /v1/sessions/{session_id}/files/{file_id}`：默认 **302** 到短时预签名 GET。`?json=1` 或 `Accept: application/json` 时返回 `{ "download_url": "https://..." }`。
-
-`download_url` 在列表 / `done.files` 里是 **Sleuth API 路径**（`/v1/sessions/.../files/{id}`），前端带 `X-User-Id` 再跳转 COS。
+`download_url` 在列表 / `done.files` 里同样是 Sleuth API 路径。
 
 ---
 
@@ -772,7 +775,7 @@ async function streamMessage(base, sessionId, userId, prompt) {
 
 **说明**：枚举本地 + MCP Agent Card 注册的 agent。列表用 `title` 展示、用 `name` 切换。`default` 即主 agent；**仅该 agent 允许非空 `skills` / `skill`**。每轮发消息应带当前 `agent`。`ddreply` 这类 MCP 配置键会解析为 Card 上的规范名（如 `dd_reply`），切过去后系统提示词用该 agent 的人格，而不是默认 sleuth。
 
-开启 `SLEUTH_ACL_ENABLED` 且目录表可用时，列表按 `X-User-Id` 查 `mem_user` 的唯一岗位/机构，再按 `mem_grant` 过滤：user deny → user allow → role/org allow → 默认 agent（若 `SLEUTH_ACL_DEFAULT_AGENT_OPEN`）。无授权的 agent 前端选不了；`set_agent` / 发消息 body `agent` 同样拒绝。未建目录表或 ACL 关闭时保持全可见。
+开启 `SLEUTH_ACL_ENABLED` 且目录表可用时，列表按 `X-User-Id` 查 `mem_user` 的唯一岗位/机构，再按 `mem_grant` 过滤：user deny → user allow → role/org allow → 默认 agent（若 `SLEUTH_ACL_DEFAULT_AGENT_OPEN`）。`resource_id` 等于 `acl.wildcard_id`（默认 `*`，env `SLEUTH_ACL_WILDCARD_ID`）时表示该 `resource_kind` 下全部名字，含以后新上的 agent/skill。无授权的 agent 前端选不了；`set_agent` / 发消息 body `agent` 同样拒绝。未建目录表或 ACL 关闭时保持全可见。有通配 agent grant 的用户仍须把会话切到对应 agent，才能看见/调用该 agent 的 MCP 工具；`yolo` 不能代替授权。
 
 **响应 `200`**
 
@@ -886,16 +889,24 @@ async function streamMessage(base, sessionId, userId, prompt) {
 ```json
 [
   {
-    "name": "dd-report-check",
-    "description": "银行尽调报告智能检查。…",
-    "location": "C:\\...\\skills\\dd-report-check"
+    "name": "kyc-shared",
+    "description": "共享 KYC SOP",
+    "location": ".../skills-cache/.../kyc-shared",
+    "pinnable": true
+  },
+  {
+    "name": "dd-reply-framework",
+    "description": "尽调答复框架 SOP",
+    "location": "mcp_agent/dd_reply/dd-reply-framework",
+    "pinnable": false,
+    "owner_agent": "dd_reply"
   }
 ]
 ```
 
 触发懒惰刷新逻辑（受 `SLEUTH_SKILLS_REFRESH_SECONDS` 影响）。
 
-默认 agent 下发消息 / 创建会话时，`skills` 填这里的 `name` 列表（可多个）；未选传 `[]`。旧字段 `skill` 仍可用。
+默认 agent 下发消息 / 创建会话时，`skills` 只填 **`pinnable: true`** 的 `name`；未选传 `[]`。旧字段 `skill` 仍可用。`pinnable: false` 不要放进 build 选择器。
 
 多份 SKILL.md 会按选择顺序全部注入系统提示，注意上下文长度。
 
@@ -927,11 +938,11 @@ async function streamMessage(base, sessionId, userId, prompt) {
 
 驱动请装进**启动 HTTP 服务的同一个 Python**：在仓库根目录执行 `python -m pip install -e ".[memory]"`（或 `python -m pip install psycopg2-binary`）。不要对内网 PyPI 执行 `pip install sleuth[memory]`，本仓库未发布到该索引。装好后必须重启进程。
 
-OpenGauss 列为 `FLOATVECTOR` 时设 `SLEUTH_MEMORY_VECTOR_KIND=floatvector`；`body_text`/`payload_text` 为 JSONB 时设 `SLEUTH_MEMORY_TEXT_KIND=jsonb`。无向量索引不影响小数据量召回。`SLEUTH_EMBEDDING_BASE_URL` 可填 OpenAI 兼容根路径（`.../v1`）或完整 embeddings 地址（`.../v1/embeddings`）；写入会 POST 到该地址一次，网关 404 时记忆不会落库。
+OpenGauss 列为 `FLOATVECTOR` 时设 `SLEUTH_MEMORY_VECTOR_KIND=floatvector`（召回用 `cosine_distance`，不要用 pgvector 的 `<=>`）；`body_text`/`payload_text` 为 JSONB 时设 `SLEUTH_MEMORY_TEXT_KIND=jsonb`。无向量索引不影响小数据量召回。SQL ANN 失败会回退到进程内余弦，写入不受影响。`SLEUTH_EMBEDDING_BASE_URL` 可填 OpenAI 兼容根路径（`.../v1`）或完整 embeddings 地址（`.../v1/embeddings`）；写入会 POST 到该地址一次，网关 404 时记忆不会落库。
 
 手工建表与测试插入示例：[`docs/ddl_memory_opengauss.sql`](ddl_memory_opengauss.sql)（记忆）+ [`docs/ddl_memory_mysql.sql`](ddl_memory_mysql.sql)（目录/授权，与会话同库）。代码不执行这些 SQL。
 
-`GET /v1/memory?q=` — `q` 为空则列出当前用户 user+role+org 可见的未过期条目；有 `q` 则向量检索。
+`GET /v1/memory?q=` — `q` 为空则列出当前用户 user+role+org 可见的未过期条目；有 `q` 则向量检索。`?kb_status=` 按知识库收纳状态过滤（`none` / `nominated` / `ingested` / `stale`，词表见配置 `memory.kb_status_*`）。列表同时返回 `kb_statuses` 供前端下拉。
 
 `item_key` 必须是配置词表里的 `domain.aspect`（默认见 `MemoryConfig.item_keys`，可用 `SLEUTH_MEMORY_ITEM_KEYS` 覆盖）。`POST` / `memory_write` 只传目录键；近义（余弦 >= `memory.merge_score`，默认 0.85，env `SLEUTH_MEMORY_MERGE_SCORE`）覆盖该实例，异义新开 `domain.aspect.facet`。跨层近义复用完整键由 `memory.merge_across_scopes`（`SLEUTH_MEMORY_MERGE_ACROSS_SCOPES`）控制。`GET /v1/memory` 同时返回 `item_key_domains` 与 `item_keys` 供前端下拉。
 
@@ -949,7 +960,7 @@ OpenGauss 列为 `FLOATVECTOR` 时设 `SLEUTH_MEMORY_VECTOR_KIND=floatvector`；
 
 默认 `scope_kind=user`、`scope_id` 为当前 `X-User-Id`。写 role/org 层需 `X-Admin-Token`。
 
-`PATCH /v1/memory/{memory_id}` 的 `{memory_id}` 是该行主键 `id`（列表/POST 响应里的 `mem_...`），可改 `title_text` / `body_text`（会重算 embedding，不按近义再分面）。`DELETE` 将 `row_status` 置为归档。
+`PATCH /v1/memory/{memory_id}` 的 `{memory_id}` 是该行主键 `id`（列表/POST 响应里的 `mem_...`），可改 `title_text` / `body_text`（会重算 embedding，不按近义再分面）。已 `ingested` 的条目若改正文，`kb_status` 自动变为 `stale`（`kb_ref` 保留，便于回写知识库）。只改收纳状态时 PATCH `{ "kb_status": "nominated" }` 或 `{ "kb_status": "ingested", "kb_ref": "kb-doc-id" }`，不重算向量。`memory_write` 工具不能改这些字段。召回注入不受 `kb_status` 影响。`DELETE` 将 `row_status` 置为归档。
 
 ### 4.12 目录与授权（Admin）
 
@@ -967,7 +978,18 @@ OpenGauss 列为 `FLOATVECTOR` 时设 `SLEUTH_MEMORY_VECTOR_KIND=floatvector`；
 }
 ```
 
-判定：user deny → user allow → role/org allow → 默认 agent（`SLEUTH_ACL_DEFAULT_AGENT_OPEN`）。用户 deny 只做例外，不要按人预生成全量行。表需手工创建，代码不执行 `CREATE TABLE`（DDL 与插入示例见 [`ddl_memory_mysql.sql`](ddl_memory_mysql.sql)）。
+总行超管示例（`resource_id` 为通配符，覆盖后续新 agent/skill；不要对整个机构开通配）：
+
+```json
+{
+  "grants": [
+    {"scope_kind": "role", "scope_id": "hq_admin", "resource_kind": "agent", "resource_id": "*", "grant_effect": "allow"},
+    {"scope_kind": "role", "scope_id": "hq_admin", "resource_kind": "skill", "resource_id": "*", "grant_effect": "allow"}
+  ]
+}
+```
+
+判定：user deny → user allow → role/org allow → 默认 agent（`SLEUTH_ACL_DEFAULT_AGENT_OPEN`）。用户 deny 只做例外，不要按人预生成全量行。`resource_id` 填配置里的通配符（默认 `*`）表示该 kind 下全部，含后续新增；不要对整个总行机构开通配，否则该机构下全员都会变成超管。有通配授权仍须切到对应 agent 才能调其 MCP 工具，`yolo` ≠ 授权。表需手工创建，代码不执行 `CREATE TABLE`（DDL 与插入示例见 [`ddl_memory_mysql.sql`](ddl_memory_mysql.sql)）。
 
 ---
 

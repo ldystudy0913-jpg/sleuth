@@ -72,6 +72,7 @@ def assemble(
     model: str,
     tool_specs: Optional[Sequence[dict]] = None,
     guardrails: Optional[bool] = None,
+    session=None,
 ) -> str:
     """Build the full system prompt for a turn."""
     from ..instruction import (
@@ -116,7 +117,7 @@ def assemble(
 
         parts.append(disclosure_policy_block())
         parts.append(public_tools_block(list(tool_specs or [])))
-        parts.append(public_skills_block())
+        parts.append(public_skills_block(session=session))
 
     parts.append(
         "\n".join(

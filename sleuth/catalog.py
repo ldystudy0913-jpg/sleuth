@@ -29,6 +29,20 @@ def _apply_live_mcp_cards(cfg, mcp_manager) -> None:
     set_skills(merged)
 
 
+def merge_live_mcp_skills(cfg, mcp_manager=None) -> None:
+    """Re-apply Agent Card skills after a catalog refresh (COS/local wins on name).
+
+    Does not start the MCP manager; uses the live singleton when already running.
+    """
+    if mcp_manager is None:
+        from .mcp.manager import _GLOBAL
+
+        mcp_manager = _GLOBAL
+    if mcp_manager is None:
+        return
+    _apply_live_mcp_cards(cfg, mcp_manager)
+
+
 # Built-in agent ids → UI title when agent.md / jsonc did not set one.
 _BUILTIN_TITLES = {
     "build": "通用助手",
@@ -176,18 +190,58 @@ def mcp_status_dict(cfg) -> Dict[str, Any]:
 
 
 def skills_payload(
-    cfg, workdir: Optional[Path] = None, *, user_id: Optional[str] = None
+    cfg, workdir: Optional[Path] = None, *, user_id: Optional[str] = None, mcp_manager=None
 ) -> List[Dict[str, Any]]:
-    from .skill import ensure_skills_fresh
+    from .skill import ensure_skills_fresh, get_skills
 
     workdir = workdir or Path.cwd()
-    skills = ensure_skills_fresh(cfg, workdir)
-    rows = [
-        {"name": s.name, "description": s.description, "location": str(s.location)}
-        for s in skills.values()
-    ]
-    if user_id:
-        from .memory.acl import filter_resources
+    ensure_skills_fresh(cfg, workdir)
+    if mcp_manager is None:
+        try:
+            from .mcp import get_manager
 
-        rows = filter_resources(cfg, user_id, "skill", rows, id_key="name")
+            mcp_manager = get_manager(cfg)
+        except Exception:
+            mcp_manager = None
+    if mcp_manager is not None:
+        _apply_live_mcp_cards(cfg, mcp_manager)
+    skills = get_skills()
+    rows: List[Dict[str, Any]] = []
+    for s in skills.values():
+        owner = (getattr(s, "owner_agent", None) or "").strip()
+        row: Dict[str, Any] = {
+            "name": s.name,
+            "description": s.description,
+            "location": str(s.location),
+            "pinnable": not bool(owner),
+        }
+        if owner:
+            row["owner_agent"] = owner
+        rows.append(row)
+    if user_id:
+        from .memory.acl import resource_allowed
+        from .memory.settings import acl_enabled
+
+        if acl_enabled(cfg):
+            from .memory.directory import directory_for
+
+            directory = directory_for(cfg)
+            if directory.available():
+                filtered = []
+                for row in rows:
+                    if row.get("pinnable"):
+                        ok = resource_allowed(
+                            cfg, user_id, "skill", row["name"], directory=directory
+                        )
+                    else:
+                        ok = resource_allowed(
+                            cfg,
+                            user_id,
+                            "agent",
+                            str(row.get("owner_agent") or ""),
+                            directory=directory,
+                        )
+                    if ok:
+                        filtered.append(row)
+                rows = filtered
     return rows

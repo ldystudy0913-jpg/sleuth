@@ -180,6 +180,7 @@ def create_app(workdir: Optional[Path] = None):
             return _json_response({"error": "not found"}, 404)
         messages = store.load_messages(sid)
         scrub_on = bool(getattr(config, "output_desensitize", True))
+        priv = getattr(config, "privacy", None)
         return _json_response(
             {
                 "id": rec.id,
@@ -201,7 +202,9 @@ def create_app(workdir: Optional[Path] = None):
                     {
                         "id": m.metadata.get("id"),
                         "role": m.role,
-                        "text": maybe_desensitize(m.text or "", enabled=scrub_on),
+                        "text": maybe_desensitize(
+                            m.text or "", enabled=scrub_on, privacy=priv
+                        ),
                         "usage": m.metadata.get("usage"),
                         "cost": m.metadata.get("cost"),
                         **message_timing_fields(m.metadata),
@@ -222,11 +225,12 @@ def create_app(workdir: Optional[Path] = None):
         messages = store.load_messages(sid)
         payload = project_session_trace(messages, session_id=rec.id)
         scrub_on = bool(getattr(config, "output_desensitize", True))
+        priv = getattr(config, "privacy", None)
         if scrub_on:
             for row in payload.get("records") or []:
                 if isinstance(row, dict) and "preview" in row:
                     row["preview"] = maybe_desensitize(
-                        row.get("preview") or "", enabled=True
+                        row.get("preview") or "", enabled=True, privacy=priv
                     )
         return _json_response(payload)
 
@@ -508,66 +512,40 @@ def create_app(workdir: Optional[Path] = None):
 
         return await put_grant(request, load(workdir))
 
-    async def create_file_upload(request: Request):
+    async def deprecated_presign_upload(request: Request):
         rec, denied = _owned_rec(request)
         if denied is not None:
             return denied
-        try:
-            body = await request.json()
-        except Exception:
-            return _json_response({"error": "invalid json"}, 400)
-        filename = str(body.get("filename") or "")
-        mime = str(body.get("mime") or body.get("content_type") or "")
-        try:
-            size = int(body.get("size") if body.get("size") is not None else -1)
-        except (TypeError, ValueError):
-            return _json_response({"error": "size must be an integer"}, 400)
-        encrypted = body.get("encrypted")
-        if encrypted is not None:
-            encrypted = bool(encrypted)
+        from ..files.settings import deprecated_presign_message
+
+        msg = deprecated_presign_message(load(workdir))
+        return _json_response({"error": msg}, 410)
+
+    async def upload_session_file(request: Request):
+        rec, denied = _owned_rec(request)
+        if denied is not None:
+            return denied
         cfg = load(workdir)
         from ..files.cos import CosNotConfigured
-        from ..files.mailbox import MailboxError, create_upload
+        from ..files.http_io import read_multipart_upload
+        from ..files.mailbox import MailboxError, ingest_user_file, public_file
 
         try:
-            payload = create_upload(
+            filename, mime, data = await read_multipart_upload(request, cfg)
+            item = ingest_user_file(
                 config=cfg,
                 store=store,
                 rec=rec,
                 filename=filename,
                 mime=mime,
-                size=size,
-                encrypted=encrypted,
+                data=data,
             )
         except CosNotConfigured as exc:
             return _json_response({"error": str(exc)}, 503)
         except MailboxError as exc:
             return _mailbox_error_response(exc)
-        return _json_response(payload)
-
-    async def complete_file_upload(request: Request):
-        rec, denied = _owned_rec(request)
-        if denied is not None:
-            return denied
-        try:
-            body = await request.json()
-        except Exception:
-            return _json_response({"error": "invalid json"}, 400)
-        file_id = str(body.get("file_id") or body.get("id") or "")
-        if not file_id:
-            return _json_response({"error": "file_id required"}, 400)
-        cfg = load(workdir)
-        from ..files.cos import CosNotConfigured
-        from ..files.mailbox import MailboxError, complete_upload, public_file
-
-        try:
-            item = complete_upload(config=cfg, store=store, rec=rec, file_id=file_id)
-        except CosNotConfigured as exc:
-            return _json_response({"error": str(exc)}, 503)
-        except MailboxError as exc:
-            return _mailbox_error_response(exc)
         rec = store.get_session(rec.id) or rec
-        view = public_file(rec, item, include_pending=True)
+        view = public_file(rec, item, include_pending=True, config=cfg)
         return _json_response(view or {"id": item.get("id"), "status": item.get("status")})
 
     async def list_session_files(request: Request):
@@ -575,13 +553,14 @@ def create_app(workdir: Optional[Path] = None):
         if denied is not None:
             return denied
         from ..files.mailbox import public_files
+        from ..files.settings import include_pending_query, query_is_truthy
 
-        include_pending = request.query_params.get("include_pending", "").lower() in (
-            "1",
-            "true",
-            "yes",
+        cfg = load(workdir)
+        flag = request.query_params.get(include_pending_query(cfg), "") or ""
+        pending = query_is_truthy(cfg, flag)
+        return _json_response(
+            {"files": public_files(rec, include_pending=pending, config=cfg)}
         )
-        return _json_response({"files": public_files(rec, include_pending=include_pending)})
 
     async def download_session_file(request: Request):
         rec, denied = _owned_rec(request)
@@ -589,23 +568,40 @@ def create_app(workdir: Optional[Path] = None):
             return denied
         file_id = request.path_params["file_id"]
         cfg = load(workdir)
+        from starlette.responses import Response
+
         from ..files.cos import CosNotConfigured
-        from ..files.mailbox import MailboxError, download_target
+        from ..files.http_io import download_disposition_header
+        from ..files.mailbox import MailboxError, open_plaintext
+        from ..files import settings as file_settings
 
         try:
-            url = download_target(config=cfg, rec=rec, file_id=file_id)
+            item, plain = open_plaintext(config=cfg, rec=rec, file_id=file_id)
         except CosNotConfigured as exc:
             return _json_response({"error": str(exc)}, 503)
         except MailboxError as exc:
-            status = 404 if "not found" in str(exc).lower() else int(getattr(exc, "status", 400) or 400)
-            return _json_response({"error": str(exc)}, status)
-        want_json = request.query_params.get("json", "").lower() in ("1", "true", "yes")
-        accept = (request.headers.get("accept") or "").lower()
-        if want_json or "application/json" in accept:
-            return _json_response({"download_url": url})
-        from starlette.responses import RedirectResponse
+            return _mailbox_error_response(exc)
+        filename = str(item.get("filename") or file_settings.fallback_filename(cfg))
+        mime = str(item.get("mime") or file_settings.default_mime(cfg))
+        headers = {"Content-Disposition": download_disposition_header(request, cfg, filename)}
+        return Response(plain, media_type=mime, headers=headers)
 
-        return RedirectResponse(url, status_code=302)
+    async def delete_session_file(request: Request):
+        rec, denied = _owned_rec(request)
+        if denied is not None:
+            return denied
+        file_id = request.path_params["file_id"]
+        cfg = load(workdir)
+        from ..files.cos import CosNotConfigured
+        from ..files.mailbox import MailboxError, delete_session_file as remove_file
+
+        try:
+            remove_file(config=cfg, store=store, rec=rec, file_id=file_id)
+        except CosNotConfigured as exc:
+            return _json_response({"error": str(exc)}, 503)
+        except MailboxError as exc:
+            return _mailbox_error_response(exc)
+        return _json_response({"ok": True, "id": file_id})
 
     routes = [
         Route("/health", health),
@@ -621,19 +617,25 @@ def create_app(workdir: Optional[Path] = None):
         ),
         Route(
             "/v1/sessions/{session_id}/files/uploads",
-            create_file_upload,
+            deprecated_presign_upload,
             methods=["POST"],
         ),
         Route(
             "/v1/sessions/{session_id}/files/complete",
-            complete_file_upload,
+            deprecated_presign_upload,
             methods=["POST"],
         ),
         Route("/v1/sessions/{session_id}/files", list_session_files, methods=["GET"]),
+        Route("/v1/sessions/{session_id}/files", upload_session_file, methods=["POST"]),
         Route(
             "/v1/sessions/{session_id}/files/{file_id}",
             download_session_file,
             methods=["GET"],
+        ),
+        Route(
+            "/v1/sessions/{session_id}/files/{file_id}",
+            delete_session_file,
+            methods=["DELETE"],
         ),
         Route("/v1/users/{user_id}/usage", user_usage, methods=["GET"]),
         Route("/v1/models", models_list, methods=["GET"]),

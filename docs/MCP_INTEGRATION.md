@@ -1,7 +1,7 @@
 # MCP 对接文档（Tool / Agent）
 
 > 适用：在外部进程暴露 MCP，由 Sleuth CLI / HTTP 拉取工具（可选注册 Agent）。  
-> 实现参考：[`sleuth/mcp/`](../sleuth/mcp/)、样例包 [`agents/dd_analyst`](../agents/dd_analyst/)、[`agents/dd_reply`](../agents/dd_reply/)。  
+> 新 Agent 从 [`agents/scaffold`](../agents/scaffold/) 生成。实现参考：[`sleuth/mcp/`](../sleuth/mcp/)、样例包 [`agents/dd_analyst`](../agents/dd_analyst/)、[`agents/dd_reply`](../agents/dd_reply/)。  
 > 选型总览见 [`EXTENDING.md`](EXTENDING.md)。
 
 ---
@@ -122,7 +122,7 @@ Sleuth 侧用官方 `mcp` Python 包客户端；服务端可用 FastMCP / 任意
 - 每次调用前 bridge 会 `ctx.ask(qualified_name, …)`。
 - Agent Card / `agent.md` / 全局 `permission` 可对某工具设 `allow` / `ask` / `deny`。
 - `deny` + 通配会从模型可见工具列表中隐藏。
-- HTTP `--yolo` / body `yolo:true` 等价自动批准（仍受路径类 guardrails 约束）。
+- HTTP `--yolo` / body `yolo:true` 只自动批准 bash/edit 一类「ask」确认，**不能**绕过岗位 ACL，也不能让当前不是该 agent 的会话看见/调用 `agent:true` 的 MCP 工具。通用 MCP（`agent:false`）仍对所有会话可用。
 
 建议：对主业务 MCP 工具在 Agent 权限里写 **`allow`**，对 `bash` / `edit` / `write` 保持 **`ask`/`deny`**。
 
@@ -153,7 +153,7 @@ sleuth --agent <card.name>
 # 或 HTTP POST /v1/sessions  body: { "agent": "<card.name>" }
 ```
 
-无需在仓库里放 `agent.md`（本地有同名则本地优先）。
+无需在仓库里放 `agent.md`（本地有同名则本地优先）。新项目从 [`agents/scaffold`](../agents/scaffold/) 生成，不要从 `dd_analyst` / `dd_reply` 复制业务代码。
 
 ### 4.2 必须实现的 MCP 工具
 
@@ -191,9 +191,9 @@ sleuth --agent <card.name>
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `name` | 是 | Skill id |
-| `content` | 是 | 完整 SKILL 正文（可含 frontmatter） |
+| `content` | 否 | 私有 SOP 正文。省略则只引用目录/COS 里的同名 skill（复用，不必再开发一份） |
 | `description` | 否 | 目录短描述 |
-| `mcp` | 否 | 依赖的 MCP server 名列表 |
+| `mcp` | 否 | 依赖的 MCP server 名列表（warning，不是授权） |
 | `tools` | 否 | 依赖的工具名列表 |
 
 ### 4.4 合并语义（fill-empty）
@@ -202,7 +202,8 @@ sleuth --agent <card.name>
 
 1. 本地 / JSONC 已存在的 Agent 字段 **不覆盖**。
 2. Card 只填空字段、补缺失 permission 键。
-3. Skill：进程目录里 **已有同名则跳过** Card skill。
+3. Skill：进程目录里 **已有同名则跳过** Card 内嵌 content（COS/本地优先）。Card 只写 name 时用于专用 agent 自动注入目录 skill。
+4. `skill_names` 与本地 JSONC `agent.<name>.skills` 做并集。
 4. 敏感权限：Card 对 `bash` / `edit` / `write` / `task` 写 `allow` 时，除非 `SLEUTH_MCP_AGENT_TRUST_PERMISSIONS=1`，否则降为 **`ask`**。
 
 ### 4.5 Card 示例（结构）
@@ -283,6 +284,7 @@ sequenceDiagram
 | Bridge Tool | [`sleuth/mcp/bridge.py`](../sleuth/mcp/bridge.py) |
 | Card 解析 | [`sleuth/mcp/agent_card.py`](../sleuth/mcp/agent_card.py) |
 | 装配 | [`sleuth/app.py`](../sleuth/app.py) |
+| 脚手架（新 Agent 项目包） | [`agents/scaffold`](../agents/scaffold/) |
 | dd_analyst MCP | [`agents/dd_analyst/dd_check/mcp_server.py`](../agents/dd_analyst/dd_check/mcp_server.py) |
 | dd_reply MCP | [`agents/dd_reply/dd_reply/mcp_server.py`](../agents/dd_reply/dd_reply/mcp_server.py) |
 | 场景流程图 | [`AGENT_SCENARIOS.md`](AGENT_SCENARIOS.md) |

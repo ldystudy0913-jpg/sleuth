@@ -82,18 +82,30 @@ def parse_agent_card(
         permission=permission,
         steps=int(steps) if steps is not None else 50,
         model=str(data["model"]) if data.get("model") else None,
+        skill_names=[],
     )
 
     skills: List[SkillInfo] = []
     raw_skills = data.get("skills") or []
     if not isinstance(raw_skills, list):
         raw_skills = []
+    listed: List[str] = []
+    seen_names = set()
     for item in raw_skills:
+        if isinstance(item, str):
+            sname = item.strip()
+            if sname and sname not in seen_names:
+                seen_names.add(sname)
+                listed.append(sname)
+            continue
         if not isinstance(item, dict):
             continue
         sname = str(item.get("name") or "").strip()
         if not sname:
             continue
+        if sname not in seen_names:
+            seen_names.add(sname)
+            listed.append(sname)
         content = item.get("content")
         if content is None:
             continue
@@ -117,8 +129,10 @@ def parse_agent_card(
                 content=content_s,
                 required_mcp=[str(x) for x in mcp_req],
                 required_tools=[str(x) for x in tools_req],
+                owner_agent=name,
             )
         )
+    agent.skill_names = listed
 
     return agent, skills
 
@@ -141,6 +155,14 @@ def merge_agent_fill_empty(existing: AgentConfig, incoming: AgentConfig) -> Agen
                 existing.permission[k] = v
     if existing.mode == "all" and incoming.mode and incoming.mode != "all":
         existing.mode = incoming.mode
+    if incoming.skill_names:
+        seen = set(existing.skill_names or [])
+        merged_names = list(existing.skill_names or [])
+        for n in incoming.skill_names:
+            if n not in seen:
+                seen.add(n)
+                merged_names.append(n)
+        existing.skill_names = merged_names
     return existing
 
 

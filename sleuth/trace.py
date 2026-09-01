@@ -1,11 +1,35 @@
 """Project persisted messages into a Trajectory-style execution ledger."""
 from __future__ import annotations
 
+import datetime
 import time
 from typing import Any, Dict, List, Optional
 
 from .messages import Message, ToolResultBlock
 from .session_browse import truncate_preview
+from .title import get_zoneinfo
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def ms_to_iso(ms: Optional[int]) -> Optional[str]:
+    """ISO-8601 in configured timezone; None when ms is missing."""
+    if ms is None:
+        return None
+    try:
+        dt = datetime.datetime.fromtimestamp(int(ms) / 1000.0, tz=datetime.timezone.utc)
+        return dt.astimezone(get_zoneinfo()).isoformat(timespec="milliseconds")
+    except (OverflowError, OSError, ValueError, TypeError):
+        return None
+
+
+def _with_iso(row: Dict[str, Any], *keys: str) -> Dict[str, Any]:
+    for key in keys:
+        iso_key = f"{key}_iso"
+        row[iso_key] = ms_to_iso(row.get(key))
+    return row
 
 
 def now_ms() -> int:
@@ -68,18 +92,23 @@ def project_session_trace(
                 getattr(msg, "reasoning", None) or ""
             )
             records.append(
-                {
-                    "kind": "message",
-                    "seq": seq,
-                    "message_id": message_id,
-                    "step": _opt_int(meta.get("step")),
-                    "started_at": started_at,
-                    "first_token_at": first_token_at,
-                    "completed_at": completed_at,
-                    "duration_ms": duration_ms,
-                    "usage": meta.get("usage"),
-                    "preview": truncate_preview(preview_src, max_chars=preview_chars),
-                }
+                _with_iso(
+                    {
+                        "kind": "message",
+                        "seq": seq,
+                        "message_id": message_id,
+                        "step": _opt_int(meta.get("step")),
+                        "started_at": started_at,
+                        "first_token_at": first_token_at,
+                        "completed_at": completed_at,
+                        "duration_ms": duration_ms,
+                        "usage": meta.get("usage"),
+                        "preview": truncate_preview(preview_src, max_chars=preview_chars),
+                    },
+                    "started_at",
+                    "first_token_at",
+                    "completed_at",
+                )
             )
             continue
 
@@ -106,35 +135,42 @@ def project_session_trace(
                 )
                 preview_src = name or (getattr(block, "content", None) or "")
                 records.append(
-                    {
-                        "kind": "tool",
-                        "seq": seq,
-                        "message_id": message_id,
-                        "id": call_id or None,
-                        "name": name or None,
-                        "started_at": started_at,
-                        "duration_ms": duration_ms,
-                        "ended_at": ended_at,
-                        "is_error": _opt_bool(
-                            span["is_error"] if "is_error" in span else getattr(block, "is_error", None)
-                        ),
-                        "preview": truncate_preview(str(preview_src), max_chars=preview_chars),
-                    }
+                    _with_iso(
+                        {
+                            "kind": "tool",
+                            "seq": seq,
+                            "message_id": message_id,
+                            "id": call_id or None,
+                            "name": name or None,
+                            "started_at": started_at,
+                            "duration_ms": duration_ms,
+                            "ended_at": ended_at,
+                            "is_error": _opt_bool(
+                                span["is_error"] if "is_error" in span else getattr(block, "is_error", None)
+                            ),
+                            "preview": truncate_preview(str(preview_src), max_chars=preview_chars),
+                        },
+                        "started_at",
+                        "ended_at",
+                    )
                 )
             continue
 
         if role == "user":
             seq += 1
             records.append(
-                {
-                    "kind": "user",
-                    "seq": seq,
-                    "message_id": message_id,
-                    "started_at": _opt_int(meta.get("started_at")),
-                    "preview": truncate_preview(
-                        getattr(msg, "text", None) or "", max_chars=preview_chars
-                    ),
-                }
+                _with_iso(
+                    {
+                        "kind": "user",
+                        "seq": seq,
+                        "message_id": message_id,
+                        "started_at": _opt_int(meta.get("started_at")),
+                        "preview": truncate_preview(
+                            getattr(msg, "text", None) or "", max_chars=preview_chars
+                        ),
+                    },
+                    "started_at",
+                )
             )
 
     return {"session_id": session_id, "records": records}
@@ -149,10 +185,15 @@ def message_timing_fields(metadata: Any) -> Dict[str, Any]:
     duration_ms = _opt_int(meta.get("duration_ms"))
     if duration_ms is None:
         duration_ms = _duration_ms(started_at, completed_at)
-    return {
-        "step": _opt_int(meta.get("step")),
-        "started_at": started_at,
-        "first_token_at": first_token_at,
-        "completed_at": completed_at,
-        "duration_ms": duration_ms,
-    }
+    return _with_iso(
+        {
+            "step": _opt_int(meta.get("step")),
+            "started_at": started_at,
+            "first_token_at": first_token_at,
+            "completed_at": completed_at,
+            "duration_ms": duration_ms,
+        },
+        "started_at",
+        "first_token_at",
+        "completed_at",
+    )

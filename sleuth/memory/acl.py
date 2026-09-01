@@ -46,6 +46,23 @@ def attach_identity(session) -> None:
     session.org_id = org_id
 
 
+def _grants_for_resource(directory: Directory, resource_kind: str, resource_id: str, config) -> list:
+    """Exact grants plus same-kind wildcard (acl.wildcard_id), so future names are covered."""
+    grants = list(
+        directory.list_grants(
+            resource_kind=resource_kind, resource_id=resource_id, active_only=True
+        )
+    )
+    wildcard = settings.grant_wildcard_id(config)
+    if wildcard and wildcard != resource_id:
+        grants.extend(
+            directory.list_grants(
+                resource_kind=resource_kind, resource_id=wildcard, active_only=True
+            )
+        )
+    return grants
+
+
 def resource_allowed(
     config,
     user_id: str,
@@ -69,9 +86,7 @@ def resource_allowed(
             resource_id = resolver(resource_id)
     allow = settings.grant_allow(config)
     deny = settings.grant_deny(config)
-    grants = directory.list_grants(
-        resource_kind=resource_kind, resource_id=resource_id, active_only=True
-    )
+    grants = _grants_for_resource(directory, resource_kind, resource_id, config)
     user_grants = [g for g in grants if g.scope_kind == "user" and g.scope_id == user_id]
     if any(g.grant_effect == deny for g in user_grants):
         return False

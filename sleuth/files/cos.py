@@ -25,6 +25,7 @@ class ObjectStore(Protocol):
     def head(self, key: str) -> Optional[Dict[str, Any]]: ...
     def put_bytes(self, *, key: str, data: bytes, mime: str) -> None: ...
     def get_bytes(self, key: str, max_bytes: int = 0) -> bytes: ...
+    def delete_object(self, key: str) -> None: ...
 
 
 class BotoCosStore:
@@ -132,9 +133,12 @@ class BotoCosStore:
             return b""
         cap = int(max_bytes or 0)
         chunks = bytearray()
+        chunk_size = int(getattr(self._cos, "read_chunk_bytes", 0) or 0)
+        if chunk_size <= 0:
+            chunk_size = int(CosConfig().read_chunk_bytes)
         try:
             while True:
-                chunk = body.read(256 * 1024)
+                chunk = body.read(chunk_size)
                 if not chunk:
                     break
                 chunks.extend(chunk)
@@ -148,6 +152,12 @@ class BotoCosStore:
                 except Exception:
                     pass
         return bytes(chunks)
+
+    def delete_object(self, key: str) -> None:
+        try:
+            self._boto().delete_object(Bucket=self._cos.bucket, Key=key)
+        except Exception as exc:
+            raise CosError(f"delete_object failed: {exc}") from exc
 
 
 class MemoryObjectStore:
@@ -181,6 +191,9 @@ class MemoryObjectStore:
         if cap and len(data) > cap:
             raise CosError(f"object too large: {len(data)} > {cap}")
         return data
+
+    def delete_object(self, key: str) -> None:
+        self.objects.pop(key, None)
 
 
 def object_store_from_config(config: Config) -> ObjectStore:

@@ -11,6 +11,7 @@ Python 编程 Agent：本机 CLI 与多用户 HTTP 服务。支持远程 MCP 工
 | [docs/API.md](docs/API.md) | HTTP / SSE 前端接口 |
 | [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) | MCP Tool / Agent Card 对接规范 |
 | [docs/SKILL_INTEGRATION.md](docs/SKILL_INTEGRATION.md) | Skill 接入与开发规范 |
+| [agents/scaffold/README.md](agents/scaffold/README.md) | 新 Agent 脚手架（模板包 + 生成器） |
 | [docs/AGENT_SCENARIOS.md](docs/AGENT_SCENARIOS.md) | `dd_analyst` / `dd_reply` 内部流程图 |
 | [docs/EXTENDING.md](docs/EXTENDING.md) | 扩展选型与改代码清单 |
 
@@ -51,7 +52,7 @@ py -3.12 -m sleuth --yolo "用三句话说明 sleuth/session.py 做什么"
 | `SLEUTH_S3_ENDPOINT` / `AWS_*` | Skill 与会话文件共用的 COS 凭证、地域、Endpoint |
 | `SLEUTH_SKILLS_S3` | Skill 对象前缀；桶名同时用于会话文件 |
 | `SLEUTH_COS_PATH_PREFIX` | 会话文件对象键前缀（默认 `sleuth/files`） |
-| `SLEUTH_FILES_*` / `SLEUTH_SM4_KEY` | 单文件大小、会话文件数、预签名 TTL、MIME 白名单、前端 SM4 加密与摘录抽取 |
+| `SLEUTH_FILES_*` / `SLEUTH_SM4_KEY` | 会话文件：大小/数量、服务端 SM4、上传字段、下载路径、摘录抽取、prompt 文案（默认在 `FilesConfig`，`.env` / jsonc 可覆盖） |
 | `SLEUTH_KB_*` | 默认 agent（`build`）远程知识库：login Cookie `ragToken` + `serviceConfig`，与 dd_reply 同一 API |
 | `SLEUTH_MEMORY_*` / `SLEUTH_OG_*` / `SLEUTH_EMBEDDING_*` | 分层长期记忆（OpenGauss；需手工建表。在仓库根目录对**启动服务的同一解释器**执行 `python -m pip install -e ".[memory]"`，不要从内网 PyPI `pip install sleuth[memory]`） |
 | `SLEUTH_ACL_*` | 岗位授权过滤 agent/skill（目录表与会话同库，需手工建表） |
@@ -153,7 +154,7 @@ py -3.12 -m sleuth.server
 | POST/GET | `/v1/sessions`（创建可选 body `model`；列表含 `preview` / `time_updated_local`） |
 | GET | `/v1/sessions/{id}`（含 `model`、messages、计时字段） |
 | GET | `/v1/sessions/{id}/trace`（执行台账；见 [docs/API.md](docs/API.md) §4.4.1） |
-| POST | `/v1/sessions/{id}/files/uploads` · `.../complete`；GET `.../files` · `.../files/{file_id}`（COS 邮箱，见 [docs/API.md](docs/API.md) §4.4.2） |
+| POST | `/v1/sessions/{id}/files`（multipart 明文）；GET/DELETE `.../files/{file_id}`（明文下载 / 删除；见 [docs/API.md](docs/API.md) §4.4.2） |
 | POST | `/v1/sessions/{id}/messages`（可选 body `model`，本轮前切换；**同步长耗时**） |
 | POST | `/v1/sessions/{id}/messages/stream`（同上 Body；**SSE**，见 [docs/API.md](docs/API.md) §4.5.1） |
 | GET | `/v1/models` · `/v1/agents`（选择器目录；agents 含 available） |

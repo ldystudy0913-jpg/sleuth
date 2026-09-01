@@ -861,8 +861,9 @@ def _handle_skills_command(session, rest: str) -> None:
         if len(desc) > 72:
             desc = desc[:69] + "..."
         mark = " *" if s.get("name") in selected else ""
+        pin = "" if s.get("pinnable", True) else " [private]"
         _print(
-            f"  {s.get('name')}{mark}\n"
+            f"  {s.get('name')}{mark}{pin}\n"
             f"      {desc or '(no description)'}\n"
             f"      {s.get('location') or '-'}\n"
         )
