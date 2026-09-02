@@ -389,7 +389,9 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
 - **出参**：工具返回 JSON 若含 `files[]`（`filename` / `mime` / `object_key` 或 `https` `url`），基座登记为会话 `role: assistant` 文件，并出现在同步响应 / SSE `done.files`。禁止 data-URL。
 - **出参**：工具返回 JSON 若含顶层 `sources[]`（`title` / `file_name` / `name` + `http(s)` `url`），基座在本轮**最终**助手答复末尾附加灰色可点击清单（`《标题》：url`）。同一 URL（忽略末尾 `/`）只保留首次出现的标题；正文里已出现的 URL 不再重复。`sources` 缺省、空数组或无有效链接时**不附加**「知识来源」段，答复就是模型正文。禁止 data-URL / file-URL。任意 agent 只要遵守该字段即可；基座**不解析**各 agent 的 markdown。默认 agent `build` 的 `kb_lookup` 同样输出 `sources[]`，检索命中后也会附来源。
 
-默认 agent `build` 另有内置 `kb_lookup`（`SLEUTH_KB_API_URL` + 登录 Cookie `ragToken`）、`read_session_file`（读摘录；传入 `question` 可按用户问题再解析图片/扫描 PDF 或加长文档抽取，不覆盖已存 excerpt）与 `save_output_file`（把生成文本写入同一 COS 邮箱）。
+默认 agent `build` 另有内置 `kb_lookup`（`SLEUTH_KB_API_URL` + 登录 Cookie `ragToken`）、`read_session_file`（读摘录；传入 `question` 可按用户问题再解析图片/扫描 PDF 或加长文档抽取，不覆盖已存 excerpt）与 `save_output_file`（把生成文本写入同一 COS 邮箱）。专用 Agent 的 Card 可对这两项写 `deny` 藏掉；也可以自建检索或对象存储，只要最终 JSON 符合上表，或干脆只返回纯文本。
+
+脚手架 [`agents/scaffold/generate.py`](../agents/scaffold/generate.py) 三个互不依赖的 flag 默认关：`--attachments`（会话摘录 helper）、`--kb`（本包 `kb_search` 桩，`sources[]`）、`--output`（`emit_file` 桩，`files[]`）。关掉 = 第三方不用；打开 = 得到可替换的空实现，自行填 URL/解析。不要从 `dd_reply` 拷业务代码。
 
 ---
 

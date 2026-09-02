@@ -8,6 +8,7 @@ from typing import Any, Optional
 from .agent_card import load_agent_card
 from .config import Settings, get_settings
 from .pipeline import ping as run_ping
+__OPTIONAL_MCP_IMPORTS__
 
 
 def health_payload(settings: Settings) -> dict[str, Any]:
@@ -108,26 +109,18 @@ def build_mcp_server(
         name="ping",
         description=(
             "Echo a message. Replace this with your real business tool. "
-            "Optional attachment_refs_json is injected by Sleuth when the schema "
-            "declares it (session-file excerpts). Returns JSON with echo + sources[]."
+            "__PING_MCP_DESCRIPTION__"
         ),
     )
-    def ping(message: str = "pong", attachment_refs_json: str = "[]") -> str:
-        try:
-            refs = json.loads(attachment_refs_json) if attachment_refs_json else []
-        except json.JSONDecodeError:
-            refs = []
-        if not isinstance(refs, list):
-            refs = []
-        result = run_ping(
-            message,
-            attachment_refs=[r for r in refs if isinstance(r, dict)],
-        )
+    def ping(__PING_MCP_SIGNATURE__) -> str:
+        __PING_MCP_BODY__
         return json.dumps(result, ensure_ascii=False)
 
     @server.tool(name="health", description="__AGENT_NAME__ tool-surface health probe.")
     def health() -> str:
         return json.dumps(health_payload(settings), ensure_ascii=False)
+
+    __OPTIONAL_REGISTER__
 
     return server
 

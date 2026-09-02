@@ -29,6 +29,9 @@ py -3.12 agents/scaffold/generate.py --name demo_ops --port 8799 --skill private
 | `--server` | 去掉下划线的 name | MCP 配置键，合格名前缀 |
 | `--port` | `8799` | Streamable HTTP 端口，路径 `/mcp` |
 | `--skill` | `private` | `private` / `cos` / `both` / `none` |
+| `--attachments` | 关 | 会话摘录 helper；`ping` 声明 `attachment_refs_json` |
+| `--kb` | 关 | 本包 `kb_search` 桩（`sources[]`）；Card `kb_lookup: deny` |
+| `--output` | 关 | `emit_file` 回传桩（`files[]`）；Card `save_output_file: allow` |
 | `--out` | `agents/<name>` | 输出目录 |
 | `--title` | 由 name 生成 | Agent Card / 前端展示名 |
 | `--force` | 关 | 覆盖已存在的 `--out` |
@@ -54,4 +57,20 @@ Sleuth `.env` 粘贴生成包里的 `deploy/sleuth.env.snippet`。
 3. `agent.md` — 人设；`permission` 必须用合格名 `{server}_{tool}`
 4. `skills/*/SKILL.md` 或 `skills_cos/*/SKILL.md` — SOP，工具名同样用合格名
 
-契约已写好、可跑通：`get_agent_card`、`health`（含 `GET /health`）、`ping`（可选 `attachment_refs_json`，出参可带 `sources[]`）。
+契约已写好、可跑通：`get_agent_card`、`health`（含 `GET /health`）、`ping`。文件解析在 Sleuth 完成；默认生成的 `ping` **不**声明 `attachment_refs_json`。出参 `sources[]` / `files[]` 是可选约定，基座不解析你们的内部逻辑。
+
+## 可选能力（默认关）
+
+三个 flag 互不依赖，默认都不生成对应模块：
+
+```powershell
+py -3.12 agents/scaffold/generate.py --name demo_ops --attachments --kb --output
+```
+
+| Flag | 生成什么 | Card |
+|------|----------|------|
+| `--attachments` | `attachments.py`：优先 `excerpt`；无 excerpt 且未加密才允许 http(s) 下载；跳过 data:/file: 与密文 | `ping` 带 `attachment_refs_json` |
+| `--kb` | `kb.py` + `kb_search`（读 `{PKG}_KB_API_URL`，空则 `sources: []`） | `{server}_kb_search: allow`，`kb_lookup: deny` |
+| `--output` | `output.py` + `emit_file`（返回 `files[]`） | `{server}_emit_file: allow`，`save_output_file: allow` |
+
+不加 `--kb` 时仍写 `kb_lookup: deny`（专用人格默认不碰 build 的知识库）。不加 `--output` 时 `save_output_file: deny`。想改用基座检索：删掉 `kb_lookup` deny、去掉本包 `kb_search` 即可。回传文件用 MCP `files[]` **或** Sleuth `save_output_file`，不要把字节/data-URL 写进答复。

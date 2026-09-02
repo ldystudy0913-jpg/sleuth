@@ -155,6 +155,8 @@ sleuth --agent <card.name>
 
 无需在仓库里放 `agent.md`（本地有同名则本地优先）。新项目从 [`agents/scaffold`](../agents/scaffold/) 生成，不要从 `dd_analyst` / `dd_reply` 复制业务代码。
 
+文件解析统一在 Sleuth（解密 + excerpt）。MCP 工具 JSON Schema 只要声明 `attachment_refs_json`，桥就会在调用前注入摘录；不声明则基座不注入。Sleuth **不解析** Agent 内部逻辑。工具返回值是字符串；只有希望基座做 UI/邮箱时才遵守可选顶层 JSON：`sources[]`（知识来源）、`files[]`（回传文件）。禁止 data-URL / file-URL。脚手架 `generate.py` 用 `--attachments` / `--kb` / `--output` 按需生成桩，**默认都不生成**（详见 [`EXTENDING.md`](EXTENDING.md) §9b）。
+
 ### 4.2 必须实现的 MCP 工具
 
 | 工具名 | 参数 | 返回 |

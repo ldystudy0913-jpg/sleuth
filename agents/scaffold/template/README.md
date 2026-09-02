@@ -25,3 +25,7 @@ py -3.12 -m __PKG_NAME__.mcp_server
 探活：`GET http://127.0.0.1:__MCP_PORT__/health`
 
 接到 Sleuth：见 [HOWTO_SLEUTH.md](HOWTO_SLEUTH.md)。当前 Skill 模式：`__SKILL_MODE__`。
+
+文件解析在 Sleuth 完成。本包生成时的可选模块：
+
+__OPTIONAL_README_EXTRAS__

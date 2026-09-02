@@ -49,6 +49,7 @@ class Settings:
             overrides.get("mcp_port", _env_int("__ENV_PREFIX___MCP_PORT", __MCP_PORT__))
         )
         self.service_name: str = "__PKG_NAME__-tools"
+        __OPTIONAL_SETTINGS_INIT__
 
     def as_health(self) -> dict:
         return {
