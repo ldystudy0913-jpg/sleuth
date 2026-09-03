@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dd-check-capability"
+version = "0.1.0"
+description = "Sleuth MCP agent capability package for dd_check."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.9", "uvicorn>=0.30", "starlette>=0.37"]
+cos = ["boto3"]
+docx = ["python-docx>=1.1"]
+all = ["mcp>=1.9", "uvicorn>=0.30", "starlette>=0.37", "boto3", "python-docx>=1.1"]
+
+[project.scripts]
+dd_check-mcp = "dd_check.mcp_server:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dd_check*"]

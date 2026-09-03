@@ -1,6 +1,6 @@
 # Agent 场景内部流程图
 
-> 当前仓库两个独立 Agent 包：`dd_analyst`（尽调报告检查）、`dd_reply`（尽调答复框架）。  
+> 当前仓库两个独立 Agent 包：`dd_check`（尽调报告检查）、`dd_reply`（尽调答复框架）。  
 > 二者均通过 **MCP + 可选 Agent Card** 挂到 Sleuth，不修改 Sleuth 内核。  
 > MCP / Skill 规范见 [`MCP_INTEGRATION.md`](MCP_INTEGRATION.md)、[`SKILL_INTEGRATION.md`](SKILL_INTEGRATION.md)。
 
@@ -35,7 +35,7 @@ flowchart TD
 
 | 场景 | 包 | MCP 键示例 | 默认 URL | Agent 名 | Skill |
 |------|-----|------------|----------|----------|-------|
-| 尽调检查 | `agents/dd_analyst` | `ddcheck` | `http://127.0.0.1:8791/mcp` | `dd_analyst` | `dd-report-check` |
+| 尽调检查 | `agents/dd_check` | `ddcheck` | `http://127.0.0.1:8791/mcp` | `dd_check` | `dd-check-sop` |
 | 答复框架 | `agents/dd_reply` | `ddreply` | `http://127.0.0.1:8792/mcp` | `dd_reply` | `dd-reply-framework` |
 
 ```env
@@ -44,125 +44,63 @@ SLEUTH_MCP_SERVERS={"ddcheck":{"type":"remote","url":"http://127.0.0.1:8791/mcp"
 
 ---
 
-## 1. `dd_analyst` — 尽调报告检查
+## 1. `dd_check` — 尽调报告检查
 
 ### 1.1 职责
 
-对尽调报告做策略解析 → 规则维度检查 → 评分定级 → 可选 LLM 摘要 → 可选人工确认（HITL）→ 落结果。引擎为 **LangGraph**。
+对用户提交的已填写尽调报告（正文、结构化 JSON、纯文本、会话附件摘录）做填写检查：逻辑一致性、充分性、附件有效性等（口径在 `config/rubric.json`）。过程中可检索本包知识库；输出 findings（含 location）、加权总分、Word 回传。引擎为 **线性 pipeline**（脚手架生成后实现，不是 LangGraph）。
 
 ### 1.2 MCP 工具面（服务端原名 → Sleuth 合格名）
 
 | MCP 工具 | 合格名（server=`ddcheck`） | 作用 |
 |----------|---------------------------|------|
 | `get_agent_card` | `ddcheck_get_agent_card` | 注册 Agent/Skill |
-| `run_dd_check` | `ddcheck_run_dd_check` | 启动检查图 |
-| `resume_dd_check` | `ddcheck_resume_dd_check` | HITL 继续（非 rollback） |
-| `list_dd_checkpoints` | `ddcheck_list_dd_checkpoints` | 检查点列表 |
-| `rollback_dd_check` | `ddcheck_rollback_dd_check` | 从 checkpoint 时间旅行分叉 |
-| `run_dd_batch` | `ddcheck_run_dd_batch` | 批量（强制关 HITL） |
-| `describe_graph` | `ddcheck_describe_graph` | 静态图说明 |
+| `check_report` | `ddcheck_check_report` | 主检查（内部 LLM + 可选 KB + Word） |
+| `kb_search` | `ddcheck_kb_search` | 仅 KB env 配齐时注册；排障用 |
+| `emit_file` | `ddcheck_emit_file` | 仅 COS env 配齐时注册；排障用 |
 | `health` | `ddcheck_health` | 探活 |
 
-入口实现：[`dd_check/mcp_server.py`](../agents/dd_analyst/dd_check/mcp_server.py) → [`graph/runner.py`](../agents/dd_analyst/dd_check/graph/runner.py)。
+入口：[`dd_check/mcp_server.py`](../agents/dd_check/dd_check/mcp_server.py) → [`pipeline.py`](../agents/dd_check/dd_check/pipeline.py) 的 `check_report`。
 
-### 1.3 LangGraph 节点与条件边（代码节点名）
-
-图编译：[`graph/build.py`](../agents/dd_analyst/dd_check/graph/build.py)；路由：[`graph/routing.py`](../agents/dd_analyst/dd_check/graph/routing.py)；节点：[`graph/nodes.py`](../agents/dd_analyst/dd_check/graph/nodes.py)。
+### 1.3 Pipeline 内部流转
 
 ```mermaid
 flowchart TD
-  START([START]) --> ingest_normalize
-  ingest_normalize --> resolve_strategy
-  resolve_strategy --> parse_report
-  parse_report -->|after_parse: need_attachments| fetch_attachments
-  parse_report -->|after_parse: else| skip_attachments
-  fetch_attachments --> run_rule_dims
-  skip_attachments --> run_rule_dims
-  run_rule_dims --> score_aggregate
-  score_aggregate -->|after_score: llm_enabled| llm_summarize
-  score_aggregate -->|after_score: hitl_needed| human_confirm
-  score_aggregate -->|after_score: else| emit_result
-  llm_summarize -->|after_summary: hitl_needed| human_confirm
-  llm_summarize -->|after_summary: else| emit_result
-  human_confirm -->|interrupt 后 resume| emit_result
-  emit_result --> END([END])
+  MCP[check_report] --> norm[归一化 text JSON excerpt]
+  norm --> kbGate{KB env 配齐?}
+  kbGate -->|是| seed[rubric seed queries]
+  seed --> llm1[LLM JSON 维度分 findings]
+  llm1 --> extra[可选 kb_questions 再检索]
+  extra --> llm2[带 sources 再评一次]
+  kbGate -->|否| llm1b[LLM JSON 一次]
+  llm2 --> score[Python 加权总分]
+  llm1b --> score
+  score --> docx[python_docx]
+  docx --> emit[COS emit_file bytes]
+  emit --> out[score findings sources files]
 ```
 
-#### 节点做什么
+会话附件由 Sleuth 解密并注入 `attachment_refs_json`；本进程不解 SM4。
 
-| 节点 | 内部行为（摘要） |
-|------|------------------|
-| `ingest_normalize` | 规范化入参（报告文本、invest_id、选项等）写入 `CheckState` |
-| `resolve_strategy` | 按策略模板解析检查维度 / 规则集 |
-| `parse_report` | 解析报告结构；决定是否需要拉附件 |
-| `fetch_attachments` | MySQL 元数据 + COS + 可选 SM4 解密，取附件文本 |
-| `skip_attachments` | 无附件路径的空操作汇合点 |
-| `run_rule_dims` | 按维度跑规则，产出 findings |
-| `score_aggregate` | 汇总得分、等级、风险结论 |
-| `llm_summarize` | 可选：调用 LLM 生成自然语言摘要 |
-| `human_confirm` | `interrupt(payload)` 暂停；等待 `resume` 决策（approve / edit_summary / reject） |
-| `emit_result` | 组装最终结果（可写结果库） |
-
-#### 路由条件
-
-| 函数 | 出口 | 条件 |
-|------|------|------|
-| `after_parse` | `fetch_attachments` / `skip_attachments` | `need_attachments` |
-| `after_score` | `llm_summarize` / `human_confirm` / `emit_result` | `llm_enabled`；否则看 `hitl_needed` |
-| `after_summary` | `human_confirm` / `emit_result` | `hitl_needed` |
-| `hitl_needed`（语义） | — | `hitl_enabled` 且（非仅失败才打断 **或** 存在 FAIL finding） |
-
-### 1.4 含 HITL / Checkpoint 的端到端流转
+### 1.4 Sleuth 端到端
 
 ```mermaid
 sequenceDiagram
   participant U as 用户
   participant SL as Sleuth_Session
   participant MCP as ddcheck_MCP
-  participant G as LangGraph
-  participant CP as SqliteCheckpointer
+  participant P as pipeline.check_report
   U->>SL: 请检查这份尽调报告
-  SL->>SL: skill dd-report-check
-  SL->>MCP: run_dd_check
-  MCP->>G: start_check / invoke
-  G->>G: ingest…score…可选 llm
-  alt HITL 关闭
-    G->>G: emit_result
-    MCP-->>SL: 完成 JSON 得分等级 findings
-  else HITL 开启
-    G->>CP: 持久化至 human_confirm
-    G-->>MCP: status awaiting_human + thread_id
-    MCP-->>SL: 待人工确认
-    SL-->>U: 展示中断载荷
-    U->>SL: 批准或改摘要或驳回
-    SL->>MCP: resume_dd_check
-    MCP->>G: Command resume
-    G->>G: emit_result
-    MCP-->>SL: 最终结果
-  end
-  opt 运维时间旅行
-    SL->>MCP: list_dd_checkpoints
-    SL->>MCP: rollback_dd_check checkpoint_id
-    MCP->>G: 从旧 checkpoint 分叉再跑
-  end
+  SL->>SL: skill dd-check-sop
+  SL->>MCP: check_report
+  MCP->>P: text JSON excerpts
+  P->>P: KB LLM 加权 Word
+  P-->>MCP: JSON score findings sources files
+  MCP-->>SL: tool_result
+  SL-->>U: 中文归纳加知识来源与 Word 下载
 ```
 
-环境要点：
-
-- `DD_CHECK_HITL=1` 时必须配置 `DD_CHECK_CHECKPOINT_SQLITE_PATH`，并先执行 DDL（`deploy/ddl_langgraph_checkpoint.sql`）。
-- 批量 `run_dd_batch` **强制关闭 HITL**。
-- `resume_dd_check` ≠ `rollback_dd_check`：前者继续中断点，后者从历史 checkpoint 分叉。
-
-### 1.5 同步无 HITL 的最短路径
-
-```text
-START
- → ingest_normalize → resolve_strategy → parse_report
- → skip_attachments（或 fetch_attachments）
- → run_rule_dims → score_aggregate
- → [llm_summarize?]
- → emit_result → END
-```
+环境要点：`DD_CHECK_LLM_*` 三项配齐才能检查；`DD_CHECK_ATTACHMENTS=1` 才注入附件；KB / COS 按本包 `.env` 配齐后重启 MCP。
 
 ---
 
@@ -247,13 +185,13 @@ sequenceDiagram
 
 ## 3. 两场景对比
 
-| | `dd_analyst` | `dd_reply` |
+| | `dd_check` | `dd_reply` |
 |--|--------------|------------|
-| 业务 | 报告检查 / 评分 | 答复框架生成 |
-| 引擎 | LangGraph | 线性 pipeline |
-| HITL / Checkpoint | 可选（LangGraph interrupt） | 缺字段 `need_input` + 基座 `question` 暂停；用户选择补充或继续 |
-| 主工具 | `ddcheck_run_dd_check` | `ddreply_generate_reply_framework` |
-| Skill | `dd-report-check` | `dd-reply-framework` |
+| 业务 | 报告填写检查 / 加权评分 / Word | 答复框架生成 |
+| 引擎 | 线性 pipeline + 本包 LLM | 线性 pipeline |
+| HITL / Checkpoint | 无 | 缺字段 `need_input` + 基座 `question` 暂停；用户选择补充或继续 |
+| 主工具 | `ddcheck_check_report` | `ddreply_generate_reply_framework` |
+| Skill | `dd-check-sop` | `dd-reply-framework` |
 | 默认端口 | 8791 | 8792 |
 | 挂载方式 | MCP `agent:true` 或本地 agent.md | 同左 |
 
@@ -263,9 +201,9 @@ sequenceDiagram
 
 | 文档 / 代码 | 说明 |
 |-------------|------|
-| [`agents/dd_analyst/HOWTO_SLEUTH.md`](../agents/dd_analyst/HOWTO_SLEUTH.md) | 检查包接入 Sleuth |
+| [`agents/dd_check/HOWTO_SLEUTH.md`](../agents/dd_check/HOWTO_SLEUTH.md) | 检查包接入 Sleuth |
 | [`agents/dd_reply/HOWTO_SLEUTH.md`](../agents/dd_reply/HOWTO_SLEUTH.md) | 答复包接入 Sleuth |
-| [`agents/dd_analyst/dd_check/graph/build.py`](../agents/dd_analyst/dd_check/graph/build.py) | 图结构真源 |
+| [`agents/dd_check/dd_check/pipeline.py`](../agents/dd_check/dd_check/pipeline.py) | 检查流水线真源 |
 | [`agents/dd_reply/dd_reply/pipeline.py`](../agents/dd_reply/dd_reply/pipeline.py) | 流水线真源 |
 | [`MCP_INTEGRATION.md`](MCP_INTEGRATION.md) | MCP Tool / Agent Card 规范 |
 | [`SKILL_INTEGRATION.md`](SKILL_INTEGRATION.md) | Skill 规范 |

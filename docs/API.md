@@ -256,7 +256,7 @@ X-User-Id: alice
     "id": "sess_bbb222...",
     "user_id": "alice",
     "title": "尽调报告检查 - XX银行",
-    "agent": "dd_analyst",
+    "agent": "dd_check",
     "model": { "id": "qwen-max", "providerID": "qwen-max" },
     "skill": null,
     "skills": [],
@@ -292,7 +292,7 @@ X-User-Id: alice
   "id": "sess_a1b2c3d4e5f678901234abcd",
   "user_id": "alice",
   "title": "尽调报告检查 - XX银行",
-  "agent": "dd_analyst",
+  "agent": "dd_check",
   "model": { "id": "qwen-max", "providerID": "qwen-max" },
   "skill": null,
   "skills": [],
@@ -510,8 +510,8 @@ X-User-Id: alice
   "prompt": "请检查下面这份尽调报告：\n{...}",
   "agent": "build",
   "model": "qwen-max",
-  "skills": ["dd-report-check"],
-  "skill": "dd-report-check",
+  "skills": ["dd-check-sop"],
+  "skill": "dd-check-sop",
   "yolo": true
 }
 ```
@@ -529,8 +529,8 @@ X-User-Id: alice
     "id": "qwen-max",
     "providerID": "qwen-max"
   },
-  "skill": "dd-report-check",
-  "skills": ["dd-report-check"],
+  "skill": "dd-check-sop",
+  "skills": ["dd-check-sop"],
   "files": [],
   "usage": {
     "input": 1200,
@@ -632,8 +632,8 @@ data: {"type":"text","delta":"你好","session_id":"sess_a1b2c3d4e5f678901234abc
     "id": "qwen-max",
     "providerID": "qwen-max"
   },
-  "skill": "dd-report-check",
-  "skills": ["dd-report-check"],
+  "skill": "dd-check-sop",
+  "skills": ["dd-check-sop"],
   "files": [],
   "usage": {
     "input": 1200,
@@ -657,11 +657,11 @@ data: {"type":"text","delta":"正在","first_token_at":1723123457120,"session_id
 
 data: {"type":"text","delta":"检查…","session_id":"sess_..."}
 
-data: {"type":"tool_start","name":"ddcheck_run_dd_check","id":"call_...","step":1,"started_at":1723123458100,"args_preview":"{...}","session_id":"sess_..."}
+data: {"type":"tool_start","name":"ddcheck_check_report","id":"call_...","step":1,"started_at":1723123458100,"args_preview":"{...}","session_id":"sess_..."}
 
 data: {"type":"stop","reason":"tool_use","usage":{...},"step":1,"started_at":1723123456900,"first_token_at":1723123457120,"completed_at":1723123458100,"duration_ms":1200,"session_id":"sess_..."}
 
-data: {"type":"tool_result","name":"ddcheck_run_dd_check","id":"call_...","is_error":false,"duration_ms":800,"ended_at":1723123458900,"output_preview":"{...}","session_id":"sess_..."}
+data: {"type":"tool_result","name":"ddcheck_check_report","id":"call_...","is_error":false,"duration_ms":800,"ended_at":1723123458900,"output_preview":"{...}","session_id":"sess_..."}
 
 data: {"type":"text","delta":"\n结论：得分 72","first_token_at":1723123459000,"session_id":"sess_..."}
 
@@ -795,7 +795,7 @@ async function streamMessage(base, sessionId, userId, prompt) {
       "available": true
     },
     {
-      "name": "dd_analyst",
+      "name": "dd_check",
       "title": "尽调报告检查分析师",
       "description": "对银行尽职调查报告做确定性检查与中文研判。",
       "mode": "primary",
@@ -837,11 +837,11 @@ async function streamMessage(base, sessionId, userId, prompt) {
       "connected": true,
       "error": null,
       "agent": true,
-      "agents": ["dd_analyst"]
+      "agents": ["dd_check"]
     }
   ],
-  "tools": ["ddcheck_run_dd_check"],
-  "agents": ["dd_analyst"],
+  "tools": ["ddcheck_check_report"],
+  "agents": ["dd_check"],
   "errors": []
 }
 ```
@@ -924,7 +924,7 @@ async function streamMessage(base, sessionId, userId, prompt) {
 {
   "ok": true,
   "count": 3,
-  "names": ["dd-report-check", "other-skill"]
+  "names": ["dd-check-sop", "other-skill"]
 }
 ```
 
@@ -1061,7 +1061,7 @@ Invoke-RestMethod "$base/v1/sessions/$sid/trace" -Headers @{ "X-User-Id" = "alic
 | MCP 工具（如尽调 `ddcheck_*`） | ❌ 无独立 HTTP | 由 Agent 在 `POST .../messages` 或 `.../messages/stream` 内部调用远程 MCP |
 | CLI `/sessions` | — | 与列表接口同源逻辑（`session_browse`） |
 
-若前端需要「尽调检查原始 JSON 结果」，应：让用户/产品在对话里触发 `dd_analyst`，或后续单独加业务 HTTP 代理；当前 Sleuth HTTP **不**透出 MCP 工具直调。
+若前端需要「尽调检查原始 JSON 结果」，应：让用户/产品在对话里触发 `dd_check`，或后续单独加业务 HTTP 代理；当前 Sleuth HTTP **不**透出 MCP 工具直调。
 
 ---
 

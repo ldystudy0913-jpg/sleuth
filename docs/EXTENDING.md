@@ -8,7 +8,7 @@
 - [MCP 对接（Tool / Agent Card）](MCP_INTEGRATION.md)
 - [Skill 接入与开发规范](SKILL_INTEGRATION.md)
 - [Agent 脚手架（新 Agent 项目包）](../agents/scaffold/README.md)
-- [Agent 场景内部流程（dd_analyst / dd_reply）](AGENT_SCENARIOS.md)
+- [Agent 场景内部流程（dd_check / dd_reply）](AGENT_SCENARIOS.md)
 - [HTTP API](API.md)
 
 ---
@@ -21,7 +21,7 @@
 | 能力在**外部服务**里，或希望独立部署/多语言 | **MCP**（`SLEUTH_MCP_SERVERS`） | 除非必须本地强集成，否则别写 Python Tool |
 | 给模型一段**可复用流程/规范**（怎么排查、怎么发版） | **Skill**（`SKILL.md`） | Tool（除非还要执行） |
 | 换一套权限/提示词/工具可见性 | **Agent**（`build` / `plan` / 自定义） | 硬改全局 permission |
-| 新做一个要对接到 Sleuth 的业务 Agent | [`agents/scaffold`](../agents/scaffold/) 生成独立 MCP 包 | 从 dd_analyst / dd_reply 复制业务代码 |
+| 新做一个要对接到 Sleuth 的业务 Agent | [`agents/scaffold`](../agents/scaffold/) 生成独立 MCP 包 | 从 dd_check / dd_reply 复制业务代码 |
 | 会话、用量、todo 换库或加字段 | **Store** | 在 Tool 里自己写文件当库 |
 | 新开关、密钥、路径 | **Config / `.env`** | 在业务代码里写死 |
 | 对外暴露 HTTP | **`sleuth/server/`**，内部仍调 `build_session` | 复制一套 CLI 逻辑 |
@@ -189,7 +189,7 @@ py -3.12 -m sleuth --yolo "列出你可用的工具名，看是否包含 docs_..
 4. 安全：Card 里对 `bash`/`edit`/`write`/`task` 的 `allow` 默认降为 `ask`（`SLEUTH_MCP_AGENT_TRUST_PERMISSIONS=1` 可关闭消毒）。  
 5. 拉 Card 失败只记 error，**不阻断**工具注册。
 
-约定与解析：[`sleuth/mcp/agent_card.py`](../sleuth/mcp/agent_card.py)。样例 Agent：[`agents/dd_analyst`](../agents/dd_analyst)。
+约定与解析：[`sleuth/mcp/agent_card.py`](../sleuth/mcp/agent_card.py)。样例 Agent：[`agents/dd_check`](../agents/dd_check)。
 
 ---
 
@@ -391,7 +391,7 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
 
 默认 agent `build` 另有内置 `kb_lookup`（`SLEUTH_KB_API_URL` + 登录 Cookie `ragToken`）、`read_session_file`（读摘录；传入 `question` 可按用户问题再解析图片/扫描 PDF 或加长文档抽取，不覆盖已存 excerpt）与 `save_output_file`（把生成文本写入同一 COS 邮箱）。专用 Agent 的 Card 可对这两项写 `deny` 藏掉；也可以自建检索或对象存储，只要最终 JSON 符合上表，或干脆只返回纯文本。
 
-脚手架 [`agents/scaffold/generate.py`](../agents/scaffold/generate.py) 三个互不依赖的 flag 默认关：`--attachments`（会话摘录 helper）、`--kb`（本包 `kb_search` 桩，`sources[]`）、`--output`（`emit_file` 桩，`files[]`）。关掉 = 第三方不用；打开 = 得到可替换的空实现，自行填 URL/解析。不要从 `dd_reply` 拷业务代码。
+脚手架 [`agents/scaffold/generate.py`](../agents/scaffold/generate.py) 每次都拷贝 attachments / kb / output 三个模块，**不**用 generate flag 开关。空 `{PKG}_*` 不注册对应工具（不会挂一个返回空 `sources[]` / `files[]` 的空工具）。配齐后重启该 Agent MCP 即可。不要从 `dd_reply` 拷业务代码。Agent 密钥只放它自己的 `.env`，不要读 `SLEUTH_*`。
 
 ---
 

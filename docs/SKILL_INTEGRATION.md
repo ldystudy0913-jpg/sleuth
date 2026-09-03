@@ -33,14 +33,14 @@
 | 本地路径 | `SLEUTH_SKILLS_PATHS` / `skills.paths` | 逗号分隔或 JSONC 列表 |
 | HTTP | `SLEUTH_SKILLS_URLS` | zip 或单文件 `SKILL.md` |
 | S3 | `SLEUTH_SKILLS_S3` | 对象 / 前缀 / manifest（需 boto3） |
-| MCP Agent Card | `agent:true` + card.`skills[]` | fill-empty；本地同名优先 |
+| MCP Agent Card | `agent:true` + card.`skills[]` | 有 `content` 且带 `owner_agent` 的 SOP **覆盖**同名 COS/路径条目；仅 name 的项仍走目录查找 |
 
 缓存目录：`$SLEUTH_DATA_DIR/skills-cache`（或系统 data 目录下 `sleuth/skills-cache`）。
 
 ### 2.2 环境变量示例
 
 ```env
-SLEUTH_SKILLS_PATHS=./agents/dd_analyst/skills,./agents/dd_reply/skills
+SLEUTH_SKILLS_PATHS=./agents/dd_check/skills,./agents/dd_reply/skills
 SLEUTH_SKILLS_URLS=https://example.com/skills/pack.zip
 SLEUTH_SKILLS_REFRESH_SECONDS=300
 ```
@@ -84,22 +84,21 @@ my-skill/
 
 ```yaml
 ---
-name: dd-report-check
-description: 银行尽调报告智能检查。用户要求检查/评分尽调报告时使用。
+name: dd-check-sop
+description: 尽调报告填写检查。用户要求检查/评分尽调报告时使用。
 mcp:
   - ddcheck
 tools:
-  - ddcheck_run_dd_check
-  - ddcheck_resume_dd_check
+  - ddcheck_check_report
+  - ddcheck_health
 ---
 
 # 尽调报告检查 SOP
 
 1. 调用内置工具 `skill` 加载本 skill（若尚未加载）。
-2. 收集报告正文 / 附件标识……
-3. 调用 `ddcheck_run_dd_check`，传入……
-4. 若返回 `awaiting_human`，向用户确认后调用 `ddcheck_resume_dd_check`。
-…
+2. 收集报告正文 / JSON / 会话附件……
+3. 调用 `ddcheck_check_report`，传入 `report_text` / `report_json`。
+4. 用中文归纳 score、findings.location，并提示 Word 回传。
 ```
 
 | 字段 | 必填 | 说明 |
@@ -127,8 +126,8 @@ tools:
 
 样例：
 
-- 脚手架（私有 / COS 两种 SOP）：[`agents/scaffold/template/skills`](../agents/scaffold/template/)
-- [`agents/dd_analyst/skills/dd-report-check/SKILL.md`](../agents/dd_analyst/skills/dd-report-check/SKILL.md)
+- 脚手架（本地 `skills/` + `agent.md` `catalog_skills` 点名 COS）：[`agents/scaffold/template/skills`](../agents/scaffold/template/)
+- [`agents/dd_check/skills/dd-check-sop/SKILL.md`](../agents/dd_check/skills/dd-check-sop/SKILL.md)
 - [`agents/dd_reply/skills/dd-reply-framework/SKILL.md`](../agents/dd_reply/skills/dd-reply-framework/SKILL.md)
 
 ### 3.5 开发检查清单

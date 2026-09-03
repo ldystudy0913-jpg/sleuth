@@ -25,11 +25,9 @@ def _apply_mcp_cards(config: Config, mcp_manager) -> None:
         server_by_agent=mcp_manager.agent_card_servers,
     )
     if card_skills:
-        merged = dict(get_skills())
-        for sk in card_skills:
-            if sk.name not in merged:
-                merged[sk.name] = sk
-        set_skills(merged)
+        from .catalog import merge_card_skills_into_catalog
+
+        set_skills(merge_card_skills_into_catalog(get_skills(), card_skills))
 
 
 def build_registry(config: Config, *, workdir: Optional[Path] = None, renderer=None):

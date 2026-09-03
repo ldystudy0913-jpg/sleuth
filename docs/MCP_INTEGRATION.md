@@ -1,7 +1,7 @@
 # MCP 对接文档（Tool / Agent）
 
 > 适用：在外部进程暴露 MCP，由 Sleuth CLI / HTTP 拉取工具（可选注册 Agent）。  
-> 新 Agent 从 [`agents/scaffold`](../agents/scaffold/) 生成。实现参考：[`sleuth/mcp/`](../sleuth/mcp/)、样例包 [`agents/dd_analyst`](../agents/dd_analyst/)、[`agents/dd_reply`](../agents/dd_reply/)。  
+> 新 Agent 从 [`agents/scaffold`](../agents/scaffold/) 生成。实现参考：[`sleuth/mcp/`](../sleuth/mcp/)、样例包 [`agents/dd_check`](../agents/dd_check/)、[`agents/dd_reply`](../agents/dd_reply/)。  
 > 选型总览见 [`EXTENDING.md`](EXTENDING.md)。
 
 ---
@@ -36,7 +36,7 @@ flowchart LR
 - 多服务 **并行连接、单服务限时**：一个挂起/失败不影响其它已配置服务（`SLEUTH_MCP_TIMEOUT_PER_SERVER`）。
 - 立即重连：CLI `/mcp reload`，或 `POST /v1/mcp/reload`（Admin）；`GET /v1/mcp` / `/mcp` 查看状态。
 - 工具名对模型可见形式：`{sanitize(server)}_{sanitize(tool)}`。
-- `agent: true` 时额外调用 `get_agent_card`，用卡片 **fill-empty** 注册 Agent + Skill（本地已有同名则不覆盖）。
+- `agent: true` 时额外调用 `get_agent_card`，用卡片 **fill-empty** 注册 Agent（本地已有同名人格则不覆盖 prompt）。Card 里带 `content` 且有 `owner_agent` 的 SOP 会覆盖目录中同名 COS/路径 skill；仅 name 的项仍走目录查找。
 
 ---
 
@@ -54,6 +54,9 @@ SLEUTH_MCP_TIMEOUT_REQUEST=120000
 SLEUTH_MCP_RETRY_SECONDS=15
 # Agent Card 里对 bash/edit/write/task 写 allow 时，默认降级为 ask
 SLEUTH_MCP_AGENT_TRUST_PERMISSIONS=0
+# 合并进每一个 MCP 的 HTTP headers；同名键以该 server 自己的 headers 为准。
+# 与各 Agent `{PKG}_MCP_TOKEN` 使用同一 Bearer。空对象 / 不设 = 不加全局头。
+# SLEUTH_MCP_HEADERS={"Authorization":"Bearer change-me"}
 ```
 
 ### 2.2 服务字段（`McpServerConfig`）
@@ -63,7 +66,7 @@ SLEUTH_MCP_AGENT_TRUST_PERMISSIONS=0
 | （对象键） | string | — | **server 名**，进入工具前缀 |
 | `type` | string | 有 url→`remote` | 传输类型 |
 | `url` | string | — | remote 必填 |
-| `headers` | object | `{}` | HTTP 头 |
+| `headers` | object | `{}` | HTTP 头（覆盖 `SLEUTH_MCP_HEADERS` 同名键） |
 | `disabled` | bool | `false` | `true` 则跳过连接 |
 | `timeout.request` | int | 全局 | 单次 `call_tool` 超时（ms） |
 | **`agent`** | bool | `false` | `true` → 拉 Agent Card |
@@ -104,7 +107,7 @@ Sleuth 侧用官方 `mcp` Python 包客户端；服务端可用 FastMCP / 任意
 
 ### 3.2 命名与 Schema
 
-1. **MCP 工具原名**：稳定、可读的 snake_case（如 `run_dd_check`）。
+1. **MCP 工具原名**：稳定、可读的 snake_case（如 `check_report`）。
 2. **Sleuth 暴露名**：`{server}_{tool}`，经 `sanitize_name`（非 `[A-Za-z0-9_-]` → `_`，小写）。
 3. **inputSchema**：合法 JSON Schema object；Sleuth bridge **不**根据 schema 做严格 Pydantic 校验（`skip_strict_validation=True`），但仍应写清 required / properties，方便模型填参。
 4. **description**：写清「何时调用、必填字段、返回形态」——这是模型选工具的主依据。
@@ -114,7 +117,7 @@ Sleuth 侧用官方 `mcp` Python 包客户端；服务端可用 FastMCP / 任意
 
 | 配置键 | MCP tool | 模型看到的名字 |
 |--------|----------|----------------|
-| `ddcheck` | `run_dd_check` | `ddcheck_run_dd_check` |
+| `ddcheck` | `check_report` | `ddcheck_check_report` |
 | `ddreply` | `generate_reply_framework` | `ddreply_generate_reply_framework` |
 
 ### 3.3 权限（产品侧）
@@ -153,9 +156,9 @@ sleuth --agent <card.name>
 # 或 HTTP POST /v1/sessions  body: { "agent": "<card.name>" }
 ```
 
-无需在仓库里放 `agent.md`（本地有同名则本地优先）。新项目从 [`agents/scaffold`](../agents/scaffold/) 生成，不要从 `dd_analyst` / `dd_reply` 复制业务代码。
+无需在仓库里放 `agent.md`（本地有同名则本地优先）。新项目从 [`agents/scaffold`](../agents/scaffold/) 生成，不要从 `dd_check` / `dd_reply` 复制业务代码。
 
-文件解析统一在 Sleuth（解密 + excerpt）。MCP 工具 JSON Schema 只要声明 `attachment_refs_json`，桥就会在调用前注入摘录；不声明则基座不注入。Sleuth **不解析** Agent 内部逻辑。工具返回值是字符串；只有希望基座做 UI/邮箱时才遵守可选顶层 JSON：`sources[]`（知识来源）、`files[]`（回传文件）。禁止 data-URL / file-URL。脚手架 `generate.py` 用 `--attachments` / `--kb` / `--output` 按需生成桩，**默认都不生成**（详见 [`EXTENDING.md`](EXTENDING.md) §9b）。
+文件解析统一在 Sleuth（解密 + excerpt）。MCP 工具 JSON Schema 只要声明 `attachment_refs_json`，桥就会在调用前注入摘录；不声明则基座不注入。Sleuth **不解析** Agent 内部逻辑。工具返回值是字符串；只有希望基座做 UI/邮箱时才遵守可选顶层 JSON：`sources[]`（知识来源）、`files[]`（回传文件）。禁止 data-URL / file-URL。脚手架始终生成 attachments / kb / output 模块，但只在该 Agent 自己的 `{PKG}_*` 配齐时才注册对应工具（空 env 不挂空工具）。详见 [`EXTENDING.md`](EXTENDING.md) §9b。
 
 ### 4.2 必须实现的 MCP 工具
 
@@ -212,23 +215,22 @@ sleuth --agent <card.name>
 
 ```json
 {
-  "name": "dd_analyst",
-  "title": "尽调报告检查分析师",
-  "description": "对银行尽职调查报告做确定性检查与中文研判。",
+  "name": "dd_check",
+  "title": "尽调报告检查",
+  "description": "对已填写尽调报告做填写检查、评分并回传 Word。",
   "mode": "primary",
-  "prompt": "你是尽调报告检查分析师……优先调用 ddcheck_run_dd_check……",
+  "prompt": "你是尽调报告检查分析师……优先调用 ddcheck_check_report……",
   "permission": {
-    "ddcheck_run_dd_check": "allow",
-    "ddcheck_resume_dd_check": "allow",
+    "ddcheck_check_report": "allow",
     "bash": "ask",
     "edit": "deny",
     "write": "deny"
   },
   "skills": [
     {
-      "name": "dd-report-check",
+      "name": "dd-check-sop",
       "description": "尽调报告检查 SOP",
-      "content": "---\nname: dd-report-check\n...\n---\n# SOP\n...",
+      "content": "---\nname: dd-check-sop\n...\n---\n# SOP\n...",
       "mcp": ["ddcheck"]
     }
   ],
@@ -287,7 +289,7 @@ sequenceDiagram
 | Card 解析 | [`sleuth/mcp/agent_card.py`](../sleuth/mcp/agent_card.py) |
 | 装配 | [`sleuth/app.py`](../sleuth/app.py) |
 | 脚手架（新 Agent 项目包） | [`agents/scaffold`](../agents/scaffold/) |
-| dd_analyst MCP | [`agents/dd_analyst/dd_check/mcp_server.py`](../agents/dd_analyst/dd_check/mcp_server.py) |
+| dd_check MCP | [`agents/dd_check/dd_check/mcp_server.py`](../agents/dd_check/dd_check/mcp_server.py) |
 | dd_reply MCP | [`agents/dd_reply/dd_reply/mcp_server.py`](../agents/dd_reply/dd_reply/mcp_server.py) |
 | 场景流程图 | [`AGENT_SCENARIOS.md`](AGENT_SCENARIOS.md) |
 

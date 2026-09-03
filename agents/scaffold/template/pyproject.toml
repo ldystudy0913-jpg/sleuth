@@ -14,7 +14,8 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.9", "uvicorn>=0.30", "starlette>=0.37"]
-all = ["mcp>=1.9", "uvicorn>=0.30", "starlette>=0.37"]
+cos = ["boto3"]
+all = ["mcp>=1.9", "uvicorn>=0.30", "starlette>=0.37", "boto3"]
 
 [project.scripts]
 __PKG_NAME__-mcp = "__PKG_NAME__.mcp_server:main"

@@ -22,15 +22,31 @@ def _apply_live_mcp_cards(cfg, mcp_manager) -> None:
     )
     if not card_skills:
         return
-    merged = dict(get_skills())
-    for sk in card_skills:
-        if sk.name not in merged:
-            merged[sk.name] = sk
-    set_skills(merged)
+    set_skills(merge_card_skills_into_catalog(get_skills(), card_skills))
+
+
+def merge_card_skills_into_catalog(existing, card_skills):
+    """Merge Agent Card skills into the process catalog.
+
+    A Card ``SkillInfo`` with ``owner_agent`` overwrites a same-name COS/path
+    entry (private SOP wins). Name-only Card items never become ``SkillInfo``
+    (no ``content``) and stay catalog lookups via ``agent.skill_names``.
+    Global discover last-writer-wins for PATHS vs S3 is unchanged.
+    """
+    merged = dict(existing or {})
+    for sk in card_skills or []:
+        name = getattr(sk, "name", None)
+        if not name:
+            continue
+        if (getattr(sk, "owner_agent", None) or "").strip():
+            merged[name] = sk
+        elif name not in merged:
+            merged[name] = sk
+    return merged
 
 
 def merge_live_mcp_skills(cfg, mcp_manager=None) -> None:
-    """Re-apply Agent Card skills after a catalog refresh (COS/local wins on name).
+    """Re-apply Agent Card skills after a catalog refresh.
 
     Does not start the MCP manager; uses the live singleton when already running.
     """

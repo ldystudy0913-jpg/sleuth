@@ -11,7 +11,7 @@
       "scope_kind": "role",
       "scope_id": "aml_analyst",
       "resource_kind": "skill",
-      "resource_id": "__COS_SKILL__",
+      "resource_id": "your-catalog-skill",
       "grant_effect": "allow"
     }
   ]

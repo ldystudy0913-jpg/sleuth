@@ -1,0 +1,44 @@
+{
+  "score": {
+    "max": 5,
+    "decimals": 1
+  },
+  "word": {
+    "title": "尽调报告检查结果",
+    "filename": "dd_check_{score}_{date}.docx",
+    "date_format": "%Y%m%d",
+    "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  },
+  "kb": {
+    "max_queries": 5
+  },
+  "severity_labels": {
+    "fail": "问题",
+    "warn": "提示",
+    "info": "说明"
+  },
+  "kb_seed_queries": [
+    "尽职调查报告填写规范",
+    "受益所有人识别口径"
+  ],
+  "dimensions": [
+    {
+      "id": "logic_consistency",
+      "label": "逻辑一致性",
+      "weight": 1.0,
+      "guidance": "交叉核对姓名、证件号、地址、股权/受益所有人、勾选与叙述是否互相矛盾。"
+    },
+    {
+      "id": "completeness",
+      "label": "填写充分性",
+      "weight": 1.0,
+      "guidance": "必填信息、关键说明、结论与依据是否缺失或过于空泛。"
+    },
+    {
+      "id": "attachment_validity",
+      "label": "附件有效性",
+      "weight": 1.0,
+      "guidance": "附件是否存在、摘录是否可读、是否与报告主张对应；密文且无 excerpt 视为无法核验。"
+    }
+  ]
+}

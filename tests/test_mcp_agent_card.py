@@ -153,5 +153,91 @@ class ApplyCardsLocalPriorityTests(unittest.TestCase):
         self.assertEqual(cfg.agents["dd_analyst"].permission["ddcheck_health"], "allow")
 
 
+class CardSkillCatalogMergeTests(unittest.TestCase):
+    def test_owner_agent_overwrites_same_name_catalog(self):
+        from pathlib import Path as P
+
+        from sleuth.catalog import merge_card_skills_into_catalog
+        from sleuth.skill import SkillInfo
+
+        catalog = {
+            "kyc-shared": SkillInfo(
+                name="kyc-shared",
+                description="from cos",
+                location=P("cos"),
+                content="COS BODY",
+            )
+        }
+        card = [
+            SkillInfo(
+                name="kyc-shared",
+                description="from card",
+                location=P("mcp"),
+                content="CARD BODY",
+                owner_agent="demo_ops",
+            )
+        ]
+        merged = merge_card_skills_into_catalog(catalog, card)
+        self.assertEqual(merged["kyc-shared"].content, "CARD BODY")
+        self.assertEqual(merged["kyc-shared"].owner_agent, "demo_ops")
+
+    def test_without_owner_agent_does_not_overwrite(self):
+        from pathlib import Path as P
+
+        from sleuth.catalog import merge_card_skills_into_catalog
+        from sleuth.skill import SkillInfo
+
+        catalog = {
+            "kyc-shared": SkillInfo(
+                name="kyc-shared",
+                description="from cos",
+                location=P("cos"),
+                content="COS BODY",
+            )
+        }
+        card = [
+            SkillInfo(
+                name="kyc-shared",
+                description="anonymous",
+                location=P("mcp"),
+                content="OTHER",
+            )
+        ]
+        merged = merge_card_skills_into_catalog(catalog, card)
+        self.assertEqual(merged["kyc-shared"].content, "COS BODY")
+
+
+class McpHeadersMergeTests(unittest.TestCase):
+    def test_shared_headers_then_per_server_override(self):
+        cfg = Config()
+        cfg.mcp_servers["demo"] = McpServerConfig(
+            name="demo",
+            url="http://127.0.0.1:8799/mcp",
+            headers={"Authorization": "Bearer per-server", "X-Custom": "keep"},
+        )
+        cfg.mcp_servers["other"] = McpServerConfig(
+            name="other",
+            url="http://127.0.0.1:8800/mcp",
+        )
+        prev = os.environ.get("SLEUTH_MCP_HEADERS")
+        os.environ["SLEUTH_MCP_HEADERS"] = json.dumps(
+            {"Authorization": "Bearer shared", "X-Global": "1"}
+        )
+        try:
+            from sleuth.config import _apply_mcp_headers
+
+            _apply_mcp_headers(cfg)
+        finally:
+            if prev is None:
+                os.environ.pop("SLEUTH_MCP_HEADERS", None)
+            else:
+                os.environ["SLEUTH_MCP_HEADERS"] = prev
+        self.assertEqual(cfg.mcp_servers["demo"].headers["Authorization"], "Bearer per-server")
+        self.assertEqual(cfg.mcp_servers["demo"].headers["X-Global"], "1")
+        self.assertEqual(cfg.mcp_servers["demo"].headers["X-Custom"], "keep")
+        self.assertEqual(cfg.mcp_servers["other"].headers["Authorization"], "Bearer shared")
+        self.assertEqual(cfg.mcp_servers["other"].headers["X-Global"], "1")
+
+
 if __name__ == "__main__":
     unittest.main()

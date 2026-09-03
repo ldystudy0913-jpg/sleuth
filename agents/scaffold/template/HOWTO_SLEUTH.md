@@ -1,33 +1,37 @@
 # 将 __AGENT_NAME__ 挂到 Sleuth
 
-当前生成模式：`__SKILL_MODE__`（`private` 嵌入 SOP / `cos` 点名 COS skill / `both` / `none` 仅工具）。
+本包始终生成本地 SOP（`skills/__SKILL_SLUG__/SKILL.md`，嵌入 Agent Card）以及 attachments / kb / output 三个模块。工具是否对外暴露由**本包 `.env`** 决定，改完重启 MCP，不必重新 generate。
 
 ## 1. 启动工具面
 
 ```powershell
 cd <this-package>
 py -3.12 -m pip install -e ".[mcp]"
+# 若要用 emit_file 上传 COS：py -3.12 -m pip install -e ".[mcp,cos]"
+Copy-Item .env.example .env
 py -3.12 -m __PKG_NAME__.mcp_server
 ```
 
-默认 `http://127.0.0.1:__MCP_PORT__/mcp`。探活：`GET http://127.0.0.1:__MCP_PORT__/health`。
+默认 `http://127.0.0.1:__MCP_PORT__/mcp`。探活：`GET http://127.0.0.1:__MCP_PORT__/health`（即使配了 MCP token 也始终开放）。
 
 ## 2. 配置 Sleuth
 
 把 [`deploy/sleuth.env.snippet`](deploy/sleuth.env.snippet) 粘进 Sleuth 工作目录 `.env`。
 
-`agent:true` 会调用 `get_agent_card`，注册人格 `__AGENT_NAME__`。
+`agent:true` 会调用 `get_agent_card`，注册人格 `__AGENT_NAME__`。`--tools-only` 生成时 snippet 为 `agent:false`（工具对所有会话可见，不注册专用人格）。
 
-- **private**：Card 带 `skills[].content`，跟 Agent 走，不必单独 skill grant。
-- **cos / both**：把 `skills_cos/__COS_SKILL__/SKILL.md` 传到 COS（[`deploy/cos/README.md`](deploy/cos/README.md)），并配置 `SLEUTH_SKILLS_S3`。
-- **none**：snippet 使用 `agent:false`，工具对所有会话可见，不注册专用人格。
+- **私有 SOP**：Card 带 `skills[].content`，跟 Agent 走，不必单独 skill grant。
+- **复用 COS 上已有 SOP**：在 `agent.md` 写 `catalog_skills:` 只填 name（不要建空 `SKILL.md`）。Sleuth 进程用 `SLEUTH_SKILLS_S3` 拉包；本 MCP **不**拉 skill。缺目录时跳过注入，不崩。
+- 本地 `skills/` 同名且有正文时，覆盖 COS/路径同名条目。
+
+客户端与本包共用一个 Bearer 时：Sleuth 设 `SLEUTH_MCP_HEADERS={"Authorization":"Bearer <token>"}`（或写在该 server 的 `headers`），本包设 `__ENV_PREFIX___MCP_TOKEN=<token>`。
 
 ## 3. 岗位授权（若 `SLEUTH_ACL_ENABLED=1`）
 
 `PUT /v1/directory/grants` 使用 [`deploy/grant.example.json`](deploy/grant.example.json)。
 
 - 专用 Agent：至少一条 `resource_kind=agent`、`resource_id=__AGENT_NAME__`。
-- COS 共享 skill 还要给 **build** 选择器看见时，再加 `resource_kind=skill`、`resource_id=__COS_SKILL__`。私有 Card SOP 不需要 skill grant。
+- COS 共享 skill 还要给 **build** 选择器看见时，再加 `resource_kind=skill`、`resource_id=<catalog-skill-name>`。私有 Card SOP 不需要 skill grant。
 
 ## 4. 运行
 
@@ -49,11 +53,18 @@ HTTP：`POST /v1/sessions` body `{ "agent": "__AGENT_NAME__" }`。
 | 出参 `sources[]`（`title` + `http(s) url`） | 答复末尾灰色「知识来源」 | 不附来源段 |
 | 出参 `files[]`（`filename` + `https url` 或 `object_key`） | 登记为助手文件，进 `done.files` | 前端收不到回传文件 |
 
-禁止 data-URL / file-URL。知识库、生成文件也可以不写进 MCP：会话里仍有 Sleuth 内置 `kb_lookup` / `save_output_file`（Card 权限可 deny 藏掉）。
+禁止 data-URL / file-URL。
 
-本次生成开关：
+本包能力默认**生成代码、按 env 注册**（空 env 不注册空工具）：
 
-__OPTIONAL_HOWTO_FLAG_NOTES__
+| 能力 | 本包 `.env` | 未配齐时 |
+|------|-------------|---------|
+| 会话摘录 | `__ENV_PREFIX___ATTACHMENTS=1` | `ping` 不声明 `attachment_refs_json` |
+| 知识库 | `__ENV_PREFIX___KB_API_URL` + `_LOGIN_URL` + `_OPENID` + `_SERVICEID` | 不注册 `kb_search` |
+| 回传文件 | COS：access + secret + bucket + (region 或 endpoint) | 不注册 `emit_file` |
+| HTTP 鉴权 | `__ENV_PREFIX___MCP_TOKEN` 非空 | 不装中间件 |
+
+知识库、生成文件也可以不写进 MCP：会话里仍有 Sleuth 内置 `kb_lookup` / `save_output_file`（Card 权限可 deny 藏掉）。
 
 ## 6. 无 Card 回退
 

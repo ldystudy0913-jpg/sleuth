@@ -7,14 +7,29 @@ from typing import Any, Optional
 
 from .agent_card import load_agent_card
 from .config import Settings, get_settings
+from .kb import register as register_kb
+from .output import register as register_output
 from .pipeline import ping as run_ping
-__OPTIONAL_MCP_IMPORTS__
 
 
 def health_payload(settings: Settings) -> dict[str, Any]:
     body = settings.as_health()
     body["mcp_port"] = settings.mcp_port
     return body
+
+
+def mcp_token_ok(path: str, authorization: str, token: str) -> bool:
+    """Return True if this HTTP request may proceed."""
+    p = (path or "").split("?")[0].rstrip("/") or "/"
+    if p == "/health" or p.endswith("/health"):
+        return True
+    expected = (token or "").strip()
+    if not expected:
+        return True
+    auth = (authorization or "").strip()
+    if auth.lower().startswith("bearer "):
+        auth = auth[7:].strip()
+    return auth == expected
 
 
 def _register_http_health(server: Any, settings: Settings) -> None:
@@ -27,6 +42,34 @@ def _register_http_health(server: Any, settings: Settings) -> None:
         from starlette.responses import JSONResponse
 
         return JSONResponse(health_payload(settings))
+
+
+def _install_auth_middleware(server: Any, settings: Settings) -> None:
+    token = (settings.mcp_token or "").strip()
+    if not token:
+        return
+    orig = getattr(server, "streamable_http_app", None)
+    if not callable(orig):
+        return
+
+    def wrapped():
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.responses import JSONResponse
+
+        app = orig()
+
+        class McpTokenMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request: Any, call_next: Any) -> Any:
+                path = str(getattr(request.url, "path", "") or "")
+                auth = request.headers.get("authorization") or ""
+                if mcp_token_ok(path, auth, token):
+                    return await call_next(request)
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+        app.add_middleware(McpTokenMiddleware)
+        return app
+
+    server.streamable_http_app = wrapped  # type: ignore[method-assign]
 
 
 def _mcp_server_cls():
@@ -62,6 +105,41 @@ async def _run_streamable_http(
         await server.run_streamable_http_async()
 
 
+def _register_ping(server: Any, settings: Settings) -> None:
+    if settings.attachments_enabled:
+
+        @server.tool(
+            name="ping",
+            description=(
+                "Echo a message. Replace this with your real business tool. "
+                "Optional attachment_refs_json is injected by Sleuth when the schema "
+                "declares it (session-file excerpts). Prefer excerpt; do not decrypt SM4."
+            ),
+        )
+        def ping_with_refs(message: str = "pong", attachment_refs_json: str = "[]") -> str:
+            try:
+                refs = json.loads(attachment_refs_json) if attachment_refs_json else []
+            except json.JSONDecodeError:
+                refs = []
+            if not isinstance(refs, list):
+                refs = []
+            result = run_ping(
+                message,
+                attachment_refs=[r for r in refs if isinstance(r, dict)],
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        return
+
+    @server.tool(
+        name="ping",
+        description="Echo a message. Replace this with your real business tool.",
+    )
+    def ping(message: str = "pong") -> str:
+        result = run_ping(message)
+        return json.dumps(result, ensure_ascii=False)
+
+
 def build_mcp_server(
     settings: Optional[Settings] = None,
     *,
@@ -94,6 +172,7 @@ def build_mcp_server(
         server = ServerCls("__PKG_NAME__", **ctor_kwargs)
 
     _register_http_health(server, settings)
+    _install_auth_middleware(server, settings)
 
     @server.tool(
         name="get_agent_card",
@@ -103,24 +182,21 @@ def build_mcp_server(
         ),
     )
     def get_agent_card() -> str:
-        return json.dumps(load_agent_card(server_name="__SERVER_NAME__"), ensure_ascii=False)
+        return json.dumps(
+            load_agent_card(server_name="__SERVER_NAME__", settings=settings),
+            ensure_ascii=False,
+        )
 
-    @server.tool(
-        name="ping",
-        description=(
-            "Echo a message. Replace this with your real business tool. "
-            "__PING_MCP_DESCRIPTION__"
-        ),
-    )
-    def ping(__PING_MCP_SIGNATURE__) -> str:
-        __PING_MCP_BODY__
-        return json.dumps(result, ensure_ascii=False)
+    _register_ping(server, settings)
 
     @server.tool(name="health", description="__AGENT_NAME__ tool-surface health probe.")
     def health() -> str:
         return json.dumps(health_payload(settings), ensure_ascii=False)
 
-    __OPTIONAL_REGISTER__
+    if settings.kb_enabled:
+        register_kb(server, settings)
+    if settings.output_enabled:
+        register_output(server, settings)
 
     return server
 

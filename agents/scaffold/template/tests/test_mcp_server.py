@@ -4,17 +4,21 @@ from __future__ import annotations
 import json
 import unittest
 
-from __PKG_NAME__.agent_card import COS_SKILL, PRIVATE_SKILL, SKILL_MODE, load_agent_card
+from __PKG_NAME__.agent_card import load_agent_card
 from __PKG_NAME__.config import Settings
-from __PKG_NAME__.mcp_server import build_mcp_server, health_payload
+from __PKG_NAME__.mcp_server import build_mcp_server, health_payload, mcp_token_ok
 
 
 class TestMcpServer(unittest.TestCase):
     def test_tools_registered(self) -> None:
-        server = build_mcp_server(Settings())
+        server = build_mcp_server(
+            Settings(attachments_enabled=False, kb_enabled=False, output_enabled=False)
+        )
         tools = {t.name: t for t in server._tool_manager.list_tools()}
         for name in ("get_agent_card", "ping", "health"):
             self.assertIn(name, tools)
+        self.assertNotIn("kb_search", tools)
+        self.assertNotIn("emit_file", tools)
 
         health = json.loads(tools["health"].fn())
         self.assertTrue(health.get("ok"))
@@ -35,22 +39,20 @@ class TestMcpServer(unittest.TestCase):
         self.assertTrue(body.get("ok"))
         self.assertEqual(body.get("service"), "__PKG_NAME__-tools")
 
+    def test_health_skips_mcp_token(self) -> None:
+        self.assertTrue(mcp_token_ok("/health", "", "secret"))
+        self.assertTrue(mcp_token_ok("/mcp", "", ""))
+        self.assertFalse(mcp_token_ok("/mcp", "", "secret"))
+        self.assertTrue(mcp_token_ok("/mcp", "Bearer secret", "secret"))
+
 
 class TestAgentCard(unittest.TestCase):
-    def test_skill_mode_matches_card(self) -> None:
+    def test_local_skill_embedded(self) -> None:
         card = load_agent_card(server_name="__SERVER_NAME__")
         names = [s.get("name") for s in card.get("skills") or []]
-        mode = (SKILL_MODE or "").strip().lower()
-        if mode in ("private", "both"):
-            self.assertIn(PRIVATE_SKILL, names)
-            private = next(s for s in card["skills"] if s["name"] == PRIVATE_SKILL)
-            self.assertTrue(private.get("content"))
-        if mode in ("cos", "both"):
-            self.assertIn(COS_SKILL, names)
-            shared = next(s for s in card["skills"] if s["name"] == COS_SKILL)
-            self.assertNotIn("content", shared)
-        if mode == "none":
-            self.assertEqual(card.get("skills"), [])
+        self.assertIn("__SKILL_SLUG__", names)
+        private = next(s for s in card["skills"] if s["name"] == "__SKILL_SLUG__")
+        self.assertTrue(private.get("content"))
 
 
 if __name__ == "__main__":

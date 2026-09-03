@@ -1475,6 +1475,26 @@ def _apply_shared_object_store(cfg: Config) -> None:
     cfg.cos.bucket = _bucket_from_skills_s3(cfg)
 
 
+def _apply_mcp_headers(cfg: Config) -> None:
+    """Merge SLEUTH_MCP_HEADERS into every server; per-server headers win on clash."""
+    raw = os.environ.get("SLEUTH_MCP_HEADERS")
+    if not raw or not str(raw).strip():
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(data, dict):
+        return
+    shared = {str(k): str(v) for k, v in data.items() if str(k).strip()}
+    if not shared:
+        return
+    for srv in cfg.mcp_servers.values():
+        merged = dict(shared)
+        merged.update(srv.headers or {})
+        srv.headers = merged
+
+
 def _apply_env(cfg: Config) -> None:
     """Map SLEUTH_* / OPENCODE_* environment variables onto Config."""
     model = os.environ.get("SLEUTH_MODEL") or os.environ.get("OPENCODE_MODEL")
@@ -1820,6 +1840,8 @@ def _apply_env(cfg: Config) -> None:
                 cfg.merge({"mcp": {"servers": data}})
         except json.JSONDecodeError:
             pass
+
+    _apply_mcp_headers(cfg)
 
     startup = _env_int("SLEUTH_MCP_TIMEOUT_STARTUP")
     if startup is not None:

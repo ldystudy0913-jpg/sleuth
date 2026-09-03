@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from __PKG_NAME__.agent_card import AGENT_NAME, SKILL_MODE, load_agent_card
+from __PKG_NAME__.agent_card import AGENT_NAME, load_agent_card
 
 
 class TestAgentCardFile(unittest.TestCase):
@@ -16,7 +16,9 @@ class TestAgentCardFile(unittest.TestCase):
         self.assertNotEqual((card.get("permission") or {}).get("bash"), "allow")
         self.assertNotEqual((card.get("permission") or {}).get("edit"), "allow")
         self.assertNotEqual((card.get("permission") or {}).get("write"), "allow")
-        self.assertIn(SKILL_MODE, ("private", "cos", "both", "none"))
+        skills = card.get("skills") or []
+        self.assertTrue(skills)
+        self.assertTrue(skills[0].get("content"))
 
 
 if __name__ == "__main__":

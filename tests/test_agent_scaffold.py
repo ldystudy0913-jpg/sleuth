@@ -1,20 +1,22 @@
 """Scaffold generate.py produces a runnable MCP agent package."""
 from __future__ import annotations
 
-import ast
-import importlib
-import importlib.util
 import inspect
+import json
+import os
 import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _LEFTOVER_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
 
 
 def _load_generate():
+    import importlib.util
+
     path = Path(__file__).resolve().parents[1] / "agents" / "scaffold" / "generate.py"
     spec = importlib.util.spec_from_file_location("sleuth_agent_scaffold_generate", path)
     if spec is None or spec.loader is None:
@@ -52,74 +54,95 @@ def _assert_no_leftover(test: unittest.TestCase, dest: Path) -> None:
     test.assertEqual(hits, [])
 
 
-def _ping_args(src: str) -> list[str]:
-    tree = ast.parse(src)
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "build_mcp_server":
-            for inner in node.body:
-                if isinstance(inner, ast.FunctionDef) and inner.name == "ping":
-                    return [a.arg for a in inner.args.args]
-    raise AssertionError("ping not found in build_mcp_server")
+def _mcp_available() -> bool:
+    try:
+        import mcp  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _tool_params(server, name: str) -> list[str]:
+    tools = {t.name: t for t in server._tool_manager.list_tools()}
+    return list(inspect.signature(tools[name].fn).parameters)
+
+
+def _closed_settings(cfg_mod, **kwargs):
+    body = {
+        "attachments_enabled": False,
+        "kb_enabled": False,
+        "output_enabled": False,
+        "mcp_token": "",
+    }
+    body.update(kwargs)
+    return cfg_mod.Settings(**body)
+
+
+class _JsonResp:
+    def __init__(self, payload, status=200):
+        self._payload = json.dumps(payload).encode("utf-8")
+        self.status = status
+        self.code = status
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _KbOpener:
+    def open(self, req, timeout=None):
+        url = getattr(req, "full_url", None) or getattr(req, "get_full_url")()
+        if "login" in url or "auth" in url:
+            return _JsonResp(
+                {
+                    "returnCode": "SUC0000",
+                    "body": {"ragToken": "tok", "expireTime": 9_999_999_999_999},
+                }
+            )
+        return _JsonResp(
+            {
+                "returnCode": "SUC0000",
+                "body": [
+                    {
+                        "title": "AML",
+                        "fileName": "aml.pdf",
+                        "dmzUrl": "https://kb.example/a",
+                        "rankScore": 0.9,
+                    }
+                ],
+            }
+        )
 
 
 class AgentScaffoldGenerateTests(unittest.TestCase):
-    def test_private_package_imports_and_card_embeds_skill(self):
+    def test_default_package_local_skill_and_modules(self):
         with tempfile.TemporaryDirectory() as td:
-            dest = generate(
-                name="demo_ops",
-                port=8799,
-                skill="private",
-                out=Path(td) / "demo_ops",
-            )
+            dest = generate(name="demo_ops", port=8799, out=Path(td) / "demo_ops")
             _assert_no_leftover(self, dest)
-            self.assertTrue((dest / "demo_ops" / "mcp_server.py").is_file())
+            pkg = dest / "demo_ops"
+            self.assertTrue((pkg / "mcp_server.py").is_file())
             self.assertTrue((dest / "skills" / "demo-ops-sop" / "SKILL.md").is_file())
+            self.assertTrue((pkg / "attachments.py").is_file())
+            self.assertTrue((pkg / "kb.py").is_file())
+            self.assertTrue((pkg / "output.py").is_file())
+            self.assertFalse((dest / "skills_cos").exists())
+            snippet = (dest / "deploy" / "sleuth.env.snippet").read_text(encoding="utf-8")
+            self.assertIn('"agent":true', snippet)
             sys.path.insert(0, str(dest))
             try:
-                card_mod = importlib.import_module("demo_ops.agent_card")
-                mcp_mod = importlib.import_module("demo_ops.mcp_server")
-                cfg_mod = importlib.import_module("demo_ops.config")
+                card_mod = __import__("demo_ops.agent_card", fromlist=["*"])
+                cfg_mod = __import__("demo_ops.config", fromlist=["*"])
+                mcp_mod = __import__("demo_ops.mcp_server", fromlist=["*"])
                 card = card_mod.load_agent_card()
                 self.assertEqual(card["name"], "demo_ops")
-                self.assertEqual(card_mod.SKILL_MODE, "private")
                 self.assertEqual(len(card["skills"]), 1)
                 self.assertTrue(card["skills"][0].get("content"))
                 self.assertEqual(card["skills"][0]["name"], "demo-ops-sop")
-                from demo_ops.pipeline import ping as run_ping
-
-                echo = run_ping("hello")
-                self.assertEqual(echo.get("echo"), "hello")
-                try:
-                    import mcp  # noqa: F401
-                except ImportError:
-                    pass
-                else:
-                    server = mcp_mod.build_mcp_server(cfg_mod.Settings())
-                    tools = {t.name: t for t in server._tool_manager.list_tools()}
-                    self.assertIn("ping", tools)
-                    self.assertIn("get_agent_card", tools)
-                    self.assertIn("health", tools)
-            finally:
-                _unload("demo_ops", str(dest))
-
-    def test_default_omits_optional_modules(self):
-        with tempfile.TemporaryDirectory() as td:
-            dest = generate(
-                name="demo_ops",
-                skill="private",
-                out=Path(td) / "demo_ops",
-            )
-            pkg = dest / "demo_ops"
-            self.assertFalse((pkg / "kb.py").is_file())
-            self.assertFalse((pkg / "attachments.py").is_file())
-            self.assertFalse((pkg / "output.py").is_file())
-            mcp_src = (pkg / "mcp_server.py").read_text(encoding="utf-8")
-            self.assertNotIn("attachment_refs_json", mcp_src)
-            self.assertEqual(_ping_args(mcp_src), ["message"])
-            sys.path.insert(0, str(dest))
-            try:
-                card_mod = importlib.import_module("demo_ops.agent_card")
-                card = card_mod.load_agent_card()
                 perm = card.get("permission") or {}
                 self.assertEqual(perm.get("kb_lookup"), "deny")
                 self.assertEqual(perm.get("save_output_file"), "deny")
@@ -127,24 +150,71 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
                 self.assertNotIn("demoops_emit_file", perm)
                 from demo_ops.pipeline import ping as run_ping
 
-                self.assertNotIn("attachment_refs", inspect.signature(run_ping).parameters)
+                echo = run_ping("hello")
+                self.assertEqual(echo.get("echo"), "hello")
+                settings = _closed_settings(cfg_mod)
+                self.assertFalse(settings.kb_enabled)
+                self.assertFalse(settings.output_enabled)
+                self.assertFalse(settings.attachments_enabled)
+                if _mcp_available():
+                    server = mcp_mod.build_mcp_server(settings)
+                    tools = {t.name: t for t in server._tool_manager.list_tools()}
+                    self.assertIn("ping", tools)
+                    self.assertIn("get_agent_card", tools)
+                    self.assertIn("health", tools)
+                    self.assertNotIn("kb_search", tools)
+                    self.assertNotIn("emit_file", tools)
+                    self.assertEqual(_tool_params(server, "ping"), ["message"])
             finally:
                 _unload("demo_ops", str(dest))
 
-    def test_attachments_helper_and_ping_schema(self):
+    def test_catalog_skills_name_only_and_local_wins(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = generate(name="demo_ops", out=Path(td) / "demo_ops")
+            md = (dest / "agent.md").read_text(encoding="utf-8")
+            md = md.replace(
+                "mode: primary",
+                "mode: primary\ncatalog_skills:\n  - kyc-shared",
+            )
+            (dest / "agent.md").write_text(md, encoding="utf-8")
+            sys.path.insert(0, str(dest))
+            try:
+                card_mod = __import__("demo_ops.agent_card", fromlist=["*"])
+                card = card_mod.load_agent_card()
+                names = [s["name"] for s in card["skills"]]
+                self.assertEqual(names, ["demo-ops-sop", "kyc-shared"])
+                shared = next(s for s in card["skills"] if s["name"] == "kyc-shared")
+                self.assertNotIn("content", shared)
+
+                skill_dir = dest / "skills" / "kyc-shared"
+                skill_dir.mkdir()
+                (skill_dir / "SKILL.md").write_text(
+                    "---\nname: kyc-shared\ndescription: local\n---\n\n# local sop\n",
+                    encoding="utf-8",
+                )
+                card2 = card_mod.load_agent_card()
+                shared2 = next(s for s in card2["skills"] if s["name"] == "kyc-shared")
+                self.assertIn("local sop", shared2.get("content") or "")
+                self.assertEqual(
+                    [s["name"] for s in card2["skills"]].count("kyc-shared"), 1
+                )
+            finally:
+                _unload("demo_ops", str(dest))
+
+    def test_tools_only_sets_agent_false(self):
         with tempfile.TemporaryDirectory() as td:
             dest = generate(
                 name="demo_ops",
-                skill="private",
                 out=Path(td) / "demo_ops",
-                attachments=True,
+                tools_only=True,
             )
-            _assert_no_leftover(self, dest)
-            pkg = dest / "demo_ops"
-            self.assertTrue((pkg / "attachments.py").is_file())
-            mcp_src = (pkg / "mcp_server.py").read_text(encoding="utf-8")
-            self.assertIn("attachment_refs_json", mcp_src)
-            self.assertEqual(_ping_args(mcp_src), ["message", "attachment_refs_json"])
+            snippet = (dest / "deploy" / "sleuth.env.snippet").read_text(encoding="utf-8")
+            self.assertIn('"agent":false', snippet)
+            self.assertNotIn('"agent":true', snippet)
+
+    def test_attachments_env_declares_ping_refs(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = generate(name="demo_ops", out=Path(td) / "demo_ops")
             sys.path.insert(0, str(dest))
             try:
                 from demo_ops.attachments import load_excerpts, summarize_refs
@@ -172,132 +242,135 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
                 self.assertIn("attachment_refs", inspect.signature(run_ping).parameters)
                 summary = summarize_refs([])
                 self.assertEqual(summary.get("attachment_count"), 0)
+                if _mcp_available():
+                    cfg_mod = __import__("demo_ops.config", fromlist=["*"])
+                    mcp_mod = __import__("demo_ops.mcp_server", fromlist=["*"])
+                    server = mcp_mod.build_mcp_server(
+                        _closed_settings(cfg_mod, attachments_enabled=True)
+                    )
+                    self.assertEqual(
+                        _tool_params(server, "ping"),
+                        ["message", "attachment_refs_json"],
+                    )
             finally:
                 _unload("demo_ops", str(dest))
 
-    def test_kb_search_and_card_denies_lookup(self):
+    def test_kb_registers_only_with_pkg_env(self):
         with tempfile.TemporaryDirectory() as td:
-            dest = generate(
-                name="demo_ops",
-                skill="private",
-                out=Path(td) / "demo_ops",
-                kb=True,
-            )
-            _assert_no_leftover(self, dest)
-            self.assertTrue((dest / "demo_ops" / "kb.py").is_file())
+            dest = generate(name="demo_ops", out=Path(td) / "demo_ops")
             sys.path.insert(0, str(dest))
             try:
-                card_mod = importlib.import_module("demo_ops.agent_card")
-                cfg_mod = importlib.import_module("demo_ops.config")
-                from demo_ops.kb import search
-
-                card = card_mod.load_agent_card()
+                cfg_mod = __import__("demo_ops.config", fromlist=["*"])
+                card_mod = __import__("demo_ops.agent_card", fromlist=["*"])
+                kb_mod = __import__("demo_ops.kb", fromlist=["*"])
+                kb_mod.reset_token_cache()
+                sleuth_only = {
+                    "SLEUTH_KB_API_URL": "http://kb.example/search",
+                    "SLEUTH_KB_LOGIN_URL": "http://kb.example/login",
+                    "SLEUTH_KB_OPENID": "oid",
+                    "SLEUTH_KB_SERVICEID": "sid",
+                }
+                with patch.object(cfg_mod, "_load_dotenv"):
+                    with patch.dict(os.environ, sleuth_only, clear=False):
+                        for k in list(os.environ):
+                            if k.startswith("DEMO_OPS_"):
+                                os.environ.pop(k, None)
+                        idle = cfg_mod.Settings()
+                        self.assertFalse(idle.kb_enabled)
+                kb_settings = cfg_mod.Settings(
+                    kb_api_url="http://kb.example/search",
+                    kb_login_url="http://kb.example/login",
+                    kb_openid="oid",
+                    kb_service_id="sid",
+                )
+                self.assertTrue(kb_settings.kb_enabled)
+                body = kb_mod.search("what is aml", kb_settings, opener=_KbOpener())
+                self.assertTrue(body.get("ok"))
+                self.assertTrue(body.get("sources"))
+                self.assertEqual(body["sources"][0]["url"], "https://kb.example/a")
+                card = card_mod.load_agent_card(settings=kb_settings)
                 perm = card.get("permission") or {}
                 self.assertEqual(perm.get("kb_lookup"), "deny")
                 self.assertEqual(perm.get("demoops_kb_search"), "allow")
-                body = search("what is aml", cfg_mod.Settings())
-                self.assertEqual(body.get("sources"), [])
-                self.assertFalse(body.get("ok"))
-                try:
-                    import mcp  # noqa: F401
-                except ImportError:
-                    pass
-                else:
-                    mcp_mod = importlib.import_module("demo_ops.mcp_server")
-                    server = mcp_mod.build_mcp_server(cfg_mod.Settings())
-                    tools = {t.name: t for t in server._tool_manager.list_tools()}
+                if _mcp_available():
+                    mcp_mod = __import__("demo_ops.mcp_server", fromlist=["*"])
+                    tools = {
+                        t.name: t
+                        for t in mcp_mod.build_mcp_server(kb_settings)._tool_manager.list_tools()
+                    }
                     self.assertIn("kb_search", tools)
+                    idle_tools = {
+                        t.name: t
+                        for t in mcp_mod.build_mcp_server(
+                            _closed_settings(cfg_mod)
+                        )._tool_manager.list_tools()
+                    }
+                    self.assertNotIn("kb_search", idle_tools)
             finally:
                 _unload("demo_ops", str(dest))
 
-    def test_output_emit_file_json_skeleton(self):
+    def test_output_registers_with_cos_env(self):
         with tempfile.TemporaryDirectory() as td:
-            dest = generate(
-                name="demo_ops",
-                skill="private",
-                out=Path(td) / "demo_ops",
-                output=True,
-            )
-            _assert_no_leftover(self, dest)
-            self.assertTrue((dest / "demo_ops" / "output.py").is_file())
+            dest = generate(name="demo_ops", out=Path(td) / "demo_ops")
             sys.path.insert(0, str(dest))
             try:
-                card_mod = importlib.import_module("demo_ops.agent_card")
+                cfg_mod = __import__("demo_ops.config", fromlist=["*"])
+                card_mod = __import__("demo_ops.agent_card", fromlist=["*"])
                 from demo_ops.output import emit_file
 
-                card = card_mod.load_agent_card()
+                cos = cfg_mod.Settings(
+                    cos_secret_id="id",
+                    cos_secret_key="secret",
+                    cos_bucket="bucket",
+                    cos_region="ap-southeast-1",
+                )
+                self.assertTrue(cos.output_enabled)
+                card = card_mod.load_agent_card(settings=cos)
                 perm = card.get("permission") or {}
-                self.assertEqual(perm.get("save_output_file"), "allow")
+                self.assertEqual(perm.get("save_output_file"), "deny")
                 self.assertEqual(perm.get("demoops_emit_file"), "allow")
                 body = emit_file(
+                    cos,
                     filename="note.txt",
                     url="https://example.com/note.txt",
                     mime="text/plain",
                 )
                 self.assertTrue(body.get("ok"))
-                self.assertIn("files", body)
                 self.assertEqual(body["files"][0]["filename"], "note.txt")
-                self.assertEqual(body["files"][0]["url"], "https://example.com/note.txt")
-                blocked = emit_file(filename="x", url="data:text/plain,hi")
+                blocked = emit_file(cos, filename="x", url="data:text/plain,hi")
                 self.assertFalse(blocked.get("ok"))
                 self.assertEqual(blocked.get("files"), [])
-                try:
-                    import mcp  # noqa: F401
-                except ImportError:
-                    pass
-                else:
-                    mcp_mod = importlib.import_module("demo_ops.mcp_server")
-                    cfg_mod = importlib.import_module("demo_ops.config")
-                    server = mcp_mod.build_mcp_server(cfg_mod.Settings())
-                    tools = {t.name: t for t in server._tool_manager.list_tools()}
+                if _mcp_available():
+                    mcp_mod = __import__("demo_ops.mcp_server", fromlist=["*"])
+                    tools = {
+                        t.name: t
+                        for t in mcp_mod.build_mcp_server(cos)._tool_manager.list_tools()
+                    }
                     self.assertIn("emit_file", tools)
             finally:
                 _unload("demo_ops", str(dest))
 
-    def test_cos_card_has_name_only(self):
+    def test_empty_mcp_token_skips_middleware(self):
         with tempfile.TemporaryDirectory() as td:
-            dest = generate(
-                name="demo_ops",
-                skill="cos",
-                out=Path(td) / "demo_ops",
-            )
+            dest = generate(name="demo_ops", out=Path(td) / "demo_ops")
             sys.path.insert(0, str(dest))
             try:
-                card_mod = importlib.import_module("demo_ops.agent_card")
-                card = card_mod.load_agent_card()
-                self.assertEqual(card_mod.SKILL_MODE, "cos")
-                self.assertEqual(len(card["skills"]), 1)
-                self.assertEqual(card["skills"][0]["name"], "demo-ops-shared")
-                self.assertNotIn("content", card["skills"][0])
-            finally:
-                _unload("demo_ops", str(dest))
+                from demo_ops.mcp_server import mcp_token_ok
 
-    def test_none_sets_agent_false_in_snippet(self):
-        with tempfile.TemporaryDirectory() as td:
-            dest = generate(
-                name="demo_ops",
-                skill="none",
-                out=Path(td) / "demo_ops",
-            )
-            snippet = (dest / "deploy" / "sleuth.env.snippet").read_text(encoding="utf-8")
-            self.assertIn('"agent":false', snippet)
-            self.assertNotIn('"agent":true', snippet)
-
-    def test_both_lists_private_and_cos(self):
-        with tempfile.TemporaryDirectory() as td:
-            dest = generate(
-                name="demo_ops",
-                skill="both",
-                out=Path(td) / "demo_ops",
-            )
-            sys.path.insert(0, str(dest))
-            try:
-                card_mod = importlib.import_module("demo_ops.agent_card")
-                card = card_mod.load_agent_card()
-                names = [s["name"] for s in card["skills"]]
-                self.assertEqual(names, ["demo-ops-sop", "demo-ops-shared"])
-                self.assertTrue(card["skills"][0].get("content"))
-                self.assertNotIn("content", card["skills"][1])
+                self.assertTrue(mcp_token_ok("/health", "", "secret"))
+                self.assertTrue(mcp_token_ok("/mcp", "", ""))
+                self.assertFalse(mcp_token_ok("/mcp", "", "secret"))
+                self.assertTrue(mcp_token_ok("/mcp", "Bearer secret", "secret"))
+                if not _mcp_available():
+                    return
+                cfg_mod = __import__("demo_ops.config", fromlist=["*"])
+                mcp_mod = __import__("demo_ops.mcp_server", fromlist=["*"])
+                open_srv = mcp_mod.build_mcp_server(_closed_settings(cfg_mod))
+                auth_srv = mcp_mod.build_mcp_server(
+                    _closed_settings(cfg_mod, mcp_token="secret")
+                )
+                self.assertEqual(open_srv.streamable_http_app.__name__, "streamable_http_app")
+                self.assertEqual(auth_srv.streamable_http_app.__name__, "wrapped")
             finally:
                 _unload("demo_ops", str(dest))
 

@@ -12,7 +12,7 @@ Python 编程 Agent：本机 CLI 与多用户 HTTP 服务。支持远程 MCP 工
 | [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md) | MCP Tool / Agent Card 对接规范 |
 | [docs/SKILL_INTEGRATION.md](docs/SKILL_INTEGRATION.md) | Skill 接入与开发规范 |
 | [agents/scaffold/README.md](agents/scaffold/README.md) | 新 Agent 脚手架（模板包 + 生成器） |
-| [docs/AGENT_SCENARIOS.md](docs/AGENT_SCENARIOS.md) | `dd_analyst` / `dd_reply` 内部流程图 |
+| [docs/AGENT_SCENARIOS.md](docs/AGENT_SCENARIOS.md) | `dd_check` / `dd_reply` 内部流程图 |
 | [docs/EXTENDING.md](docs/EXTENDING.md) | 扩展选型与改代码清单 |
 
 要求 **Python ≥ 3.10**。Windows 上若默认 `python` 仍是 3.9，请使用 `py -3.12`。
@@ -85,7 +85,7 @@ py -3.12 -m sleuth --session sess_xxx
 py -3.12 -m sleuth --refresh-skills --yolo "..."
 py -3.12 -m sleuth --agent plan "..."
 py -3.12 -m sleuth --model openai/gpt-4o-mini
-py -3.12 -m sleuth --skill dd-report-check --skill dd-reply-framework
+py -3.12 -m sleuth --skill dd-check-sop --skill dd-reply-framework
 ```
 
 交互中浏览 / 切换会话（不必查库）：
@@ -108,11 +108,11 @@ current session id=...
 >>> /model
 >>> /model qwen-max
 >>> /agent
->>> /agent dd_analyst
+>>> /agent dd_check
 >>> /mcp
 >>> /mcp reload
 >>> /skills
->>> /skill dd-report-check dd-reply-framework
+>>> /skill dd-check-sop dd-reply-framework
 >>> /skill +other-skill
 >>> /skill -dd-reply-framework
 >>> /skills reload
