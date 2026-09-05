@@ -273,6 +273,8 @@ def _extract_pdf_images(
     max_chars: int,
     *,
     vision_prompt: Optional[str] = None,
+    on_progress=None,
+    file_id: str = "",
 ) -> Excerpt:
     pages, err, more_pages = render_pdf_pages(data, config)
     if err:
@@ -284,6 +286,24 @@ def _extract_pdf_images(
     used = 0
     truncated = bool(more_pages)
     for i, png in enumerate(pages):
+        if callable(on_progress):
+            fcfg = _files_cfg(config)
+            try:
+                detail = (fcfg.progress_detail_page or FilesConfig().progress_detail_page).format(
+                    page=i + 1, pages=len(pages)
+                )
+            except (KeyError, ValueError, IndexError):
+                detail = f"page {i + 1}/{len(pages)}"
+            try:
+                on_progress(
+                    stage=fcfg.stage_extract_page or "extract_page",
+                    file_id=file_id,
+                    page=i + 1,
+                    pages=len(pages),
+                    detail=detail,
+                )
+            except Exception:
+                pass
         remain = max_chars - used if max_chars > 0 else 0
         if max_chars > 0 and remain <= 0:
             truncated = True
@@ -334,6 +354,8 @@ def _extract_pdf(
     config: Config,
     *,
     vision_prompt: Optional[str] = None,
+    on_progress=None,
+    file_id: str = "",
 ) -> Excerpt:
     try:
         from pypdf import PdfReader
@@ -348,7 +370,12 @@ def _extract_pdf(
     if clipped:
         return Excerpt(text=clipped, truncated=truncated, parser="pypdf")
     return _extract_pdf_images(
-        data, config, max_chars, vision_prompt=vision_prompt
+        data,
+        config,
+        max_chars,
+        vision_prompt=vision_prompt,
+        on_progress=on_progress,
+        file_id=file_id,
     )
 
 
@@ -398,6 +425,8 @@ def extract_bytes(
     config: Optional[Config] = None,
     max_chars: int = 0,
     vision_prompt: Optional[str] = None,
+    on_progress=None,
+    file_id: str = "",
 ) -> Excerpt:
     cfg = config or Config()
     fcfg = _files_cfg(cfg)
@@ -411,7 +440,12 @@ def extract_bytes(
         )
     if kind == "pdf":
         return _extract_pdf(
-            data, limit, cfg, vision_prompt=vision_prompt
+            data,
+            limit,
+            cfg,
+            vision_prompt=vision_prompt,
+            on_progress=on_progress,
+            file_id=file_id,
         )
     if kind == "xlsx":
         return _extract_xlsx(data, limit)

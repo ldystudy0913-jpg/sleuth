@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
+from ..bizerror import BizErrorCode
 from ..config import Config
 from .errors import MailboxError
 from .crypto_sm4 import Sm4CbcError, sm4_cbc_decrypt, sm4_cbc_encrypt
@@ -12,7 +13,7 @@ from . import settings
 def store_payload(plain: bytes, config: Config) -> Tuple[bytes, bool]:
     key = settings.sm4_key(config)
     if settings.require_encrypt(config) and not key:
-        raise MailboxError(settings.err_sm4_key(config), 503)
+        raise MailboxError(BizErrorCode.ENCRYPT_NOT_CONFIGURED, settings.err_sm4_key(config), status=503)
     if not key or not settings.require_encrypt(config):
         return plain, False
     return sm4_cbc_encrypt(plain, key), True
@@ -23,11 +24,11 @@ def restore_plaintext(raw: bytes, *, encrypted: bool, config: Config) -> bytes:
         return raw
     key = settings.sm4_key(config)
     if not key:
-        raise MailboxError(settings.err_sm4_key(config), 503)
+        raise MailboxError(BizErrorCode.ENCRYPT_NOT_CONFIGURED, settings.err_sm4_key(config), status=503)
     try:
         return sm4_cbc_decrypt(raw, key)
     except Sm4CbcError as exc:
-        raise MailboxError(f"sm4 decrypt failed: {exc}") from exc
+        raise MailboxError(BizErrorCode.READ_FAIL, f"sm4 decrypt failed: {exc}") from exc
 
 
 def put_mime(config: Config, *, encrypted: bool, original_mime: str) -> str:

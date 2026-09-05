@@ -126,10 +126,13 @@ def _ping_payload(
     missing = [] if (message or "").strip() else ["回显文本 message"]
     if should_pause(settings.hitl_enabled, missing, proceed_with_gaps):
         return json.dumps(need_input_payload(missing), ensure_ascii=False)
+    from .progress import bind_current
+
+    progress_fn = bind_current()
     if refs is not None:
-        result = run_ping(message, attachment_refs=refs)
+        result = run_ping(message, attachment_refs=refs, progress_fn=progress_fn)
     else:
-        result = run_ping(message)
+        result = run_ping(message, progress_fn=progress_fn)
     return json.dumps(result, ensure_ascii=False)
 
 

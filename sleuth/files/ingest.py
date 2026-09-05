@@ -27,8 +27,27 @@ class ExtractScheduler:
         self._lock = threading.Lock()
         self._inflight: Dict[str, threading.Event] = {}
         self._session_locks: Dict[str, threading.Lock] = {}
+        self._progress_hooks: Dict[str, Any] = {}
         self.active = 0
         self.max_active = 0
+
+    def set_progress_hook(self, session_id: str, fn) -> None:
+        sid = str(session_id or "")
+        with self._lock:
+            if fn is None:
+                self._progress_hooks.pop(sid, None)
+            elif sid:
+                self._progress_hooks[sid] = fn
+
+    def notify_progress(self, session_id: str, **payload: Any) -> None:
+        sid = str(session_id or "")
+        with self._lock:
+            fn = self._progress_hooks.get(sid)
+        if callable(fn):
+            try:
+                fn(**payload)
+            except Exception:
+                pass
 
     def _semaphore(self, n: int) -> threading.BoundedSemaphore:
         n = max(1, int(n or 1))
@@ -145,7 +164,12 @@ class ExtractScheduler:
             return
         if str(item.get("excerpt_status") or "") in file_settings.excerpt_done(config):
             return
-        excerpt = extract_item(config=config, item=item, object_store=object_store)
+        excerpt = extract_item(
+            config=config,
+            item=item,
+            object_store=object_store,
+            on_progress=lambda **kw: self.notify_progress(session_id, **kw),
+        )
         self._apply_excerpt(store, session_id, file_id, excerpt, config)
 
     def _apply_excerpt(self, store, session_id: str, file_id: str, excerpt: Excerpt, config=None) -> None:
@@ -213,6 +237,7 @@ def extract_item(
     object_store: Optional[ObjectStore] = None,
     max_chars: int = 0,
     vision_prompt: Optional[str] = None,
+    on_progress=None,
 ) -> Excerpt:
     fcfg = files_config(config)
     key = str(item.get("object_key") or "")
@@ -242,6 +267,8 @@ def extract_item(
             config=config,
             max_chars=max_chars,
             vision_prompt=vision_prompt,
+            on_progress=on_progress,
+            file_id=str(item.get("id") or ""),
         )
     except Sm4CbcError as exc:
         return Excerpt(skipped=f"sm4 decrypt failed: {exc}")
@@ -283,32 +310,73 @@ def ensure_session_excerpts(
     *,
     timeout_s: float = 8.0,
     object_store: Optional[ObjectStore] = None,
+    progress_target=None,
 ) -> None:
     config = getattr(session, "config", None) or Config()
     files = session_files(session)
     pending = [f for f in files if _needs_extract(f, config)]
     if not pending:
         return
+    from ..progress import emit_progress
+
+    target = progress_target if progress_target is not None else session
+    fcfg = files_config(config)
     store_impl = object_store or getattr(session, "_object_store", None)
     store = getattr(session, "store", None)
     sid = str(getattr(session, "id", "") or "")
-    events = []
+
+    def _hook(**payload):
+        emit_progress(target, **payload)
+
+    emit_progress(
+        target,
+        stage=fcfg.stage_extract or "extract",
+        detail=fcfg.progress_detail_extract or "extracting attachments",
+    )
     if store is not None and sid:
-        for item in pending:
-            events.append(
-                schedule_extract(
-                    config=config,
-                    store=store,
-                    session_id=sid,
-                    file_id=str(item.get("id") or ""),
-                    object_store=store_impl,
+        sched = scheduler()
+        sched.set_progress_hook(sid, _hook)
+        events = []
+        try:
+            for item in pending:
+                events.append(
+                    schedule_extract(
+                        config=config,
+                        store=store,
+                        session_id=sid,
+                        file_id=str(item.get("id") or ""),
+                        object_store=store_impl,
+                    )
                 )
-            )
-        deadline = time.time() + max(0.0, float(timeout_s))
-        for ev in events:
-            ev.wait(timeout=max(0.0, deadline - time.time()))
+            deadline = time.time() + max(0.0, float(timeout_s))
+            interval = float(getattr(fcfg, "progress_interval_s", 1.0) or 1.0)
+            for ev in events:
+                while not ev.is_set() and time.time() < deadline:
+                    emit_progress(
+                        target,
+                        stage=fcfg.stage_extract_wait or "extract_wait",
+                        detail=fcfg.progress_detail_wait or "waiting for excerpt",
+                    )
+                    ev.wait(timeout=min(interval, max(0.0, deadline - time.time())))
+        finally:
+            sched.set_progress_hook(sid, None)
+        emit_progress(
+            target,
+            stage=fcfg.stage_extract_done or "extract_done",
+            detail=fcfg.progress_detail_done or "excerpt ready",
+        )
         return
     for item in pending:
-        excerpt = extract_item(config=config, item=item, object_store=store_impl)
+        excerpt = extract_item(
+            config=config,
+            item=item,
+            object_store=store_impl,
+            on_progress=_hook,
+        )
         write_excerpt_fields(item, excerpt, config)
     write_session_files(session, files)
+    emit_progress(
+        target,
+        stage=fcfg.stage_extract_done or "extract_done",
+        detail=fcfg.progress_detail_done or "excerpt ready",
+    )

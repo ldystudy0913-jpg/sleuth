@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from ..bizerror import APPError, BizErrorCode
 from ..memory import settings
 from ..memory.acl import resolve_identity
 from ..memory.directory import directory_for
@@ -18,12 +19,7 @@ from ..memory.service import (
     write_memory,
 )
 from ..memory.store import memory_store_for
-
-
-def _json(data, status=200):
-    from starlette.responses import JSONResponse
-
-    return JSONResponse(data, status_code=status)
+from .envelope import json_ok, raise_code
 
 
 def _is_admin(request, config) -> bool:
@@ -33,10 +29,10 @@ def _is_admin(request, config) -> bool:
     return (request.headers.get("x-admin-token") or "") == token
 
 
-def _require_admin(request, config):
+def _require_admin(request, config) -> None:
     if _is_admin(request, config):
-        return None
-    return _json({"error": "unauthorized"}, 401)
+        return
+    raise_code(BizErrorCode.AUTH_NOT_PERMIT, status=401)
 
 
 def _user_id(request) -> str:
@@ -48,11 +44,11 @@ def _user_id(request) -> str:
 
 
 def _memory_unavailable(config=None):
-    body = {"error": "long-term memory is not configured"}
+    base = "long-term memory is not configured"
     detail = (getattr(config, "_memory_error", None) or "").strip() if config is not None else ""
-    if detail:
-        body["detail"] = detail
-    return _json(body, 503)
+    arg = f"{base}; {detail}" if detail else base
+    data = {"detail": detail} if detail else None
+    raise_code(BizErrorCode.MEMORY_UNAVAILABLE, arg, status=503, data=data)
 
 
 async def list_or_search_memory(request, config):
@@ -60,7 +56,7 @@ async def list_or_search_memory(request, config):
     q = (request.query_params.get("q") or "").strip()
     store = memory_store_for(config)
     if store is None:
-        return _memory_unavailable(config)
+        _memory_unavailable(config)
     try:
         if q:
             items = search_for_user(config, user_id, q)
@@ -69,15 +65,15 @@ async def list_or_search_memory(request, config):
 
             items = store.list_scope(identity_scopes(config, user_id), include_inactive=False)
     except MemoryUnavailable:
-        return _memory_unavailable(config)
+        _memory_unavailable(config)
     except Exception as exc:
-        return _json({"error": str(exc)}, 400)
+        raise_code(BizErrorCode.REQUEST_VALIDATION_FAILED, str(exc))
     kb_status = (request.query_params.get("kb_status") or "").strip()
     try:
         items = filter_by_kb_status(config, items, kb_status)
     except ValueError as exc:
-        return _json({"error": str(exc)}, 400)
-    return _json(
+        raise_code(BizErrorCode.PARAM_INVALID, str(exc))
+    return json_ok(
         {
             "items": [item.to_public_dict() for item in items],
             "item_key_domains": settings.item_key_domains(config),
@@ -92,18 +88,16 @@ async def create_memory(request, config):
     try:
         body = await request.json()
     except Exception:
-        return _json({"error": "invalid json"}, 400)
+        raise_code(BizErrorCode.REQUEST_VALIDATION_FAILED, "invalid json")
     if not isinstance(body, dict):
-        return _json({"error": "invalid json"}, 400)
+        raise_code(BizErrorCode.REQUEST_VALIDATION_FAILED, "invalid json")
     admin = _is_admin(request, config)
     scope_kind = str(body.get("scope_kind") or "user").strip()
     scope_id = str(body.get("scope_id") or user_id).strip()
     if scope_kind != "user" or scope_id != user_id:
         if not admin:
-            return _json({"error": "only admin can write role or org memory"}, 401)
-        denied = _require_admin(request, config)
-        if denied is not None:
-            return denied
+            raise_code(BizErrorCode.AUTH_NOT_PERMIT, "only admin can write role or org memory", status=401)
+        _require_admin(request, config)
     scenarios = settings.scenarios(config)
     kinds = settings.kinds(config)
     try:
@@ -123,14 +117,16 @@ async def create_memory(request, config):
             origin_type=str(body.get("origin_type") or ("admin" if admin and scope_kind != "user" else "user_explicit")),
         )
     except MemoryPrivacyError as exc:
-        return _json({"error": str(exc)}, 400)
+        raise_code(BizErrorCode.PARAM_INVALID, str(exc))
     except MemoryUnavailable:
-        return _memory_unavailable(config)
+        _memory_unavailable(config)
     except ValueError as exc:
-        return _json({"error": str(exc)}, 400)
+        raise_code(BizErrorCode.PARAM_INVALID, str(exc))
+    except APPError:
+        raise
     except Exception as exc:
-        return _json({"error": str(exc)}, 400)
-    return _json(item.to_public_dict())
+        raise_code(BizErrorCode.INSERT_FAIL, str(exc))
+    return json_ok(item.to_public_dict())
 
 
 async def patch_memory(request, config):
@@ -138,21 +134,21 @@ async def patch_memory(request, config):
     item_id = request.path_params.get("memory_id") or ""
     store = memory_store_for(config)
     if store is None:
-        return _memory_unavailable(config)
+        _memory_unavailable(config)
     item = store.get(item_id)
     if item is None:
-        return _json({"error": "not found"}, 404)
+        raise_code(BizErrorCode.ABNORMAL_OPERATION, f"memory not found: {item_id}", status=404)
     admin = _is_admin(request, config)
     if not admin and not can_access_item(config, user_id, item):
-        return _json({"error": "not found"}, 404)
+        raise_code(BizErrorCode.ABNORMAL_OPERATION, f"memory not found: {item_id}", status=404)
     if item.scope_kind != "user" and not admin:
-        return _json({"error": "only admin can edit role or org memory"}, 401)
+        raise_code(BizErrorCode.AUTH_NOT_PERMIT, "only admin can edit role or org memory", status=401)
     try:
         body = await request.json()
     except Exception:
-        return _json({"error": "invalid json"}, 400)
+        raise_code(BizErrorCode.REQUEST_VALIDATION_FAILED, "invalid json")
     if not isinstance(body, dict):
-        return _json({"error": "invalid json"}, 400)
+        raise_code(BizErrorCode.REQUEST_VALIDATION_FAILED, "invalid json")
     title = str(body.get("title_text") if "title_text" in body else item.title_text)
     text = str(body.get("body_text") if "body_text" in body else item.body_text)
     payload = body.get("payload_text") if "payload_text" in body else item.payload_text
@@ -196,12 +192,12 @@ async def patch_memory(request, config):
                 store=store,
             )
     except MemoryPrivacyError as exc:
-        return _json({"error": str(exc)}, 400)
+        raise_code(BizErrorCode.PARAM_INVALID, str(exc))
     except MemoryUnavailable:
-        return _memory_unavailable(config)
+        _memory_unavailable(config)
     except ValueError as exc:
-        return _json({"error": str(exc)}, 400)
-    return _json(updated.to_public_dict())
+        raise_code(BizErrorCode.PARAM_INVALID, str(exc))
+    return json_ok(updated.to_public_dict())
 
 
 async def delete_memory(request, config):
@@ -209,36 +205,34 @@ async def delete_memory(request, config):
     item_id = request.path_params.get("memory_id") or ""
     store = memory_store_for(config)
     if store is None:
-        return _memory_unavailable(config)
+        _memory_unavailable(config)
     item = store.get(item_id)
     if item is None:
-        return _json({"error": "not found"}, 404)
+        raise_code(BizErrorCode.ABNORMAL_OPERATION, f"memory not found: {item_id}", status=404)
     admin = _is_admin(request, config)
     if not admin and not can_access_item(config, user_id, item):
-        return _json({"error": "not found"}, 404)
+        raise_code(BizErrorCode.ABNORMAL_OPERATION, f"memory not found: {item_id}", status=404)
     if item.scope_kind != "user" and not admin:
-        return _json({"error": "only admin can forget role or org memory"}, 401)
+        raise_code(BizErrorCode.AUTH_NOT_PERMIT, "only admin can forget role or org memory", status=401)
     try:
         forgot = forget_memory(config, item_id, actor=user_id, store=store)
     except MemoryUnavailable:
-        return _memory_unavailable(config)
+        _memory_unavailable(config)
     except ValueError as exc:
-        return _json({"error": str(exc)}, 404)
-    return _json({"ok": True, "id": forgot.id})
+        raise_code(BizErrorCode.ABNORMAL_OPERATION, str(exc), status=404)
+    return json_ok({"ok": True, "id": forgot.id})
 
 
 async def get_directory_user(request, config):
-    denied = _require_admin(request, config)
-    if denied is not None:
-        return denied
+    _require_admin(request, config)
     directory = directory_for(config)
     if not directory.available():
-        return _json({"error": "directory tables are not available"}, 503)
+        raise_code(BizErrorCode.DIRECTORY_UNAVAILABLE, "directory tables are not available", status=503)
     user_id = request.path_params.get("user_id") or ""
     rec = directory.get_user(user_id)
     if rec is None:
-        return _json({"error": "not found"}, 404)
-    return _json(
+        raise_code(BizErrorCode.USER_NOT_FOUND, status=404)
+    return json_ok(
         {
             "user_id": rec.user_id,
             "display_name": rec.display_name,
@@ -250,19 +244,17 @@ async def get_directory_user(request, config):
 
 
 async def put_directory_user(request, config):
-    denied = _require_admin(request, config)
-    if denied is not None:
-        return denied
+    _require_admin(request, config)
     directory = directory_for(config)
     if not directory.available():
-        return _json({"error": "directory tables are not available"}, 503)
+        raise_code(BizErrorCode.DIRECTORY_UNAVAILABLE, "directory tables are not available", status=503)
     user_id = request.path_params.get("user_id") or ""
     try:
         body = await request.json()
     except Exception:
-        return _json({"error": "invalid json"}, 400)
+        raise_code(BizErrorCode.REQUEST_VALIDATION_FAILED, "invalid json")
     if not isinstance(body, dict):
-        return _json({"error": "invalid json"}, 400)
+        raise_code(BizErrorCode.REQUEST_VALIDATION_FAILED, "invalid json")
     rec = UserRecord(
         user_id=user_id,
         display_name=body.get("display_name"),
@@ -273,8 +265,8 @@ async def put_directory_user(request, config):
     try:
         saved = directory.upsert_user(rec)
     except Exception as exc:
-        return _json({"error": str(exc)}, 400)
-    return _json(
+        raise_code(BizErrorCode.UPDATE_FAIL, str(exc))
+    return json_ok(
         {
             "user_id": saved.user_id,
             "display_name": saved.display_name,
@@ -298,12 +290,10 @@ def _grant_payload(rec: GrantRecord) -> Dict[str, Any]:
 
 
 async def list_grants(request, config):
-    denied = _require_admin(request, config)
-    if denied is not None:
-        return denied
+    _require_admin(request, config)
     directory = directory_for(config)
     if not directory.available():
-        return _json({"error": "directory tables are not available"}, 503)
+        raise_code(BizErrorCode.DIRECTORY_UNAVAILABLE, "directory tables are not available", status=503)
     rows = directory.list_grants(
         resource_kind=request.query_params.get("resource_kind") or None,
         resource_id=request.query_params.get("resource_id") or None,
@@ -311,27 +301,25 @@ async def list_grants(request, config):
         scope_id=request.query_params.get("scope_id") or None,
         active_only=False,
     )
-    return _json({"grants": [_grant_payload(r) for r in rows]})
+    return json_ok({"grants": [_grant_payload(r) for r in rows]})
 
 
 async def put_grant(request, config):
-    denied = _require_admin(request, config)
-    if denied is not None:
-        return denied
+    _require_admin(request, config)
     directory = directory_for(config)
     if not directory.available():
-        return _json({"error": "directory tables are not available"}, 503)
+        raise_code(BizErrorCode.DIRECTORY_UNAVAILABLE, "directory tables are not available", status=503)
     try:
         body = await request.json()
     except Exception:
-        return _json({"error": "invalid json"}, 400)
+        raise_code(BizErrorCode.REQUEST_VALIDATION_FAILED, "invalid json")
     items = body.get("grants") if isinstance(body, dict) and isinstance(body.get("grants"), list) else None
     if items is None:
         items = [body] if isinstance(body, dict) else []
     saved = []
     for raw in items:
         if not isinstance(raw, dict):
-            return _json({"error": "invalid grant"}, 400)
+            raise_code(BizErrorCode.PARAM_INVALID, "invalid grant")
         rec = GrantRecord(
             grant_id=str(raw.get("grant_id") or ""),
             scope_kind=str(raw.get("scope_kind") or "").strip(),
@@ -342,16 +330,16 @@ async def put_grant(request, config):
             row_status=str(raw.get("row_status") or settings.acl_active(config)).strip(),
         )
         if rec.scope_kind not in settings.csv_field(settings.acl_cfg(config).scope_kinds):
-            return _json({"error": f"invalid scope_kind: {rec.scope_kind}"}, 400)
+            raise_code(BizErrorCode.PARAM_INVALID, f"invalid scope_kind: {rec.scope_kind}")
         if rec.resource_kind not in settings.csv_field(settings.acl_cfg(config).resource_kinds):
-            return _json({"error": f"invalid resource_kind: {rec.resource_kind}"}, 400)
+            raise_code(BizErrorCode.PARAM_INVALID, f"invalid resource_kind: {rec.resource_kind}")
         if rec.grant_effect not in (settings.grant_allow(config), settings.grant_deny(config)):
-            return _json({"error": f"invalid grant_effect: {rec.grant_effect}"}, 400)
+            raise_code(BizErrorCode.PARAM_INVALID, f"invalid grant_effect: {rec.grant_effect}")
         try:
             saved.append(directory.upsert_grant(rec))
         except Exception as exc:
-            return _json({"error": str(exc)}, 400)
-    return _json({"grants": [_grant_payload(r) for r in saved]})
+            raise_code(BizErrorCode.UPDATE_FAIL, str(exc))
+    return json_ok({"grants": [_grant_payload(r) for r in saved]})
 
 
 def identity_payload(config, user_id: str) -> Dict[str, Optional[str]]:

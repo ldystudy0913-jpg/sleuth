@@ -99,11 +99,14 @@ class OpenGaussCompatTests(unittest.TestCase):
     def test_unavailable_response_includes_detail(self):
         cfg = Config()
         cfg._memory_error = "psycopg2 is not importable"
-        resp = _memory_unavailable(cfg)
-        self.assertEqual(resp.status_code, 503)
-        body = resp.body.decode("utf-8")
-        self.assertIn("long-term memory is not configured", body)
-        self.assertIn("psycopg2 is not importable", body)
+        from sleuth.bizerror import APPError, BizErrorCode
+
+        with self.assertRaises(APPError) as ctx:
+            _memory_unavailable(cfg)
+        self.assertEqual(ctx.exception.status, 503)
+        self.assertEqual(ctx.exception.code, BizErrorCode.MEMORY_UNAVAILABLE.code)
+        self.assertIn("long-term memory is not configured", ctx.exception.msg)
+        self.assertIn("psycopg2 is not importable", ctx.exception.msg)
 
 
 if __name__ == "__main__":

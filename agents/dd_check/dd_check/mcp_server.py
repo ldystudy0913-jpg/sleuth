@@ -151,6 +151,8 @@ def _check_payload(
     missing, filled = _report_gaps(report_text, report_json, refs)
     if should_pause(settings.hitl_enabled, missing, proceed_with_gaps):
         return json.dumps(need_input_payload(missing, filled), ensure_ascii=False)
+    from .progress import bind_current
+
     result = run_check(
         settings,
         report_text=report_text,
@@ -158,6 +160,7 @@ def _check_payload(
         question=question,
         attachment_refs=refs,
         sleuth_llm_json=sleuth_llm_json,
+        progress_fn=bind_current(),
     )
     return json.dumps(result, ensure_ascii=False)
 

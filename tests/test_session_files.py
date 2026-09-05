@@ -440,7 +440,7 @@ class HttpFileRouteTests(unittest.TestCase):
                     headers=headers,
                 )
                 self.assertEqual(up.status_code, 200, up.text)
-                body = up.json()
+                body = up.json()["data"]
                 self.assertEqual(body["status"], "ready")
                 self.assertEqual(body["size"], 5)
                 fid = body["id"]
@@ -448,7 +448,7 @@ class HttpFileRouteTests(unittest.TestCase):
 
                 listed = client.get(f"/v1/sessions/{rec.id}/files", headers=headers)
                 self.assertEqual(listed.status_code, 200)
-                self.assertEqual(len(listed.json()["files"]), 1)
+                self.assertEqual(len(listed.json()["data"]["files"]), 1)
 
                 dl = client.get(
                     f"/v1/sessions/{rec.id}/files/{fid}",

@@ -208,6 +208,25 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(body["files"][0]["url"], "https://example.com/r.docx")
         self.assertEqual(captured.get("n"), 1)
 
+    def test_progress_fn_emits_pipeline_stages(self):
+        stages = []
+
+        def fake_llm(messages, settings):
+            return _llm_payload()
+
+        body = check_report(
+            _settings(),
+            report_text="客户张三",
+            llm_fn=fake_llm,
+            emit_fn=lambda settings, **kwargs: {"ok": True, "files": []},
+            progress_fn=stages.append,
+        )
+        self.assertTrue(body.get("ok"))
+        self.assertIn("normalize", stages)
+        self.assertIn("llm", stages)
+        self.assertIn("score", stages)
+        self.assertIn("word", stages)
+
     def test_kb_mock_fills_sources(self):
         reset_token_cache()
 

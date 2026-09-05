@@ -135,7 +135,7 @@ class SessionSkillTests(unittest.TestCase):
         self.assertEqual(sess._pinned_skill_prompt(), "")
 
     def test_skill_sticky_restore(self):
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             sid = "sess_stickyskill000000000001"
             cfg = Config(
@@ -180,7 +180,7 @@ class SessionSkillTests(unittest.TestCase):
 
     def test_skill_sticky_restore_list(self):
         set_skills({"demo": _demo_skill(), "other": _other_skill()})
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             sid = "sess_stickyskills00000000002"
             cfg = Config(
@@ -384,7 +384,7 @@ class HttpSkillSelectorTests(unittest.TestCase):
 
         from sleuth.server.app import create_app
 
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             sid = "sess_httpskill000000000001"
             store.create_session(
@@ -410,6 +410,13 @@ class HttpSkillSelectorTests(unittest.TestCase):
                     self.yolo = True
                     self._last_usage = {}
                     self._session_cost = 0.0
+                    self.config = Config(default_agent="build")
+                    self.store = None
+                    self._files = []
+                    self._turn_file_ids = []
+
+                def ask_payload(self):
+                    return {"status": "ok"}
 
                 @property
                 def skill_name(self):
@@ -494,8 +501,8 @@ class HttpSkillSelectorTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(created.status_code, 200)
-                self.assertEqual(created.json().get("skill"), "demo")
-                self.assertEqual(created.json().get("skills"), ["demo"])
+                self.assertEqual(created.json()["data"].get("skill"), "demo")
+                self.assertEqual(created.json()["data"].get("skills"), ["demo"])
 
                 multi = client.post(
                     "/v1/sessions",
@@ -507,8 +514,8 @@ class HttpSkillSelectorTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(multi.status_code, 200)
-                self.assertEqual(multi.json().get("skill"), "demo")
-                self.assertEqual(multi.json().get("skills"), ["demo", "other"])
+                self.assertEqual(multi.json()["data"].get("skill"), "demo")
+                self.assertEqual(multi.json()["data"].get("skills"), ["demo", "other"])
 
                 ok = client.post(
                     f"/v1/sessions/{sid}/messages",
@@ -521,8 +528,8 @@ class HttpSkillSelectorTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(ok.status_code, 200)
-                self.assertIsNone(ok.json().get("skill"))
-                self.assertEqual(ok.json().get("skills"), [])
+                self.assertIsNone(ok.json()["data"].get("skill"))
+                self.assertEqual(ok.json()["data"].get("skills"), [])
 
                 bad = client.post(
                     f"/v1/sessions/{sid}/messages",
@@ -535,7 +542,8 @@ class HttpSkillSelectorTests(unittest.TestCase):
                     },
                 )
                 self.assertEqual(bad.status_code, 400)
-                self.assertEqual(bad.json().get("error"), SKILL_ONLY_DEFAULT_ERROR)
+                self.assertEqual(bad.json().get("code"), "AMLS004")
+                self.assertIn(SKILL_ONLY_DEFAULT_ERROR, bad.json().get("msg") or "")
 
 
 if __name__ == "__main__":

@@ -50,13 +50,25 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 
 若服务端 **未配置** `SLEUTH_SERVER_ADMIN_TOKEN`，则管理校验关闭（开发方便，生产务必配置）。
 
-### 2.3 错误响应
+### 2.3 统一信封与错误响应
 
-统一为 JSON：
+所有 **JSON** 接口（成功与失败）使用同一信封。**HTTP 状态码仍然有效**（400/401/404/413/503 等），不要只看 `code` 而忽略 status。明文文件下载成功仍是原始字节，不是信封。
+
+成功：
 
 ```json
-{ "error": "说明文字" }
+{ "code": "SUC0000", "msg": "成功", "data": { } }
 ```
+
+下文各接口示例写的是 **`data` 内层**（或单独标明的失败信封）。
+
+失败：
+
+```json
+{ "code": "AMLS001", "msg": "会话不存在：sess_…", "data": null }
+```
+
+`code` / `msg` 来自业务错误码目录（`BizErrorCode`）。常见码：`SUC0000` 成功；`AMLP001` 参数校验；`AMLQ302` 权限不足；`AMLS001` 会话不存在；`AMLK023` 上传失败；`AMLS007` 记忆不可用。
 
 常见 HTTP 状态码：
 
@@ -117,6 +129,7 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
 | `GET` | `/health` | 无 | 探活 |
+| `GET` | `/v1/files/limits` | 无 | 上传限制（大小 / 个数 / MIME / 字段名），前端提示与拦截用 |
 | `POST` | `/v1/sessions` | 用户头 | 创建会话 |
 | `GET` | `/v1/sessions` | 用户头 | 会话列表（含预览） |
 | `GET` | `/v1/sessions/{session_id}` | 用户头 | 会话详情 + 消息 |
@@ -158,6 +171,36 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 ```json
 { "ok": true }
 ```
+
+### 4.1.1 上传限制
+
+`GET /v1/files/limits`
+
+返回当前进程 `FilesConfig`（`.env` 的 `SLEUTH_FILES_*`）。前端应用此接口做提示与拦截，不要写死 50MiB / 20 个。
+
+**响应 `200`**
+
+```json
+{
+  "max_bytes": 52428800,
+  "max_count": 20,
+  "mime_allow": [],
+  "mime_unrestricted": true,
+  "filename_max_chars": 180,
+  "upload_form_field": "file",
+  "upload_filename_field": "filename",
+  "upload_mime_field": "mime",
+  "require_encrypt": true,
+  "image_exts": [".jpg", ".jpeg", ".png", ".webp", ".gif"],
+  "pdf_exts": [".pdf"],
+  "xlsx_exts": [".xlsx"],
+  "xls_exts": [".xls"],
+  "docx_exts": [".docx"],
+  "text_exts": [".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm", ".log", ".yaml", ".yml"]
+}
+```
+
+`mime_allow` 为空或含 `*` / `*/*` 时 `mime_unrestricted=true`，服务端不按 MIME 拒收。扩展名列表只影响摘录解析器，不拒收其它类型。
 
 ---
 
@@ -224,9 +267,7 @@ X-User-Id: alice
 
 | 状态 | body |
 |------|------|
-| `400` | `{ "error": "invalid model: ..." }` |
-| `400` | `{ "error": "invalid skill: ..." }` |
-| `400` | `{ "error": "skill only allowed when agent is the default agent" }` |
+| `400` | `{ "code": "AMLS004", "msg": "Agent 或模型配置无效：…", "data": null }` |
 
 ---
 
@@ -304,13 +345,32 @@ X-User-Id: alice
     "cache_read": 0,
     "cache_write": 0
   },
+  "files": [
+    {
+      "id": "file_...",
+      "filename": "report.pdf",
+      "mime": "application/pdf",
+      "size": 12000,
+      "role": "user",
+      "status": "ready",
+      "download_url": "/v1/sessions/sess_.../files/file_...",
+      "excerpt_status": "ok"
+    }
+  ],
   "messages": [
     {
       "id": "msg_...",
       "role": "user",
       "text": "请检查这份尽调报告…",
       "usage": null,
-      "cost": null
+      "cost": null,
+      "files": [
+        {
+          "id": "file_...",
+          "filename": "report.pdf",
+          "download_url": "/v1/sessions/sess_.../files/file_..."
+        }
+      ]
     },
     {
       "id": "msg_...",
@@ -336,11 +396,13 @@ X-User-Id: alice
 
 `messages[]` 还可带 `step` / `started_at` / `first_token_at` / `completed_at` / `duration_ms`（Unix **毫秒**）。旧会话没有计时时这些字段为 `null`；忽略未知字段的旧客户端不受影响。完整工具台账（含 `id` / 耗时）见 §4.4.1。
 
+顶层 `files` 是会话邮箱清单（与 `GET .../files` 同形）。`messages[].files` 是该条消息绑定的附件（用户上传或助手本轮生成）。切会话再回来请用这两处回绘，不要只依赖瞬时 `done.files`。
+
 **错误**
 
 | 状态 | body |
 |------|------|
-| `404` | `{ "error": "not found" }` |
+| `404` | `{ "code": "AMLS001", "msg": "会话不存在：sess_…", "data": null }` |
 
 ---
 
@@ -416,7 +478,7 @@ X-User-Id: alice
 
 | 状态 | body |
 |------|------|
-| `404` | `{ "error": "not found" }` |
+| `404` | `{ "code": "AMLS001", "msg": "会话不存在：sess_…", "data": null }` |
 
 ---
 
@@ -559,12 +621,10 @@ X-User-Id: alice
 
 | 状态 | body |
 |------|------|
-| `400` | `{ "error": "invalid json" }` |
-| `400` | `{ "error": "prompt required" }` |
-| `400` | `{ "error": "invalid model: ..." }` |
-| `400` | `{ "error": "invalid skill: ..." }` |
-| `400` | `{ "error": "skill only allowed when agent is the default agent" }` |
-| `404` | `{ "error": "not found" }` |
+| `400` | `{ "code": "AMLP001", "msg": "参数校验异常, invalid json", "data": null }` |
+| `400` | `{ "code": "AMLP001", "msg": "参数校验异常, prompt required", "data": null }` |
+| `400` | `{ "code": "AMLS004", "msg": "Agent 或模型配置无效：…", "data": null }` |
+| `404` | `{ "code": "AMLS001", "msg": "会话不存在：sess_…", "data": null }` |
 
 ---
 
@@ -572,7 +632,7 @@ X-User-Id: alice
 
 `POST /v1/sessions/{session_id}/messages/stream`
 
-**说明**：与 §4.5 **同一套鉴权与 Body**，但响应为 **SSE**。模型侧 `text` 按增量推送；MCP/工具为同步等待，期间会先有 `tool_start`，结束后有 `tool_result`（中间可能长时间没有 `text`）。连接结束前必有一条 `type=done`（含完整 `text`，请以前端最终对齐为准）。
+**说明**：与 §4.5 **同一套鉴权与 Body**，但响应为 **SSE**。**带附件提问请用本接口**；同步 `POST .../messages` 会整轮阻塞、结束前无中间输出。入队后先推 `ack`，附件摘录与 MCP 管线期间推 `progress`（`stage` / `file_id` / `page` / `detail`），然后才是模型 `text`。MCP/工具仍为同步等待，但不再只有 `tool_start` 后静音。连接结束前必有一条 `type=done`（含完整 `text`，请以前端最终对齐为准）。
 
 若 `done.status` 为 `awaiting_user`：本轮已停，请把 `questions`（或缺项说明）展示给用户。用户补充字段或回复「没有补充、继续」后再发一条 `POST .../messages`（不必新接口）。`stop.reason` 可能为 `ask`。
 
@@ -608,6 +668,8 @@ data: {"type":"text","delta":"你好","session_id":"sess_a1b2c3d4e5f678901234abc
 
 | `type` | 字段 | 说明 |
 |--------|------|------|
+| `ack` | `session_id` | 用户消息已落库，本轮开始（立刻结束空白等待） |
+| `progress` | `stage`, `session_id`；可选 `file_id`, `page`, `pages`, `detail` | 摘录 / MCP 管线阶段。`stage` 如 `extract` / `extract_page` / `kb` / `llm` / `word` |
 | `text` | `delta`, `session_id`；该步**首次**增量可带 `first_token_at` | 助手可见文本增量（拼起来即正文）；后续增量可省略 `first_token_at` |
 | `reasoning` | `delta`, `session_id`；该步**首次**增量可带 `first_token_at` | 思考过程增量（可忽略） |
 | `step` | `step`, `max_steps`, `session_id`；可选 `started_at` | Agent 循环步数 |
@@ -928,7 +990,7 @@ async function streamMessage(base, sessionId, userId, prompt) {
 }
 ```
 
-**错误**：`401` `{ "error": "unauthorized" }`
+**错误**：`401` `{ "code": "AMLQ302", "msg": "权限不足", "data": null }`
 
 ---
 

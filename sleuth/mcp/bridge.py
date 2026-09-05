@@ -200,7 +200,23 @@ class McpBridgeTool:
         except Exception as exc:
             return ToolResult.error(self.name, f"permission denied: {exc}")
         forwarded = _inject_mcp_args(args or {}, ctx, self.parameters_json_schema)
-        text, is_error = self._manager.call_tool(self.name, forwarded)
+
+        def _progress(progress=None, total=None, message=None):
+            if session is None:
+                return
+            from ..progress import emit_progress
+
+            emit_progress(
+                session,
+                stage=str(message or self.name),
+                detail=str(message or ""),
+                progress=progress,
+                total=total,
+            )
+
+        text, is_error = self._manager.call_tool(
+            self.name, forwarded, progress_callback=_progress
+        )
         if is_error:
             return ToolResult.error(self.name, text, server=self._info.server)
         harvested = _harvest_files(text, ctx)

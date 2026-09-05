@@ -142,7 +142,7 @@ Sleuth 侧用官方 `mcp` Python 包客户端；服务端可用 FastMCP / 任意
 - [ ] 用真实 `server` 键验证合格名为 `{server}_{tool}`  
 - [ ] 在 Sleuth 里对目标工具配置 permission  
 - [ ] 故意关掉该 MCP，确认其它 MCP 仍可用  
-- [ ] 长任务：超时、进度（Sleuth SSE 仅有 `tool_start`→`tool_result`，中间无细粒度进度）
+- [ ] 长任务：超时；关键节点 `report_progress`，Sleuth SSE 转成 `progress`（`stage` / `detail`）
 
 ---
 
@@ -283,6 +283,9 @@ sequenceDiagram
   S->>S: Session prompt loop
   S->>M: call_tool qualified
   M->>R: tools/call
+  Note over R: pipeline report_progress
+  R-->>M: progress notifications
+  M-->>S: SSE progress
   R-->>S: text result
 ```
 
@@ -308,7 +311,7 @@ sequenceDiagram
 - **裸调 MCP**：编排旁路必须走 `Session.execute_guarded_tool`（见 [`ORCHESTRATION.md`](ORCHESTRATION.md) §6）。
 - 编排模式配置写死在代码里：应使用 `SLEUTH_ORCHESTRATION_*` 或 JSONC `orchestration` 块。
 
-- 不把 MCP 内部 LangGraph 节点进度透出为 Sleuth SSE（仅 `tool_start` / `tool_result`）。
+- 长管线应在关键节点 `report_progress`（normalize / kb / llm / word），由 Sleuth 转成 SSE `progress`；不要裸调 `call_tool` 绕过 Session。
 - Card 权限键写 MCP 原名（漏前缀）→ 权限不生效。
 - 两个 MCP 配置键撞名或 sanitize 后撞名 → 工具互相覆盖。
 - 忘记 `pip install mcp` / 服务端未装依赖 → 整类 remote 连不上。

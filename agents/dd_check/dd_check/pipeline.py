@@ -135,6 +135,7 @@ def check_report(
     llm_fn: Optional[LlmFn] = None,
     kb_opener=None,
     emit_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+    progress_fn: Optional[Callable[..., None]] = None,
 ) -> Dict[str, Any]:
     empty = {"ok": False, "score": None, "findings": [], "sources": [], "files": []}
     settings = settings_with_llm_json(settings, sleuth_llm_json)
@@ -156,6 +157,14 @@ def check_report(
     except OSError as exc:
         return {**empty, "detail": f"prompt file missing: {exc}"}
 
+    def _progress(stage: str) -> None:
+        if callable(progress_fn):
+            try:
+                progress_fn(stage)
+            except Exception:
+                pass
+
+    _progress("normalize")
     ids = dimension_ids(rubric)
     score_max = str((rubric.get("score") or {}).get("max"))
     att_summary = summarize_refs(attachment_refs or [])
@@ -194,8 +203,10 @@ def check_report(
 
     try:
         if settings.kb_enabled:
+            _progress("kb")
             seed = seed_queries(rubric)
             sources.extend(_run_kb_queries(seed, settings, cap=cap, opener=kb_opener))
+            _progress("llm")
             parsed = _ask(json.dumps(sources, ensure_ascii=False, indent=2) if sources else "(无)")
             extra = parsed.get("kb_questions") if isinstance(parsed.get("kb_questions"), list) else []
             extra_q = [str(x) for x in extra if str(x).strip()]
@@ -211,11 +222,13 @@ def check_report(
                     sources = _merge_sources(sources, more)
                     parsed = _ask(json.dumps(sources, ensure_ascii=False, indent=2))
         else:
+            _progress("llm")
             parsed = _ask("(未启用知识库)")
     except LlmError as exc:
         return {**empty, "detail": str(exc)}
 
     scores_raw = parsed.get("dimension_scores") if isinstance(parsed.get("dimension_scores"), dict) else {}
+    _progress("score")
     score = aggregate_score(scores_raw, rubric)
     findings = _normalize_findings(parsed.get("findings"), ids)
     summary = str(parsed.get("summary") or "").strip()
@@ -223,6 +236,7 @@ def check_report(
 
     files: List[Dict[str, Any]] = []
     word_detail = ""
+    _progress("word")
     try:
         docx_bytes = render_docx_bytes(
             rubric=rubric,

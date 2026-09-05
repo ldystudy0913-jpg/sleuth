@@ -209,7 +209,11 @@ def build_mcp_server(
         if req.missing_inputs() and not gaps:
             return json.dumps(req.need_input_payload(), ensure_ascii=False)
         try:
-            result = generate_framework(req, settings=settings)
+            from .progress import bind_current
+
+            result = generate_framework(
+                req, settings=settings, progress_fn=bind_current()
+            )
         except ValueError as exc:
             return json.dumps({"error": str(exc)}, ensure_ascii=False)
         return result.model_dump_json(ensure_ascii=False)

@@ -59,6 +59,8 @@ class Renderer(Protocol):
     def on_stop(self, reason: str, usage: dict, **kwargs) -> None: ...
     def on_error(self, message: str) -> None: ...
     def on_retry(self, attempt: int, message: str, wait: float) -> None: ...
+    def on_ack(self, **kwargs) -> None: ...
+    def on_progress(self, **kwargs) -> None: ...
 
 
 class NullRenderer:
@@ -72,6 +74,8 @@ class NullRenderer:
     def on_stop(self, reason: str, usage: dict, **kwargs) -> None: pass
     def on_error(self, message: str) -> None: print(message, file=sys.stderr)
     def on_retry(self, attempt: int, message: str, wait: float) -> None: pass
+    def on_ack(self, **kwargs) -> None: pass
+    def on_progress(self, **kwargs) -> None: pass
 
 
 # ---------------------------------------------------------------------------
@@ -340,15 +344,22 @@ class Session:
         if pending:
             self._flush_pending_ask(user_text, pending)
 
-        user_msg = Message.user_text(
-            user_text, agent=self.agent_name, started_at=now_ms()
-        )
+        file_key = str(getattr(self.config.files, "message_file_ids_key", "") or "file_ids")
+        bound_ids = self._resolve_prompt_file_ids()
+        user_meta = {"agent": self.agent_name, "started_at": now_ms()}
+        if bound_ids:
+            user_meta[file_key] = bound_ids
+        user_msg = Message.user_text(user_text, **user_meta)
         self.messages.append(user_msg)
         self._persist_message(user_msg)
+        from .progress import emit_ack
+
+        emit_ack(self)
         self._maybe_title()
         try:
             self._run_loop()
         finally:
+            self._refresh_last_assistant_files()
             self.status = "awaiting_user" if self._pending_ask else "idle"
             self._update_record()
         return self.last_assistant_text()
@@ -373,6 +384,36 @@ class Session:
 
     def is_busy(self) -> bool:
         return self.status == "busy"
+
+    def _file_ids_key(self) -> str:
+        return str(getattr(self.config.files, "message_file_ids_key", "") or "file_ids")
+
+    def _resolve_prompt_file_ids(self) -> List[str]:
+        from .files.mailbox import ready_files, session_files
+
+        files = ready_files(
+            session_files(self),
+            file_ids=getattr(self, "_prompt_file_ids", None),
+            config=self.config,
+        )
+        return [str(f.get("id") or "") for f in files if str(f.get("id") or "")]
+
+    def _apply_turn_file_ids(self, meta: dict) -> None:
+        ids = list(getattr(self, "_turn_file_ids", None) or [])
+        if not ids:
+            return
+        meta[self._file_ids_key()] = ids
+
+    def _refresh_last_assistant_files(self) -> None:
+        ids = list(getattr(self, "_turn_file_ids", None) or [])
+        if not ids:
+            return
+        key = self._file_ids_key()
+        for m in reversed(self.messages):
+            if m.role == "assistant":
+                m.metadata[key] = ids
+                self._persist_message(m)
+                return
 
     def last_assistant_text(self) -> str:
         for m in reversed(self.messages):
@@ -573,8 +614,11 @@ class Session:
         from .files.ingest import ensure_session_excerpts
         from .files.mailbox import files_prompt_block
 
-        wait_s = float(getattr(getattr(self.config, "files", None), "prompt_wait_s", 8) or 0)
-        ensure_session_excerpts(self, timeout_s=wait_s)
+        fcfg = getattr(self.config, "files", None)
+        wait_s = float(getattr(fcfg, "prompt_wait_s", 8) or 0)
+        if getattr(fcfg, "wait_extract_before_model", True) is False:
+            wait_s = 0.0
+        ensure_session_excerpts(self, timeout_s=wait_s, progress_target=self)
         files_block = files_prompt_block(self)
         if files_block:
             system = system + "\n\n" + files_block
@@ -717,8 +761,7 @@ class Session:
                 assistant_blocks.append(TextBlock(text_out))
             assistant_blocks.extend(tool_uses)
 
-            assistant_msg = Message.assistant(
-                assistant_blocks,
+            assistant_meta = dict(
                 model=self.model_id, agent=self.agent_name,
                 snapshots={"start": start_snap, "end": end_snap},
                 usage=usage, aborted=aborted,
@@ -728,6 +771,11 @@ class Session:
                 first_token_at=first_token_at,
                 completed_at=completed_at,
                 duration_ms=duration_ms,
+            )
+            self._apply_turn_file_ids(assistant_meta)
+            assistant_msg = Message.assistant(
+                assistant_blocks,
+                **assistant_meta,
             )
             self.messages.append(assistant_msg)
             self._persist_message(assistant_msg)

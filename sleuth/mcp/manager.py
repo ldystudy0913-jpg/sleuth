@@ -247,7 +247,12 @@ class McpManager:
         self._started = False
         self._retry_task = None
 
-    def call_tool(self, qualified_name: str, arguments: Dict[str, Any]) -> Tuple[str, bool]:
+    def call_tool(
+        self,
+        qualified_name: str,
+        arguments: Dict[str, Any],
+        progress_callback=None,
+    ) -> Tuple[str, bool]:
         """Call a tool by qualified name. Returns (text, is_error)."""
         info = self._tools.get(qualified_name)
         if info is None:
@@ -264,7 +269,12 @@ class McpManager:
             )
         )
         fut = asyncio.run_coroutine_threadsafe(
-            self._call(session, info.name, arguments or {}),
+            self._call(
+                session,
+                info.name,
+                arguments or {},
+                progress_callback=progress_callback,
+            ),
             self._loop,
         )
         try:
@@ -583,8 +593,24 @@ class McpManager:
         except Exception as exc:
             self._errors.append(f"mcp[{srv.name}]: get_agent_card failed: {exc}")
 
-    async def _call(self, session: Any, name: str, arguments: Dict[str, Any]) -> Tuple[str, bool]:
-        result = await session.call_tool(name, arguments=arguments)
+    async def _call(
+        self,
+        session: Any,
+        name: str,
+        arguments: Dict[str, Any],
+        progress_callback=None,
+    ) -> Tuple[str, bool]:
+        if progress_callback is not None:
+            try:
+                result = await session.call_tool(
+                    name,
+                    arguments=arguments,
+                    progress_callback=progress_callback,
+                )
+            except TypeError:
+                result = await session.call_tool(name, arguments=arguments)
+        else:
+            result = await session.call_tool(name, arguments=arguments)
         is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
         parts: List[str] = []
         for block in getattr(result, "content", None) or []:

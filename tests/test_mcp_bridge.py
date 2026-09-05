@@ -116,7 +116,12 @@ class McpBridgeExecuteTests(unittest.TestCase):
         calls: list[Tuple[str, Dict[str, Any]]] = []
 
         class FakeManager:
-            def call_tool(self, qualified_name: str, arguments: Dict[str, Any]):
+            def call_tool(
+                self,
+                qualified_name: str,
+                arguments: Dict[str, Any],
+                progress_callback=None,
+            ):
                 calls.append((qualified_name, dict(arguments)))
                 return ("ok", False)
 
@@ -193,7 +198,12 @@ class McpBridgeMailboxTests(unittest.TestCase):
         calls: list = []
 
         class FakeManager:
-            def call_tool(self, qualified_name: str, arguments: dict):
+            def call_tool(
+                self,
+                qualified_name: str,
+                arguments: dict,
+                progress_callback=None,
+            ):
                 calls.append((qualified_name, dict(arguments)))
                 return (
                     json.dumps(
@@ -264,7 +274,12 @@ class McpBridgeMailboxTests(unittest.TestCase):
         calls: list = []
 
         class FakeManager:
-            def call_tool(self, qualified_name: str, arguments: dict):
+            def call_tool(
+                self,
+                qualified_name: str,
+                arguments: dict,
+                progress_callback=None,
+            ):
                 calls.append(dict(arguments))
                 return ("{}", False)
 
@@ -318,7 +333,12 @@ class McpBridgeMailboxTests(unittest.TestCase):
         calls: list = []
 
         class FakeManager:
-            def call_tool(self, qualified_name: str, arguments: dict):
+            def call_tool(
+                self,
+                qualified_name: str,
+                arguments: dict,
+                progress_callback=None,
+            ):
                 calls.append(dict(arguments))
                 return ("{}", False)
 
@@ -366,7 +386,12 @@ class McpBridgeMailboxTests(unittest.TestCase):
         encoded = base64.b64encode(b"hello-docx").decode("ascii")
 
         class FakeManager:
-            def call_tool(self, qualified_name: str, arguments: dict):
+            def call_tool(
+                self,
+                qualified_name: str,
+                arguments: dict,
+                progress_callback=None,
+            ):
                 return (
                     json.dumps(
                         {
@@ -418,6 +443,55 @@ class McpBridgeMailboxTests(unittest.TestCase):
         self.assertIn(item["id"], item["object_key"])
         self.assertNotEqual(mem.get_bytes(item["object_key"]), b"hello-docx")
 
+    def test_forwards_mcp_progress_to_session_renderer(self):
+        from sleuth.config import Config
+
+        events = []
+
+        class Renderer:
+            def on_progress(self, **kwargs):
+                events.append(kwargs)
+
+        class Sess:
+            id = "sess_prog"
+            user_id = "alice"
+            config = Config()
+            renderer = Renderer()
+            store = None
+            _files = []
+            _turn_file_ids = []
+
+        class FakeManager:
+            def call_tool(
+                self,
+                qualified_name: str,
+                arguments: dict,
+                progress_callback=None,
+            ):
+                if progress_callback:
+                    progress_callback(progress=1, total=4, message="kb")
+                    progress_callback(progress=3, total=4, message="llm")
+                return ('{"ok": true}', False)
+
+        tool = McpBridgeTool(
+            _info(
+                server="ddcheck",
+                name="check_report",
+                qualified="ddcheck_check_report",
+                schema={"type": "object", "properties": {"question": {"type": "string"}}},
+            ),
+            FakeManager(),  # type: ignore[arg-type]
+        )
+        ctx = ToolContext(
+            workdir=Path("."),
+            permission=Permission(rules=[Rule("*", "*", "allow")]),
+            session=Sess(),
+        )
+        result = tool.execute({"question": "x"}, ctx)
+        self.assertFalse(result.is_error)
+        stages = [e.get("stage") for e in events]
+        self.assertIn("kb", stages)
+        self.assertIn("llm", stages)
 
 
 if __name__ == "__main__":

@@ -133,6 +133,7 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
             self.assertTrue((pkg / "output.py").is_file())
             self.assertTrue((pkg / "llm.py").is_file())
             self.assertTrue((pkg / "hitl.py").is_file())
+            self.assertTrue((pkg / "progress.py").is_file())
             self.assertFalse((dest / "skills_cos").exists())
             snippet = (dest / "deploy" / "sleuth.env.snippet").read_text(encoding="utf-8")
             self.assertIn('"agent":true', snippet)

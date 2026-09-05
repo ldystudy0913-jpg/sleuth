@@ -5,6 +5,7 @@ import re
 from typing import Tuple
 from urllib.parse import quote
 
+from ..bizerror import BizErrorCode
 from .errors import MailboxError
 from . import settings
 
@@ -16,7 +17,7 @@ async def read_multipart_upload(request, config) -> Tuple[str, str, bytes]:
     upload = form.get(settings.upload_form_field(config))
     reader = getattr(upload, "read", None)
     if upload is None or not callable(reader):
-        raise MailboxError(settings.missing_upload_message(config))
+        raise MailboxError(BizErrorCode.UPLOAD_NULL)
     data = await reader()
     filename = str(
         form.get(settings.upload_filename_field(config))

@@ -110,4 +110,8 @@ class ToolRegistry:
         try:
             return tool.execute(parsed or {}, ctx)
         except Exception as exc:  # surface tool failures to the model
+            from ..bizerror import APPError
+
+            if isinstance(exc, APPError):
+                return ToolResult.error(name, exc.msg)
             return ToolResult.error(name, f"{type(exc).__name__}: {exc}")

@@ -51,7 +51,7 @@ class FakeMgr:
             self.agent_cards = {}
             self.agent_card_servers = {}
 
-    def call_tool(self, qualified_name, arguments):
+    def call_tool(self, qualified_name, arguments, progress_callback=None):
         return "ok", False
 
 

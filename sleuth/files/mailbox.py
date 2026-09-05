@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from ..config import Config
 from ..util.ids import file_id as new_file_id
 from .cos import ObjectStore, object_store_from_config
+from ..bizerror import BizErrorCode
 from .errors import MailboxError
 from . import at_rest
 from . import settings
@@ -188,16 +189,24 @@ def validate_upload(*, config: Config, rec, filename: str, mime: str, size: int)
     max_bytes = int(fcfg.max_bytes or 0)
     max_count = int(fcfg.max_count or 0)
     if size < 0:
-        raise MailboxError("size must be >= 0")
+        raise MailboxError(BizErrorCode.PARAM_INVALID, "size must be >= 0")
     if max_bytes and size > max_bytes:
-        raise MailboxError(f"file too large: {size} > {max_bytes}", 413)
+        raise MailboxError(
+            BizErrorCode.FILE_UPLOAD_FAILED,
+            f"file too large: {size} > {max_bytes}",
+            status=413,
+        )
     if not safe_filename(filename, config):
-        raise MailboxError(settings.err_filename_required(config))
+        raise MailboxError(BizErrorCode.FILE_UPLOAD_FAILED, settings.err_filename_required(config))
     if not mime_allowed(mime, fcfg.mime_allow, config):
-        raise MailboxError(f"mime not allowed: {mime or '(empty)'}")
+        raise MailboxError(BizErrorCode.FILE_UPLOAD_FAILED, f"mime not allowed: {mime or '(empty)'}")
     existing = record_files(rec)
     if max_count and len(existing) >= max_count:
-        raise MailboxError(f"too many files in session (max {max_count})", 413)
+        raise MailboxError(
+            BizErrorCode.FILE_UPLOAD_FAILED,
+            f"too many files in session (max {max_count})",
+            status=413,
+        )
 
 
 def ingest_user_file(
@@ -290,10 +299,10 @@ def open_plaintext(
 ) -> Tuple[Dict[str, Any], bytes]:
     item = get_file(record_files(rec), file_id)
     if item is None or str(item.get("status") or "") != settings.status_ready(config):
-        raise MailboxError(settings.err_file_not_found(config), 404)
+        raise MailboxError(BizErrorCode.READ_FAIL, file_id, status=404)
     key = str(item.get("object_key") or "").strip()
     if not key:
-        raise MailboxError(settings.err_no_object_key(config))
+        raise MailboxError(BizErrorCode.READ_FAIL, settings.err_no_object_key(config))
     store_impl = object_store or object_store_from_config(config)
     fcfg = files_config(config)
     raw = store_impl.get_bytes(key, max_bytes=int(fcfg.max_bytes or 0))
@@ -312,7 +321,7 @@ def delete_session_file(
     files = record_files(rec)
     item = get_file(files, file_id)
     if item is None:
-        raise MailboxError(settings.err_file_not_found(config), 404)
+        raise MailboxError(BizErrorCode.READ_FAIL, file_id, status=404)
     key = str(item.get("object_key") or "").strip()
     kept = [f for f in files if str(f.get("id") or "") != file_id]
     save_record_files(store, rec, kept)
@@ -574,13 +583,21 @@ def put_generated_bytes(
     fcfg = files_config(config)
     max_bytes = int(fcfg.max_bytes or 0)
     if max_bytes and len(payload) > max_bytes:
-        raise MailboxError(f"file too large: {len(payload)} > {max_bytes}", 413)
+        raise MailboxError(
+            BizErrorCode.FILE_UPLOAD_FAILED,
+            f"file too large: {len(payload)} > {max_bytes}",
+            status=413,
+        )
     if not filename.strip():
-        raise MailboxError(settings.err_filename_required(config))
+        raise MailboxError(BizErrorCode.FILE_UPLOAD_FAILED, settings.err_filename_required(config))
     files = session_files(session)
     max_count = int(fcfg.max_count or 0)
     if max_count and len(files) >= max_count:
-        raise MailboxError(f"too many files in session (max {max_count})", 413)
+        raise MailboxError(
+            BizErrorCode.FILE_UPLOAD_FAILED,
+            f"too many files in session (max {max_count})",
+            status=413,
+        )
     store_impl = object_store or object_store_from_config(config)
     fid = new_file_id()
     key = object_key(

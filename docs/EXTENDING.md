@@ -378,7 +378,7 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
    curl http://127.0.0.1:8787/health
    ```
 
-现有路由：`/v1/sessions`、`.../trace`、`POST .../files`（multipart）、`GET|DELETE .../files/{id}`、`.../messages`、`/v1/users/{id}/usage`、`/v1/skills`、`/v1/skills/reload`。旧 `.../files/uploads|complete` 返回 410。
+现有路由：`/v1/sessions`、`.../trace`、`GET /v1/files/limits`、`POST .../files`（multipart）、`GET|DELETE .../files/{id}`、`.../messages`、`/v1/users/{id}/usage`、`/v1/skills`、`/v1/skills/reload`。旧 `.../files/uploads|complete` 返回 410。带附件提问用 `POST .../messages/stream`（`ack` / `progress`）；`GET .../sessions/{id}` 回 `files` 与 `messages[].files`。
 
 ---
 

@@ -160,7 +160,7 @@ class TraceHttpTests(unittest.TestCase):
 
         from sleuth.server.app import create_app
 
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             sid = "sess_tracetest0000000000001"
             store.create_session(
@@ -194,14 +194,14 @@ class TraceHttpTests(unittest.TestCase):
                 headers = {"X-User-Id": "alice"}
                 tr = client.get(f"/v1/sessions/{sid}/trace", headers=headers)
                 self.assertEqual(tr.status_code, 200)
-                body = tr.json()
+                body = tr.json()["data"]
                 self.assertEqual(body["session_id"], sid)
                 self.assertEqual([r["kind"] for r in body["records"]], ["user", "message"])
                 self.assertEqual(body["records"][1]["duration_ms"], 20)
 
                 detail = client.get(f"/v1/sessions/{sid}", headers=headers)
                 self.assertEqual(detail.status_code, 200)
-                msgs = detail.json()["messages"]
+                msgs = detail.json()["data"]["messages"]
                 self.assertEqual(msgs[1]["step"], 1)
                 self.assertEqual(msgs[1]["started_at"], 20)
 

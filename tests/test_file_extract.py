@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from sleuth.config import Config, FilesConfig
 from sleuth.files.cos import MemoryObjectStore
-from sleuth.files.extract import Excerpt, extract_bytes, resolve_vision_prompt
+from sleuth.files.extract import Excerpt, _extract_pdf_images, extract_bytes, resolve_vision_prompt
 from sleuth.files.ingest import reset_scheduler, wait_extracts
 from sleuth.files.mailbox import (
     attachment_refs,
@@ -98,6 +98,32 @@ class ExtractKindTests(unittest.TestCase):
             )
         self.assertEqual(out.parser, "rapidocr")
         self.assertIn("张三", out.text)
+
+    def test_pdf_page_progress(self):
+        cfg = _cfg()
+        events = []
+
+        def on_progress(**kwargs):
+            events.append(kwargs)
+
+        with patch(
+            "sleuth.files.extract.render_pdf_pages",
+            return_value=([b"png1", b"png2"], "", False),
+        ), patch(
+            "sleuth.files.extract.vision_image_text", return_value="page text"
+        ):
+            out = _extract_pdf_images(
+                b"%PDF-1.4 fake",
+                cfg,
+                8000,
+                on_progress=on_progress,
+                file_id="file_pdf1",
+            )
+        self.assertIn("page text", out.text)
+        pages = [e for e in events if e.get("stage") == "extract_page"]
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(pages[0]["page"], 1)
+        self.assertEqual(pages[0]["file_id"], "file_pdf1")
 
     def test_vision_success(self):
         cfg = _cfg()
@@ -353,8 +379,18 @@ class EncryptedIngestTests(unittest.TestCase):
             "sleuth.files.extract.ocr_image_text",
             side_effect=AssertionError("ocr should not run"),
         ):
-            result = ReadSessionFileTool().execute(
+            cached = ReadSessionFileTool().execute(
                 {"file_id": "file_img1", "question": "这张图片在做什么"},
+                ctx,
+            )
+            self.assertFalse(cached.is_error)
+            cached_payload = json.loads(cached.output)
+            self.assertFalse(cached_payload["focused"])
+            self.assertEqual(cached_payload["text"], "豆包AI生成")
+            self.assertNotIn("prompt", captured)
+
+            result = ReadSessionFileTool().execute(
+                {"file_id": "file_img1", "question": "这张图片在做什么", "reread": True},
                 ctx,
             )
         self.assertFalse(result.is_error)

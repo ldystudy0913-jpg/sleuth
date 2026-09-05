@@ -336,6 +336,21 @@ class FilesConfig:
     extract_concurrency: int = 2
     extract_timeout_s: float = 45.0
     prompt_wait_s: float = 8.0
+    progress_interval_s: float = 1.0
+    ack_event_type: str = "ack"
+    progress_event_type: str = "progress"
+    message_file_ids_key: str = "file_ids"
+    stage_extract: str = "extract"
+    stage_extract_page: str = "extract_page"
+    stage_extract_wait: str = "extract_wait"
+    stage_extract_done: str = "extract_done"
+    wait_extract_before_model: bool = True
+    reread_on_question: bool = False
+    reread_arg: str = "reread"
+    progress_detail_extract: str = "extracting attachments"
+    progress_detail_page: str = "page {page}/{pages}"
+    progress_detail_wait: str = "waiting for excerpt"
+    progress_detail_done: str = "excerpt ready"
 
 
 @dataclass
@@ -804,6 +819,8 @@ class Config:
             ("extractTimeoutS", "extract_timeout_s"),
             ("prompt_wait_s", "prompt_wait_s"),
             ("promptWaitS", "prompt_wait_s"),
+            ("progress_interval_s", "progress_interval_s"),
+            ("progressIntervalS", "progress_interval_s"),
         ):
             val = block.get(src)
             if val is None or val == "":
@@ -911,6 +928,30 @@ class Config:
             ("promptSkippedLine", "prompt_skipped_line"),
             ("prompt_pending_line", "prompt_pending_line"),
             ("promptPendingLine", "prompt_pending_line"),
+            ("ack_event_type", "ack_event_type"),
+            ("ackEventType", "ack_event_type"),
+            ("progress_event_type", "progress_event_type"),
+            ("progressEventType", "progress_event_type"),
+            ("message_file_ids_key", "message_file_ids_key"),
+            ("messageFileIdsKey", "message_file_ids_key"),
+            ("stage_extract", "stage_extract"),
+            ("stageExtract", "stage_extract"),
+            ("stage_extract_page", "stage_extract_page"),
+            ("stageExtractPage", "stage_extract_page"),
+            ("stage_extract_wait", "stage_extract_wait"),
+            ("stageExtractWait", "stage_extract_wait"),
+            ("stage_extract_done", "stage_extract_done"),
+            ("stageExtractDone", "stage_extract_done"),
+            ("reread_arg", "reread_arg"),
+            ("rereadArg", "reread_arg"),
+            ("progress_detail_extract", "progress_detail_extract"),
+            ("progressDetailExtract", "progress_detail_extract"),
+            ("progress_detail_page", "progress_detail_page"),
+            ("progressDetailPage", "progress_detail_page"),
+            ("progress_detail_wait", "progress_detail_wait"),
+            ("progressDetailWait", "progress_detail_wait"),
+            ("progress_detail_done", "progress_detail_done"),
+            ("progressDetailDone", "progress_detail_done"),
         ):
             val = block.get(src)
             if val is None:
@@ -929,6 +970,19 @@ class Config:
                     "yes",
                     "on",
                 )
+        for src, attr in (
+            ("wait_extract_before_model", "wait_extract_before_model"),
+            ("waitExtractBeforeModel", "wait_extract_before_model"),
+            ("reread_on_question", "reread_on_question"),
+            ("rereadOnQuestion", "reread_on_question"),
+        ):
+            val = block.get(src)
+            if val is None:
+                continue
+            if isinstance(val, bool):
+                setattr(self.files, attr, val)
+            else:
+                setattr(self.files, attr, str(val).strip().lower() in ("1", "true", "yes", "on"))
         mime = block.get("mime_allow")
         if mime is None:
             mime = block.get("mimeAllow")
@@ -1811,6 +1865,9 @@ def _apply_env(cfg: Config) -> None:
     wait_s = _env_float("SLEUTH_FILES_PROMPT_WAIT_S")
     if wait_s is not None:
         cfg.files.prompt_wait_s = wait_s
+    interval = _env_float("SLEUTH_FILES_PROGRESS_INTERVAL_S")
+    if interval is not None:
+        cfg.files.progress_interval_s = interval
     if os.environ.get("SLEUTH_SM4_KEY") is not None:
         cfg.files.sm4_key = os.environ.get("SLEUTH_SM4_KEY") or ""
     if os.environ.get("SLEUTH_FILES_IMAGE_MODE"):
@@ -1864,6 +1921,18 @@ def _apply_env(cfg: Config) -> None:
         ("SLEUTH_FILES_PROMPT_TRUNCATED_MARK", "prompt_truncated_mark"),
         ("SLEUTH_FILES_PROMPT_SKIPPED_LINE", "prompt_skipped_line"),
         ("SLEUTH_FILES_PROMPT_PENDING_LINE", "prompt_pending_line"),
+        ("SLEUTH_FILES_ACK_EVENT_TYPE", "ack_event_type"),
+        ("SLEUTH_FILES_PROGRESS_EVENT_TYPE", "progress_event_type"),
+        ("SLEUTH_FILES_MESSAGE_FILE_IDS_KEY", "message_file_ids_key"),
+        ("SLEUTH_FILES_STAGE_EXTRACT", "stage_extract"),
+        ("SLEUTH_FILES_STAGE_EXTRACT_PAGE", "stage_extract_page"),
+        ("SLEUTH_FILES_STAGE_EXTRACT_WAIT", "stage_extract_wait"),
+        ("SLEUTH_FILES_STAGE_EXTRACT_DONE", "stage_extract_done"),
+        ("SLEUTH_FILES_REREAD_ARG", "reread_arg"),
+        ("SLEUTH_FILES_PROGRESS_DETAIL_EXTRACT", "progress_detail_extract"),
+        ("SLEUTH_FILES_PROGRESS_DETAIL_PAGE", "progress_detail_page"),
+        ("SLEUTH_FILES_PROGRESS_DETAIL_WAIT", "progress_detail_wait"),
+        ("SLEUTH_FILES_PROGRESS_DETAIL_DONE", "progress_detail_done"),
     ):
         val = os.environ.get(env_key)
         if val is not None and str(val).strip() != "":
@@ -1871,6 +1940,12 @@ def _apply_env(cfg: Config) -> None:
     req_enc = _env_bool("SLEUTH_FILES_REQUIRE_ENCRYPT")
     if req_enc is not None:
         cfg.files.require_encrypt = req_enc
+    wait_before = _env_bool("SLEUTH_FILES_WAIT_EXTRACT_BEFORE_MODEL")
+    if wait_before is not None:
+        cfg.files.wait_extract_before_model = wait_before
+    reread_q = _env_bool("SLEUTH_FILES_REREAD_ON_QUESTION")
+    if reread_q is not None:
+        cfg.files.reread_on_question = reread_q
     mime_parsed = _parse_mime_allow(os.environ.get("SLEUTH_FILES_MIME_ALLOW"))
     if mime_parsed is not None and os.environ.get("SLEUTH_FILES_MIME_ALLOW") is not None:
         cfg.files.mime_allow = mime_parsed

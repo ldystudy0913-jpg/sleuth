@@ -10,7 +10,16 @@ from typing import Any, Dict, List, Optional
 from .attachments import summarize_refs
 
 
-def ping(message: str, attachment_refs: Optional[List[dict]] = None) -> Dict[str, Any]:
+def ping(
+    message: str,
+    attachment_refs: Optional[List[dict]] = None,
+    progress_fn=None,
+) -> Dict[str, Any]:
+    if callable(progress_fn):
+        try:
+            progress_fn("ping")
+        except Exception:
+            pass
     body: Dict[str, Any] = {
         "ok": True,
         "echo": message,

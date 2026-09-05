@@ -510,8 +510,18 @@ def generate_framework(
     kb: Optional[KnowledgeBase] = None,
     mock_llm: Optional[Callable[[List[Dict[str, str]]], str]] = None,
     use_llm: bool = True,
+    progress_fn: Optional[Callable[..., None]] = None,
 ) -> FrameworkResult:
     settings = settings or get_settings()
+
+    def _progress(stage: str) -> None:
+        if callable(progress_fn):
+            try:
+                progress_fn(stage)
+            except Exception:
+                pass
+
+    _progress("validate")
     if not req.risk_queries():
         raise ValueError("provide at least one risk code or risk name")
     if not settings.kb_api_configured():
@@ -522,7 +532,9 @@ def generate_framework(
     if kb is None:
         kb = load_kb_lexicon_only(settings.kb_path)
 
+    _progress("kb")
     risk_ctx, found, missing, kb_meta = _resolve_knowledge(req, settings, kb)
+    _progress("attachments")
     bundle = load_attachments(
         local_paths=req.local_paths,
         invest_id=req.invest_id,
@@ -556,6 +568,7 @@ def generate_framework(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
+        _progress("llm")
         try:
             markdown = mockable_generate(messages, settings, mock_fn=mock_llm)
             llm_used = True
@@ -565,6 +578,7 @@ def generate_framework(
     else:
         markdown = _fallback_framework(req, found, missing, bundle)
 
+    _progress("guard")
     guarded = guard_and_rewrite(markdown, kb, rewrite_hard=True)
     markdown = guarded.text
     if (

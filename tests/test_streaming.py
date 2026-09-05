@@ -41,6 +41,8 @@ class StreamingRendererTests(unittest.TestCase):
             duration_ms=50,
             ended_at=250,
         )
+        r.on_ack(type="ack")
+        r.on_progress(type="progress", stage="extract", detail="extracting attachments")
         r.on_reasoning("think")
         r.on_error("boom")
         r.on_stop(
@@ -95,6 +97,8 @@ class StreamingRendererTests(unittest.TestCase):
                 "text",
                 "tool_start",
                 "tool_result",
+                "ack",
+                "progress",
                 "reasoning",
                 "error",
                 "stop",
@@ -172,7 +176,7 @@ class StreamRouteTests(unittest.TestCase):
 
         from sleuth.storage.sqlite import SQLiteStore
 
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             db = Path(td) / "t.db"
             store = SQLiteStore(db)
             sid = "sess_streamtest000000000001"
@@ -207,6 +211,13 @@ class StreamRouteTests(unittest.TestCase):
                     self._text = ""
                     self.cancelled = False
                     self.skill_name = None
+                    self.config = Config()
+                    self.store = None
+                    self._files = []
+                    self._turn_file_ids = []
+
+                def ask_payload(self):
+                    return {"status": "ok"}
 
                 def model_ref(self):
                     return "p/m"
@@ -290,7 +301,7 @@ class StreamRouteTests(unittest.TestCase):
 
         from sleuth.storage.sqlite import SQLiteStore
 
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             sid = "sess_streamtest000000000002"
             store.create_session(
@@ -327,7 +338,7 @@ class StreamRouteTests(unittest.TestCase):
 
         from sleuth.storage.sqlite import SQLiteStore
 
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
+        with tempfile.TemporaryDirectory() as td:
             store = SQLiteStore(Path(td) / "t.db")
             cfg = Config(
                 model="qwen-max",
@@ -349,14 +360,14 @@ class StreamRouteTests(unittest.TestCase):
                 client = TestClient(app)
                 m = client.get("/v1/models")
                 self.assertEqual(m.status_code, 200)
-                body = m.json()
+                body = m.json()["data"]
                 self.assertEqual(body["default"], "qwen-max")
                 self.assertEqual(body["models"][0]["id"], "qwen-max")
                 self.assertNotIn("apiKey", json.dumps(body))
 
                 a = client.get("/v1/agents")
                 self.assertEqual(a.status_code, 200)
-                agents = a.json()
+                agents = a.json()["data"]
                 self.assertEqual(agents["default"], "build")
                 self.assertEqual(
                     {x["name"] for x in agents["agents"]},

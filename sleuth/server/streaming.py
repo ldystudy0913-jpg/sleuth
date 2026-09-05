@@ -144,8 +144,13 @@ class StreamingRenderer:
             event["duration_ms"] = int(kwargs["duration_ms"])
         self._put(event)
 
-    def on_error(self, message: str) -> None:
-        self._put({"type": "error", "message": str(message)})
+    def on_error(self, message: str, **kwargs) -> None:
+        event: Dict[str, Any] = {"type": "error", "message": str(message)}
+        if kwargs.get("code"):
+            event["code"] = str(kwargs["code"])
+        if kwargs.get("msg"):
+            event["msg"] = str(kwargs["msg"])
+        self._put(event)
 
     def on_retry(self, attempt: int, message: str, wait: float) -> None:
         self._put(
@@ -156,6 +161,18 @@ class StreamingRenderer:
                 "wait": float(wait),
             }
         )
+
+    def on_ack(self, **kwargs) -> None:
+        event = {"type": str(kwargs.pop("type", None) or "ack")}
+        event.update({k: v for k, v in kwargs.items() if v is not None})
+        self._put(event)
+
+    def on_progress(self, **kwargs) -> None:
+        event = {"type": str(kwargs.pop("type", None) or "progress")}
+        event.update({k: v for k, v in kwargs.items() if v is not None})
+        if "stage" not in event:
+            return
+        self._put(event)
 
     def get_event(self, *, timeout: float = 0.4) -> Optional[Dict[str, Any]]:
         """Pop next event. Returns None when closed; ``{"type":"_poll"}`` on timeout."""
@@ -184,7 +201,9 @@ def run_prompt_in_thread(sess: Any, prompt: str, renderer: StreamingRenderer) ->
             sess.prompt(prompt)
         except Exception as exc:  # noqa: BLE001 — surface to SSE
             try:
-                renderer.on_error(str(exc))
+                code = getattr(exc, "code", None)
+                msg = getattr(exc, "msg", None) or str(exc)
+                renderer.on_error(str(exc), code=code, msg=msg)
             except Exception:
                 pass
         finally:

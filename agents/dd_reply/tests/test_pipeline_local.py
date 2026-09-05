@@ -71,8 +71,18 @@ class TestPipelineLocal(unittest.TestCase):
                 business_scope="软件开发",
                 local_paths=[str(note)],
             )
+            stages = []
             with patch("dd_reply.pipeline.retrieve_risk_codes", side_effect=fake_retrieve):
-                result = generate_framework(req, settings=_settings(), use_llm=False)
+                result = generate_framework(
+                    req,
+                    settings=_settings(),
+                    use_llm=False,
+                    progress_fn=stages.append,
+                )
+            self.assertIn("validate", stages)
+            self.assertIn("kb", stages)
+            self.assertIn("attachments", stages)
+            self.assertIn("guard", stages)
             self.assertIn("预分析", result.markdown)
             self.assertIn("C001", result.markdown)
             self.assertIn("C999", result.markdown)
