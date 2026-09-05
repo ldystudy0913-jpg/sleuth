@@ -57,7 +57,7 @@ SLEUTH_MCP_SERVERS={"ddcheck":{"type":"remote","url":"http://127.0.0.1:8791/mcp"
 | `get_agent_card` | `ddcheck_get_agent_card` | 注册 Agent/Skill |
 | `check_report` | `ddcheck_check_report` | 主检查（内部 LLM + 可选 KB + Word） |
 | `kb_search` | `ddcheck_kb_search` | 仅 KB env 配齐时注册；排障用 |
-| `emit_file` | `ddcheck_emit_file` | 仅 COS env 配齐时注册；排障用 |
+| `emit_file` | `ddcheck_emit_file` | 仅 COS env 配齐时注册；排障用（会话 Word 走 `files[].content_base64`，不必开 COS） |
 | `health` | `ddcheck_health` | 探活 |
 
 入口：[`dd_check/mcp_server.py`](../agents/dd_check/dd_check/mcp_server.py) → [`pipeline.py`](../agents/dd_check/dd_check/pipeline.py) 的 `check_report`。
@@ -76,11 +76,11 @@ flowchart TD
   llm2 --> score[Python 加权总分]
   llm1b --> score
   score --> docx[python_docx]
-  docx --> emit[COS emit_file bytes]
+  docx --> emit[files content_base64]
   emit --> out[score findings sources files]
 ```
 
-会话附件由 Sleuth 解密并注入 `attachment_refs_json`；本进程不解 SM4。
+会话附件由 Sleuth 解密并注入 `attachment_refs_json`；本进程不解 SM4。`DD_CHECK_HITL=1`（默认打开）且无正文、无 JSON、无附件 excerpt 时，`check_report` 返回 `status=need_input`，不进 LLM；Sleuth 用内置 `question` 暂停本轮。用户补料或明确继续（`proceed_with_gaps=true`）后再检查。
 
 ### 1.4 Sleuth 端到端
 
@@ -100,7 +100,7 @@ sequenceDiagram
   SL-->>U: 中文归纳加知识来源与 Word 下载
 ```
 
-环境要点：`DD_CHECK_LLM_*` 三项配齐才能检查；`DD_CHECK_ATTACHMENTS=1` 才注入附件；KB / COS 按本包 `.env` 配齐后重启 MCP。
+环境要点：本包 `DD_CHECK_LLM_*` 三项配齐则检查用自己的模型，未配齐则用 Sleuth 注入的会话模型；两头都没有则 `ok: false`。`DD_CHECK_ATTACHMENTS=1` 才注入附件；KB 按本包 `.env` 配齐后重启 MCP。Word 经 `files[].content_base64` 由 Sleuth 加密进会话邮箱，不必配本包 COS。关 `DD_CHECK_HITL` 后空材料会直接进检查。
 
 ---
 
@@ -189,7 +189,7 @@ sequenceDiagram
 |--|--------------|------------|
 | 业务 | 报告填写检查 / 加权评分 / Word | 答复框架生成 |
 | 引擎 | 线性 pipeline + 本包 LLM | 线性 pipeline |
-| HITL / Checkpoint | 无 | 缺字段 `need_input` + 基座 `question` 暂停；用户选择补充或继续 |
+| HITL / Checkpoint | 空材料 `need_input` + 基座 `question` | 缺字段 `need_input` + 基座 `question` 暂停；用户选择补充或继续 |
 | 主工具 | `ddcheck_check_report` | `ddreply_generate_reply_framework` |
 | Skill | `dd-check-sop` | `dd-reply-framework` |
 | 默认端口 | 8791 | 8792 |
@@ -206,5 +206,23 @@ sequenceDiagram
 | [`agents/dd_check/dd_check/pipeline.py`](../agents/dd_check/dd_check/pipeline.py) | 检查流水线真源 |
 | [`agents/dd_reply/dd_reply/pipeline.py`](../agents/dd_reply/dd_reply/pipeline.py) | 流水线真源 |
 | [`MCP_INTEGRATION.md`](MCP_INTEGRATION.md) | MCP Tool / Agent Card 规范 |
+| [`ORCHESTRATION.md`](ORCHESTRATION.md) | 编排模式 A–G、配置、HTTP/CLI、装配层检查清单 |
 | [`SKILL_INTEGRATION.md`](SKILL_INTEGRATION.md) | Skill 规范 |
 | [`API.md`](API.md) | HTTP / SSE 前端对接 |
+
+---
+
+## 5. 编排模式（可选，默认 Mode A）
+
+Sleuth 默认仍是 **Mode A：基座编排**（§0 流程图）。专岗 MCP 内部已是线性 pipeline（接近 **Mode C**）。可通过 Agent Card + HTTP 显式启用其它模式；**横切能力不变**（ACL、记忆、HITL、KB、文件邮箱均走 Session + bridge）。
+
+| 模式 | 基座 LLM | 典型触发 | `dd_check` |
+|------|----------|----------|------------|
+| A host | 高 | 默认 | 中 |
+| C pipeline | 低（SOP 约束一次主工具） | Card `orchestration: pipeline` | **最高** |
+| F auto_invoke | 极低 | `auto_run: true` / `--auto-run` | 高 |
+| B delegate | 低 | `task` + `delegatable: true` | 高 |
+| D async | 可选 | `execution: async` | 高 |
+| E parallel | 中 | `parallel: [...]` | 中 |
+
+配置与请求字段详见 [`ORCHESTRATION.md`](ORCHESTRATION.md)。`dd_check` 出厂 Card：`orchestration: pipeline`、`primary_tool: ddcheck_check_report`。

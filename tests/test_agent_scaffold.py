@@ -72,6 +72,7 @@ def _closed_settings(cfg_mod, **kwargs):
         "attachments_enabled": False,
         "kb_enabled": False,
         "output_enabled": False,
+        "hitl_enabled": False,
         "mcp_token": "",
     }
     body.update(kwargs)
@@ -130,6 +131,8 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
             self.assertTrue((pkg / "attachments.py").is_file())
             self.assertTrue((pkg / "kb.py").is_file())
             self.assertTrue((pkg / "output.py").is_file())
+            self.assertTrue((pkg / "llm.py").is_file())
+            self.assertTrue((pkg / "hitl.py").is_file())
             self.assertFalse((dest / "skills_cos").exists())
             snippet = (dest / "deploy" / "sleuth.env.snippet").read_text(encoding="utf-8")
             self.assertIn('"agent":true', snippet)
@@ -146,6 +149,7 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
                 perm = card.get("permission") or {}
                 self.assertEqual(perm.get("kb_lookup"), "deny")
                 self.assertEqual(perm.get("save_output_file"), "deny")
+                self.assertEqual(perm.get("question"), "allow")
                 self.assertNotIn("demoops_kb_search", perm)
                 self.assertNotIn("demoops_emit_file", perm)
                 from demo_ops.pipeline import ping as run_ping
@@ -156,6 +160,7 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
                 self.assertFalse(settings.kb_enabled)
                 self.assertFalse(settings.output_enabled)
                 self.assertFalse(settings.attachments_enabled)
+                self.assertFalse(settings.hitl_enabled)
                 if _mcp_available():
                     server = mcp_mod.build_mcp_server(settings)
                     tools = {t.name: t for t in server._tool_manager.list_tools()}
@@ -164,7 +169,10 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
                     self.assertIn("health", tools)
                     self.assertNotIn("kb_search", tools)
                     self.assertNotIn("emit_file", tools)
-                    self.assertEqual(_tool_params(server, "ping"), ["message"])
+                    self.assertEqual(
+                        _tool_params(server, "ping"),
+                        ["message", "proceed_with_gaps", "sleuth_llm_json"],
+                    )
             finally:
                 _unload("demo_ops", str(dest))
 
@@ -250,7 +258,12 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         _tool_params(server, "ping"),
-                        ["message", "attachment_refs_json"],
+                        [
+                            "message",
+                            "attachment_refs_json",
+                            "proceed_with_gaps",
+                            "sleuth_llm_json",
+                        ],
                     )
             finally:
                 _unload("demo_ops", str(dest))
@@ -340,6 +353,20 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
                 blocked = emit_file(cos, filename="x", url="data:text/plain,hi")
                 self.assertFalse(blocked.get("ok"))
                 self.assertEqual(blocked.get("files"), [])
+                packed = emit_file(
+                    _closed_settings(cfg_mod),
+                    filename="note.txt",
+                    content="hello",
+                )
+                self.assertTrue(packed.get("ok"))
+                self.assertIn("content_base64", packed["files"][0])
+                self.assertNotIn("object_key", packed["files"][0])
+                import base64
+
+                self.assertEqual(
+                    base64.b64decode(packed["files"][0]["content_base64"]),
+                    b"hello",
+                )
                 if _mcp_available():
                     mcp_mod = __import__("demo_ops.mcp_server", fromlist=["*"])
                     tools = {
@@ -347,6 +374,89 @@ class AgentScaffoldGenerateTests(unittest.TestCase):
                         for t in mcp_mod.build_mcp_server(cos)._tool_manager.list_tools()
                     }
                     self.assertIn("emit_file", tools)
+            finally:
+                _unload("demo_ops", str(dest))
+
+    def test_llm_prefers_agent_env_then_sleuth_json(self):
+        import json
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = generate(name="demo_ops", out=Path(td) / "demo_ops")
+            sys.path.insert(0, str(dest))
+            try:
+                cfg_mod = __import__("demo_ops.config", fromlist=["*"])
+                from demo_ops.llm import settings_with_llm_json
+
+                injected = json.dumps(
+                    {
+                        "model": "sess-model",
+                        "base_url": "https://sess.example/v1",
+                        "api_key": "sk-sess",
+                    }
+                )
+                own = cfg_mod.Settings(
+                    llm_base_url="https://agent.example/v1",
+                    llm_api_key="sk-agent",
+                    llm_model="agent-model",
+                )
+                merged = settings_with_llm_json(own, injected)
+                self.assertEqual(merged.llm_model, "agent-model")
+                self.assertEqual(merged.llm_api_key, "sk-agent")
+                empty = _closed_settings(
+                    cfg_mod, llm_base_url="", llm_api_key="", llm_model=""
+                )
+                filled = settings_with_llm_json(empty, injected)
+                self.assertEqual(filled.llm_model, "sess-model")
+                self.assertEqual(filled.llm_api_key, "sk-sess")
+                self.assertEqual(filled.llm_base_url, "https://sess.example/v1")
+                self.assertIsNot(filled, empty)
+                still = settings_with_llm_json(empty, "")
+                self.assertFalse(still.llm_configured())
+            finally:
+                _unload("demo_ops", str(dest))
+
+    def test_hitl_empty_ping_need_input(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = generate(name="demo_ops", out=Path(td) / "demo_ops")
+            sys.path.insert(0, str(dest))
+            try:
+                cfg_mod = __import__("demo_ops.config", fromlist=["*"])
+                card_mod = __import__("demo_ops.agent_card", fromlist=["*"])
+                from demo_ops.hitl import coerce_bool, need_input_payload, should_pause
+
+                self.assertTrue(should_pause(True, ["回显文本 message"], False))
+                self.assertFalse(should_pause(True, ["回显文本 message"], True))
+                self.assertFalse(should_pause(False, ["回显文本 message"], False))
+                self.assertTrue(coerce_bool("yes"))
+                paused = need_input_payload(["回显文本 message"])
+                self.assertEqual(paused.get("status"), "need_input")
+                self.assertEqual(paused.get("missing"), ["回显文本 message"])
+
+                card = card_mod.load_agent_card()
+                self.assertEqual((card.get("permission") or {}).get("question"), "allow")
+
+                if not _mcp_available():
+                    return
+                mcp_mod = __import__("demo_ops.mcp_server", fromlist=["*"])
+                server = mcp_mod.build_mcp_server(
+                    _closed_settings(cfg_mod, hitl_enabled=True)
+                )
+                tools = {t.name: t for t in server._tool_manager.list_tools()}
+                health = json.loads(tools["health"].fn())
+                self.assertTrue(health.get("hitl"))
+                empty = json.loads(tools["ping"].fn(message=""))
+                self.assertEqual(empty.get("status"), "need_input")
+                self.assertIn("回显文本 message", empty.get("missing") or [])
+                continued = json.loads(
+                    tools["ping"].fn(message="", proceed_with_gaps=True)
+                )
+                self.assertTrue(continued.get("ok"))
+                self.assertEqual(continued.get("echo"), "")
+                idle = mcp_mod.build_mcp_server(_closed_settings(cfg_mod))
+                idle_tools = {t.name: t for t in idle._tool_manager.list_tools()}
+                echoed = json.loads(idle_tools["ping"].fn(message=""))
+                self.assertTrue(echoed.get("ok"))
+                self.assertNotEqual(echoed.get("status"), "need_input")
             finally:
                 _unload("demo_ops", str(dest))
 

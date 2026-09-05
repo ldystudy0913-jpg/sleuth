@@ -232,6 +232,58 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(len(atts), 1)
         self.assertTrue(atts[0]["url"].startswith("https://"))
 
+    def test_harvest_content_base64_encrypts_mailbox_path(self):
+        import base64
+
+        from sleuth.files import at_rest
+
+        cfg = _cfg()
+        cfg.files.require_encrypt = True
+        cfg.files.sm4_key = "0123456789abcdef"
+        cfg.cos.path_prefix = "sleuth/files"
+        mem = MemoryObjectStore()
+
+        class Sess:
+            config = cfg
+            id = "sess_b64"
+            user_id = "alice"
+            store = None
+            _files = []
+            _turn_file_ids = []
+
+        sess = Sess()
+        with patch(
+            "sleuth.files.mailbox.object_store_from_config", return_value=mem
+        ):
+            atts = harvest_tool_files(
+                sess,
+                {
+                    "files": [
+                        {
+                            "filename": "check.docx",
+                            "mime": "application/octet-stream",
+                            "object_key": "sleuth/files/check.docx",
+                            "content_base64": base64.b64encode(b"hello").decode(
+                                "ascii"
+                            ),
+                        }
+                    ]
+                },
+            )
+        self.assertEqual(len(atts), 1)
+        item = sess._files[0]
+        self.assertTrue(item["encrypted"])
+        self.assertEqual(
+            item["object_key"],
+            f"sleuth/files/alice/sess_b64/{item['id']}/check.docx",
+        )
+        cipher = mem.get_bytes(item["object_key"])
+        self.assertNotEqual(cipher, b"hello")
+        self.assertEqual(
+            at_rest.restore_plaintext(cipher, encrypted=True, config=cfg),
+            b"hello",
+        )
+
 
 class PermissionBuildTests(unittest.TestCase):
     def test_default_agent_allows_kb_and_mailbox(self):

@@ -6,7 +6,9 @@ import json
 from typing import Any, Optional
 
 from .agent_card import load_agent_card
+from .attachments import load_excerpts
 from .config import Settings, get_settings
+from .hitl import need_input_payload, should_pause
 from .kb import register as register_kb
 from .output import register as register_output
 from .pipeline import check_report as run_check
@@ -115,54 +117,114 @@ def _parse_refs(attachment_refs_json: str) -> list:
     return [r for r in refs if isinstance(r, dict)]
 
 
+def _report_gaps(
+    report_text: str,
+    report_json: str,
+    refs: Optional[list],
+) -> tuple[list[str], dict[str, Any]]:
+    excerpts, _skipped = load_excerpts(refs or [])
+    filled: dict[str, Any] = {}
+    if (report_text or "").strip():
+        filled["report_text"] = True
+    if (report_json or "").strip():
+        filled["report_json"] = True
+    if excerpts:
+        filled["attachment_excerpts"] = len(excerpts)
+    if filled:
+        return [], filled
+    return (
+        ["报告正文 report_text", "结构化 JSON report_json", "会话附件"],
+        filled,
+    )
+
+
+def _check_payload(
+    settings: Settings,
+    *,
+    report_text: str,
+    report_json: str,
+    question: str,
+    sleuth_llm_json: str,
+    refs: Optional[list] = None,
+    proceed_with_gaps: Any = False,
+) -> str:
+    missing, filled = _report_gaps(report_text, report_json, refs)
+    if should_pause(settings.hitl_enabled, missing, proceed_with_gaps):
+        return json.dumps(need_input_payload(missing, filled), ensure_ascii=False)
+    result = run_check(
+        settings,
+        report_text=report_text,
+        report_json=report_json,
+        question=question,
+        attachment_refs=refs,
+        sleuth_llm_json=sleuth_llm_json,
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _check_description(settings: Settings) -> str:
+    parts = [
+        "Check a filled due-diligence report (plain text, structured JSON, "
+        "and/or session-file excerpts). Returns JSON with score (rubric scale), "
+        "findings (with location), sources[], and files[] for the Word report.",
+        "Optional sleuth_llm_json is injected by Sleuth; this agent's "
+        "DD_CHECK_LLM_* wins when complete.",
+    ]
+    if settings.attachments_enabled:
+        parts.append(
+            "Prefer excerpt in attachment_refs_json; do not decrypt SM4."
+        )
+    if settings.hitl_enabled:
+        parts.append(
+            "If report_text, report_json, and attachment excerpts are all empty, "
+            "returns status=need_input (do not invent a score). List missing and "
+            "ask the user with the built-in question tool. Pass "
+            "proceed_with_gaps=true only after they say there is nothing more."
+        )
+    return " ".join(parts)
+
+
 def _register_check_report(server: Any, settings: Settings) -> None:
+    description = _check_description(settings)
     if settings.attachments_enabled:
 
-        @server.tool(
-            name="check_report",
-            description=(
-                "Check a filled due-diligence report (plain text, structured JSON, and/or "
-                "session-file excerpts). Returns JSON with score (rubric scale), findings "
-                "(with location), sources[], and files[] for the Word report. "
-                "Prefer excerpt in attachment_refs_json; do not decrypt SM4."
-            ),
-        )
+        @server.tool(name="check_report", description=description)
         def check_report_with_refs(
             report_text: str = "",
             report_json: str = "",
             question: str = "",
             attachment_refs_json: str = "[]",
+            proceed_with_gaps: bool = False,
+            sleuth_llm_json: str = "",
         ) -> str:
-            result = run_check(
+            return _check_payload(
                 settings,
                 report_text=report_text,
                 report_json=report_json,
                 question=question,
-                attachment_refs=_parse_refs(attachment_refs_json),
+                sleuth_llm_json=sleuth_llm_json,
+                refs=_parse_refs(attachment_refs_json),
+                proceed_with_gaps=proceed_with_gaps,
             )
-            return json.dumps(result, ensure_ascii=False)
 
         return
 
-    @server.tool(
-        name="check_report",
-        description=(
-            "Check a filled due-diligence report (plain text and/or structured JSON). "
-            "Returns JSON with score, findings (with location), sources[], and files[]."
-        ),
-    )
+    @server.tool(name="check_report", description=description)
     def check_report(
         report_text: str = "",
         report_json: str = "",
         question: str = "",
+        proceed_with_gaps: bool = False,
+        sleuth_llm_json: str = "",
     ) -> str:
-        result = run_check(
+        return _check_payload(
             settings,
             report_text=report_text,
             report_json=report_json,
             question=question,
+            sleuth_llm_json=sleuth_llm_json,
+            proceed_with_gaps=proceed_with_gaps,
         )
-        return json.dumps(result, ensure_ascii=False)
 
 
 def build_mcp_server(

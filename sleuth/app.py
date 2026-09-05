@@ -174,6 +174,10 @@ def build_session(
     requested_agent = config.resolve_agent_name(
         raw_prefer or agent_name or config.default_agent or "build"
     )
+    from .memory.acl import assert_resource_allowed
+
+    uid = user_id or config.user_id or "local"
+    assert_resource_allowed(config, uid, "agent", requested_agent)
     provider, model_id = resolve_model(config, requested_agent)
     permission = build_permission(config, requested_agent, yolo=yolo)
 

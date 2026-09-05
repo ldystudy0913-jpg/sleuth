@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from .agent_card import load_agent_card
 from .config import Settings, get_settings
+from .hitl import need_input_payload, should_pause
 from .kb import register as register_kb
 from .output import register as register_output
 from .pipeline import ping as run_ping
@@ -105,39 +106,82 @@ async def _run_streamable_http(
         await server.run_streamable_http_async()
 
 
+def _parse_refs(attachment_refs_json: str) -> list:
+    try:
+        refs = json.loads(attachment_refs_json) if attachment_refs_json else []
+    except json.JSONDecodeError:
+        refs = []
+    if not isinstance(refs, list):
+        return []
+    return [r for r in refs if isinstance(r, dict)]
+
+
+def _ping_payload(
+    settings: Settings,
+    message: str,
+    *,
+    refs: Optional[list] = None,
+    proceed_with_gaps: Any = False,
+) -> str:
+    missing = [] if (message or "").strip() else ["回显文本 message"]
+    if should_pause(settings.hitl_enabled, missing, proceed_with_gaps):
+        return json.dumps(need_input_payload(missing), ensure_ascii=False)
+    if refs is not None:
+        result = run_ping(message, attachment_refs=refs)
+    else:
+        result = run_ping(message)
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _ping_description(settings: Settings) -> str:
+    parts = [
+        "Echo a message. Replace this with your real business tool.",
+        "Optional sleuth_llm_json is injected by Sleuth (session model).",
+        "Prefer this agent's __ENV_PREFIX___LLM_* when those three are set.",
+    ]
+    if settings.attachments_enabled:
+        parts.append(
+            "Optional attachment_refs_json is injected by Sleuth "
+            "(session-file excerpts). Prefer excerpt; do not decrypt SM4."
+        )
+    if settings.hitl_enabled:
+        parts.append(
+            "If message is empty, returns status=need_input (do not invent). "
+            "List missing and ask the user with the built-in question tool. "
+            "Pass proceed_with_gaps=true only after they say there is nothing more."
+        )
+    return " ".join(parts)
+
+
 def _register_ping(server: Any, settings: Settings) -> None:
+    description = _ping_description(settings)
     if settings.attachments_enabled:
 
-        @server.tool(
-            name="ping",
-            description=(
-                "Echo a message. Replace this with your real business tool. "
-                "Optional attachment_refs_json is injected by Sleuth when the schema "
-                "declares it (session-file excerpts). Prefer excerpt; do not decrypt SM4."
-            ),
-        )
-        def ping_with_refs(message: str = "pong", attachment_refs_json: str = "[]") -> str:
-            try:
-                refs = json.loads(attachment_refs_json) if attachment_refs_json else []
-            except json.JSONDecodeError:
-                refs = []
-            if not isinstance(refs, list):
-                refs = []
-            result = run_ping(
+        @server.tool(name="ping", description=description)
+        def ping_with_refs(
+            message: str = "pong",
+            attachment_refs_json: str = "[]",
+            proceed_with_gaps: bool = False,
+            sleuth_llm_json: str = "",
+        ) -> str:
+            del sleuth_llm_json
+            return _ping_payload(
+                settings,
                 message,
-                attachment_refs=[r for r in refs if isinstance(r, dict)],
+                refs=_parse_refs(attachment_refs_json),
+                proceed_with_gaps=proceed_with_gaps,
             )
-            return json.dumps(result, ensure_ascii=False)
 
         return
 
-    @server.tool(
-        name="ping",
-        description="Echo a message. Replace this with your real business tool.",
-    )
-    def ping(message: str = "pong") -> str:
-        result = run_ping(message)
-        return json.dumps(result, ensure_ascii=False)
+    @server.tool(name="ping", description=description)
+    def ping(
+        message: str = "pong",
+        proceed_with_gaps: bool = False,
+        sleuth_llm_json: str = "",
+    ) -> str:
+        del sleuth_llm_json
+        return _ping_payload(settings, message, proceed_with_gaps=proceed_with_gaps)
 
 
 def build_mcp_server(

@@ -1,6 +1,12 @@
-"""Generated-file upload. Same S3-compatible COS shape as Sleuth; own env prefix."""
+"""Package generated files for the Sleuth session mailbox.
+
+Sleuth encrypts and uploads. This module returns ``files[]`` with
+``content_base64`` (plaintext). Optional https url / object_key still
+registers an already-stored object without rewriting it.
+"""
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import Any, Dict
@@ -21,40 +27,6 @@ def _safe_name(filename: str) -> str:
     return name or "output.txt"
 
 
-def _put_bytes(settings: Settings, *, key: str, data: bytes, mime: str) -> str:
-    try:
-        import boto3
-        from botocore.config import Config as BotoConfig
-    except ImportError as exc:
-        raise RuntimeError("boto3 is required for emit_file upload: pip install boto3") from exc
-    kwargs: Dict[str, Any] = {
-        "aws_access_key_id": settings.cos_secret_id,
-        "aws_secret_access_key": settings.cos_secret_key,
-    }
-    if settings.cos_region:
-        kwargs["region_name"] = settings.cos_region
-    if settings.cos_endpoint:
-        kwargs["endpoint_url"] = settings.cos_endpoint
-    kwargs["config"] = BotoConfig(
-        signature_version="s3v4",
-        s3={"addressing_style": "virtual"},
-    )
-    client = boto3.client("s3", **kwargs)
-    extra: Dict[str, Any] = {}
-    if mime:
-        extra["ContentType"] = mime
-    client.put_object(Bucket=settings.cos_bucket, Key=key, Body=data, **extra)
-    try:
-        return client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": settings.cos_bucket, "Key": key},
-            ExpiresIn=300,
-            HttpMethod="GET",
-        )
-    except Exception:
-        return ""
-
-
 def emit_file(
     settings: Settings,
     *,
@@ -66,6 +38,7 @@ def emit_file(
     object_key: str = "",
     size: int = 0,
 ) -> Dict[str, Any]:
+    del settings  # mailbox upload is Sleuth's job; keep the call signature
     name = _safe_name(filename)
     href = (url or "").strip()
     key = (object_key or "").strip()
@@ -80,23 +53,28 @@ def emit_file(
             }
     raw = content_bytes if content_bytes is not None else (body.encode("utf-8") if body else b"")
     if raw and not href and not key:
-        prefix = (settings.cos_path_prefix or "sleuth/files").strip().strip("/")
-        key = f"{prefix}/{name}" if prefix else name
-        try:
-            href = _put_bytes(settings, key=key, data=raw, mime=mime_s)
-        except Exception as exc:
-            return {"ok": False, "detail": f"upload failed: {exc}", "files": []}
-        size = len(raw)
+        encoded = base64.b64encode(raw).decode("ascii")
+        return {
+            "ok": True,
+            "files": [
+                {
+                    "filename": name,
+                    "mime": mime_s,
+                    "size": len(raw),
+                    "content_base64": encoded,
+                }
+            ],
+        }
     if not href and not key:
         return {
             "ok": False,
-            "detail": "provide content to upload, or https url / object_key",
+            "detail": "provide content to return, or https url / object_key",
             "files": [],
         }
     entry: Dict[str, Any] = {
         "filename": name,
         "mime": mime_s,
-        "size": int(size or 0),
+        "size": int(size or (len(raw) if raw else 0)),
     }
     if href:
         entry["url"] = href
@@ -109,9 +87,9 @@ def register(server: Any, settings: Settings) -> None:
     @server.tool(
         name="emit_file",
         description=(
-            "Upload or register a generated file for the Sleuth session mailbox. "
-            "Pass content to upload via this agent's COS, or filename plus https url / object_key. "
-            "Return JSON files[]. Do not embed bytes or data-URLs."
+            "Package a generated file for the Sleuth session mailbox. "
+            "Pass content (Sleuth encrypts and stores) or filename plus https url / object_key. "
+            "Return JSON files[]. Do not embed data-URLs."
         ),
     )
     def emit_file_tool(

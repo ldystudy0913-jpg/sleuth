@@ -33,11 +33,14 @@ class TestMcpServer(unittest.TestCase):
         self.assertEqual(card.get("name"), "__AGENT_NAME__")
         self.assertEqual(card.get("mcp_server"), "__SERVER_NAME__")
         self.assertIn("__SERVER_NAME___ping", card.get("permission") or {})
+        self.assertEqual((card.get("permission") or {}).get("question"), "allow")
+        self.assertIn("hitl", health)
 
     def test_http_health_payload(self) -> None:
         body = health_payload(Settings())
         self.assertTrue(body.get("ok"))
-        self.assertEqual(body.get("service"), "__PKG_NAME__-tools")
+        self.assertIn("hitl", body)
+        self.assertFalse(body.get("hitl"))
 
     def test_health_skips_mcp_token(self) -> None:
         self.assertTrue(mcp_token_ok("/health", "", "secret"))

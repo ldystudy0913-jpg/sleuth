@@ -54,17 +54,19 @@ Sleuth `.env` 粘贴生成包里的 `deploy/sleuth.env.snippet`。客户端鉴�
 3. `agent.md` — 人设；`permission` 必须用合格名 `{server}_{tool}`
 4. `skills/*/SKILL.md` — 私有 SOP（正文非空才嵌入）；COS 复用只在 `catalog_skills` 点名
 
-契约已写好、可跑通：`get_agent_card`、`health`（含 `GET /health`）、`ping`。文件解析在 Sleuth 完成；默认 `ping` **不**声明 `attachment_refs_json`（设 `{PKG}_ATTACHMENTS=1` 后重启才声明）。出参 `sources[]` / `files[]` 是可选约定，基座不解析你们的内部逻辑。
+契约已写好、可跑通：`get_agent_card`、`health`（含 `GET /health`）、`ping`。文件解析在 Sleuth 完成；默认 `ping` **不**声明 `attachment_refs_json`（设 `{PKG}_ATTACHMENTS=1` 后重启才声明）。`ping` 始终声明 `sleuth_llm_json`。出参 `sources[]` / `files[]`（生成文件用 `content_base64`）是可选约定，基座不解析你们的内部逻辑。
 
 ## 可选能力（始终生成模块，按 env 注册）
 
-三个模块每次都会拷进包内。空 `.env` **不**注册会返回空 JSON 的空工具；配齐后重启 MCP 即可，不必重新 generate。
+五个模块每次都会拷进包内。空 `.env` **不**注册会返回空 JSON 的空工具；配齐后重启 MCP 即可，不必重新 generate。HITL 不注册新工具，只在主工具缺料时返回 `need_input`。
 
 | 能力 | `{PKG}_*` | 未配齐 |
 |------|-----------|--------|
 | 会话摘录 | `ATTACHMENTS=1` | `ping` 无 `attachment_refs_json` |
+| 内部 LLM | `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` | 用 Sleuth 会话模型；两头都空则业务 LLM 失败 |
 | 知识库 | `KB_API_URL` + `KB_LOGIN_URL` + `KB_OPENID` + `KB_SERVICEID` | 不注册 `kb_search` |
-| 回传文件 | `AWS_ACCESS_KEY_ID`/`COS_SECRET_ID` + secret + `COS_BUCKET` + region 或 endpoint | 不注册 `emit_file` |
+| 回传文件 MCP 工具 | `AWS_ACCESS_KEY_ID`/`COS_SECRET_ID` + secret + `COS_BUCKET` + region 或 endpoint | 不注册 `emit_file`；JSON 仍可带 `files[].content_base64` |
+| 人工介入 | `HITL=1` | 缺料不返回 `need_input`（演示 ping 不暂停） |
 | HTTP 鉴权 | `MCP_TOKEN` 非空 | 不装中间件；`GET /health` 始终开放 |
 
-Card 默认仍写 `kb_lookup: deny`。打开本包 KB 时加 `{server}_kb_search: allow`。打开 COS 输出时加 `{server}_emit_file: allow`，`save_output_file` 默认 deny。想改用基座检索：删掉 `kb_lookup` deny 即可。回传文件用 MCP `files[]` **或** Sleuth `save_output_file`，不要把字节/data-URL 写进答复。
+Card 默认仍写 `kb_lookup: deny`。打开本包 KB 时加 `{server}_kb_search: allow`。打开 COS 输出工具时加 `{server}_emit_file: allow`，`save_output_file` 默认 deny。想改用基座检索：删掉 `kb_lookup` deny 即可。生成文件用 MCP `files[].content_base64`（Sleuth 加密进邮箱），不要把 data-URL 写进答复。

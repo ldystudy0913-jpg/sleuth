@@ -112,6 +112,7 @@ Sleuth 侧用官方 `mcp` Python 包客户端；服务端可用 FastMCP / 任意
 3. **inputSchema**：合法 JSON Schema object；Sleuth bridge **不**根据 schema 做严格 Pydantic 校验（`skip_strict_validation=True`），但仍应写清 required / properties，方便模型填参。
 4. **description**：写清「何时调用、必填字段、返回形态」——这是模型选工具的主依据。
 5. **返回**：优先纯文本 / JSON 字符串；错误时设 `isError` 或在文本中标明失败原因。
+6. **缺料暂停（可选）**：工具可返回 JSON `{ "status": "need_input", "missing": [...], "filled": {...}, "hint": "..." }`。Sleuth **不解析**该字段。Agent Skill / 人设应要求助手调用内置 `question`，HTTP 本轮停成 `awaiting_user`。用户补料后带齐字段再调；用户明确说没有补充、请继续时再调并传 `proceed_with_gaps=true`。脚手架 `{PKG}_HITL=1` 打开该门；`question: allow` 写在 Card 上。
 
 示例对照：
 
@@ -158,7 +159,7 @@ sleuth --agent <card.name>
 
 无需在仓库里放 `agent.md`（本地有同名则本地优先）。新项目从 [`agents/scaffold`](../agents/scaffold/) 生成，不要从 `dd_check` / `dd_reply` 复制业务代码。
 
-文件解析统一在 Sleuth（解密 + excerpt）。MCP 工具 JSON Schema 只要声明 `attachment_refs_json`，桥就会在调用前注入摘录；不声明则基座不注入。Sleuth **不解析** Agent 内部逻辑。工具返回值是字符串；只有希望基座做 UI/邮箱时才遵守可选顶层 JSON：`sources[]`（知识来源）、`files[]`（回传文件）。禁止 data-URL / file-URL。脚手架始终生成 attachments / kb / output 模块，但只在该 Agent 自己的 `{PKG}_*` 配齐时才注册对应工具（空 env 不挂空工具）。详见 [`EXTENDING.md`](EXTENDING.md) §9b。
+文件解析统一在 Sleuth（解密 + excerpt）。MCP 工具 JSON Schema 只要声明 `attachment_refs_json`，桥就会在调用前注入摘录；不声明则基座不注入。声明 `sleuth_llm_json` 时桥注入当前会话模型（`model` / `base_url` / `api_key`）；**本包 `{PKG}_LLM_*` 三项配齐则 Agent 自己用，未配齐才用注入**。Sleuth **不解析** Agent 内部逻辑。工具返回值是字符串；只有希望基座做 UI/邮箱时才遵守可选顶层 JSON：`sources[]`（知识来源）、`files[]`（回传文件）。生成文件请带 `content_base64`（明文），由 Sleuth 按会话邮箱路径 SM4 加密上传；也可继续给已有 `object_key` / `https` `url`。禁止 data-URL / file-URL。脚手架始终生成 attachments / kb / output / llm / hitl 模块，但只在该 Agent 自己的 `{PKG}_*` 配齐时才注册对应工具或打开缺料门（空 env 不挂空工具）。详见 [`EXTENDING.md`](EXTENDING.md) §9b。
 
 ### 4.2 必须实现的 MCP 工具
 
@@ -184,6 +185,12 @@ sleuth --agent <card.name>
 | `prompt` | string | 系统人设 / 行为约束 |
 | `description` | string | 列表副文案 / 能力说明 |
 | `mode` | string | 建议 `primary` |
+| `orchestration` | string | `host` \| `pipeline` \| `delegate` \| `async`（默认由 `SLEUTH_ORCHESTRATION_DEFAULT_MODE`） |
+| `primary_tool` | string | pipeline / auto_run 默认调用的合格工具名 |
+| `delegatable` | bool | 是否允许 `task` 委托（仍需 agent grant） |
+| `execution` | string | `sync` \| `async` |
+| `auto_invoke_prompt_field` | string | auto_run 时 prompt 映射到的工具参数名 |
+| `auto_invoke_args` | object | auto_run 静态默认参数 |
 | `permission` | object | 工具名 → `allow` \| `ask` \| `deny`（用 **合格名**） |
 | `steps` | int | 默认 50 |
 | `model` | string | 可选覆盖 |
@@ -222,6 +229,7 @@ sleuth --agent <card.name>
   "prompt": "你是尽调报告检查分析师……优先调用 ddcheck_check_report……",
   "permission": {
     "ddcheck_check_report": "allow",
+    "question": "allow",
     "bash": "ask",
     "edit": "deny",
     "write": "deny"
@@ -296,6 +304,9 @@ sequenceDiagram
 ---
 
 ## 7. 明确不做 / 常见坑
+
+- **裸调 MCP**：编排旁路必须走 `Session.execute_guarded_tool`（见 [`ORCHESTRATION.md`](ORCHESTRATION.md) §6）。
+- 编排模式配置写死在代码里：应使用 `SLEUTH_ORCHESTRATION_*` 或 JSONC `orchestration` 块。
 
 - 不把 MCP 内部 LangGraph 节点进度透出为 Sleuth SSE（仅 `tool_start` / `tool_result`）。
 - Card 权限键写 MCP 原名（漏前缀）→ 权限不生效。

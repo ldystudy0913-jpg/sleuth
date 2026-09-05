@@ -131,6 +131,8 @@ def _copy_capability_modules(dest: Path) -> None:
         (_OPTIONAL / "attachments" / "attachments.py", pkg_dir / "attachments.py"),
         (_OPTIONAL / "kb" / "kb.py", pkg_dir / "kb.py"),
         (_OPTIONAL / "output" / "output.py", pkg_dir / "output.py"),
+        (_OPTIONAL / "llm" / "llm.py", pkg_dir / "llm.py"),
+        (_OPTIONAL / "hitl" / "hitl.py", pkg_dir / "hitl.py"),
     )
     for src, target in pairs:
         if not src.is_file():

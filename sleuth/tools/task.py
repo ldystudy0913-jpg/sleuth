@@ -56,6 +56,19 @@ class TaskTool:
         except Exception as exc:
             return ToolResult.error("task", f"permission denied: {exc}")
 
+        from ..memory.acl import assert_resource_allowed
+        from ..orchestration import agent_delegatable, orch_cfg
+
+        user_id = getattr(session, "user_id", None) or getattr(session.config, "user_id", "local") or "local"
+        try:
+            assert_resource_allowed(session.config, user_id, "agent", p.subagent_type)
+        except Exception as exc:
+            return ToolResult.error("task", f"permission denied: {exc}")
+
+        ocfg = orch_cfg(session.config)
+        if ocfg.delegate_enabled and not agent_delegatable(session.config, p.subagent_type):
+            return ToolResult.error("task", ocfg.err_delegate_not_allowed)
+
         from ..agent import known_agents, ruleset_for
         from ..config import parse_model_ref
         from ..permission import Permission, Rule, from_config as permission_from_config
@@ -140,6 +153,14 @@ class TaskTool:
                 or getattr(session.config, "user_id", "local")
                 or "local",
             )
+
+        try:
+            from .memory.acl import attach_identity
+
+            attach_identity(child)
+        except Exception:
+            child.role_id = None
+            child.org_id = None
 
         try:
             text = child.prompt(p.prompt)

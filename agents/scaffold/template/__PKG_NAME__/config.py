@@ -65,8 +65,12 @@ class Settings:
         self.mcp_token: str = str(
             overrides.get("mcp_token", _env(f"{p}_MCP_TOKEN", "") or "")
         ).strip()
+        self.env_prefix: str = p
         self.attachments_enabled: bool = bool(
             overrides.get("attachments_enabled", _env_truthy(f"{p}_ATTACHMENTS"))
+        )
+        self.hitl_enabled: bool = bool(
+            overrides.get("hitl_enabled", _env_truthy(f"{p}_HITL"))
         )
 
         self.kb_api_url: str = str(
@@ -150,14 +154,42 @@ class Settings:
                 and (self.cos_region or self.cos_endpoint)
             )
 
+        self.llm_base_url: str = str(
+            overrides.get("llm_base_url", _env(f"{p}_LLM_BASE_URL", "") or "")
+        ).strip().rstrip("/")
+        self.llm_api_key: str = str(
+            overrides.get("llm_api_key", _env(f"{p}_LLM_API_KEY", "") or "")
+        ).strip()
+        self.llm_model: str = str(
+            overrides.get("llm_model", _env(f"{p}_LLM_MODEL", "") or "")
+        ).strip()
+        self.llm_temperature: float = float(
+            overrides.get("llm_temperature", _env_float(f"{p}_LLM_TEMPERATURE", 0.2))
+        )
+        self.llm_timeout: float = float(
+            overrides.get("llm_timeout", _env_float(f"{p}_LLM_TIMEOUT", 120.0))
+        )
+        json_mode_raw = os.environ.get(f"{p}_LLM_JSON_MODE")
+        if "llm_json_mode" in overrides:
+            self.llm_json_mode = bool(overrides.get("llm_json_mode"))
+        elif json_mode_raw is None or str(json_mode_raw).strip() == "":
+            self.llm_json_mode = True
+        else:
+            self.llm_json_mode = _env_truthy(f"{p}_LLM_JSON_MODE")
+
+    def llm_configured(self) -> bool:
+        return bool(self.llm_base_url and self.llm_api_key and self.llm_model)
+
     def as_health(self) -> dict:
         return {
             "ok": True,
             "service": self.service_name,
             "agent_card": True,
             "attachments": self.attachments_enabled,
+            "hitl": self.hitl_enabled,
             "kb": self.kb_enabled,
             "output": self.output_enabled,
+            "llm": self.llm_configured(),
             "mcp_auth": bool(self.mcp_token),
         }
 

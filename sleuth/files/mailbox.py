@@ -1,6 +1,7 @@
 """Session file mailbox: metadata in session.metadata.files, bytes in COS."""
 from __future__ import annotations
 
+import base64
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -480,6 +481,21 @@ def register_assistant_file(
     return item
 
 
+def _entry_plain_bytes(entry: Dict[str, Any]) -> Optional[bytes]:
+    raw_b64 = entry.get("content_base64")
+    if raw_b64 is None:
+        raw_b64 = entry.get("contentBase64")
+    if isinstance(raw_b64, str) and raw_b64.strip():
+        try:
+            return base64.b64decode(raw_b64, validate=False)
+        except Exception:
+            return None
+    content = entry.get("content")
+    if isinstance(content, str) and content:
+        return content.encode("utf-8")
+    return None
+
+
 def harvest_tool_files(session, payload: Any) -> List[Dict[str, Any]]:
     """Register MCP/tool JSON ``files[]`` as assistant mailbox entries."""
     if not isinstance(payload, dict):
@@ -504,23 +520,39 @@ def harvest_tool_files(session, payload: Any) -> List[Dict[str, Any]]:
             size = int(entry.get("size") or 0)
         except (TypeError, ValueError):
             size = 0
-        if not key and not _href_allowed(url, cfg):
-            continue
-        item = register_assistant_file(
-            session,
-            filename=filename,
-            mime=mime,
-            size=size,
-            object_key=key,
-            external_url=url,
-            file_id=str(entry.get("id") or entry.get("file_id") or ""),
-        )
-        href = url if _href_allowed(url, cfg) else item.get("download_url") or ""
-        if not href:
-            href = settings.file_download_url(cfg, str(session.id), item["id"])
+        body = _entry_plain_bytes(entry)
+        if body is not None:
+            try:
+                item = put_generated_bytes(
+                    session=session,
+                    filename=filename,
+                    data=body,
+                    mime=mime,
+                )
+            except MailboxError:
+                continue
+            href = str(item.get("download_url") or "")
+            if not href:
+                href = settings.file_download_url(cfg, str(session.id), item["id"])
+        else:
+            if not key and not _href_allowed(url, cfg):
+                continue
+            item = register_assistant_file(
+                session,
+                filename=filename,
+                mime=mime,
+                size=size,
+                object_key=key,
+                external_url=url,
+                file_id=str(entry.get("id") or entry.get("file_id") or ""),
+            )
+            href = url if _href_allowed(url, cfg) else item.get("download_url") or ""
+            if not href:
+                href = settings.file_download_url(cfg, str(session.id), item["id"])
         out.append(
             {
                 "type": "file",
+                "id": item["id"],
                 "mime": item["mime"],
                 "filename": item["filename"],
                 "url": href,
@@ -529,20 +561,20 @@ def harvest_tool_files(session, payload: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def put_generated_text(
+def put_generated_bytes(
     *,
     session,
     filename: str,
-    content: str,
+    data: bytes,
     mime: str = "",
     object_store: Optional[ObjectStore] = None,
 ) -> Dict[str, Any]:
     config = session.config
-    data = (content or "").encode("utf-8")
+    payload = bytes(data or b"")
     fcfg = files_config(config)
     max_bytes = int(fcfg.max_bytes or 0)
-    if max_bytes and len(data) > max_bytes:
-        raise MailboxError(f"file too large: {len(data)} > {max_bytes}", 413)
+    if max_bytes and len(payload) > max_bytes:
+        raise MailboxError(f"file too large: {len(payload)} > {max_bytes}", 413)
     if not filename.strip():
         raise MailboxError(settings.err_filename_required(config))
     files = session_files(session)
@@ -559,7 +591,7 @@ def put_generated_text(
         filename=filename,
     )
     use_mime = (mime or "").strip() or settings.generated_mime(config)
-    stored, encrypted = at_rest.store_payload(data, config)
+    stored, encrypted = at_rest.store_payload(payload, config)
     store_impl.put_bytes(
         key=key,
         data=stored,
@@ -569,8 +601,25 @@ def put_generated_text(
         session,
         filename=filename,
         mime=use_mime,
-        size=len(data),
+        size=len(payload),
         object_key=key,
         file_id=fid,
         encrypted=encrypted,
+    )
+
+
+def put_generated_text(
+    *,
+    session,
+    filename: str,
+    content: str,
+    mime: str = "",
+    object_store: Optional[ObjectStore] = None,
+) -> Dict[str, Any]:
+    return put_generated_bytes(
+        session=session,
+        filename=filename,
+        data=(content or "").encode("utf-8"),
+        mime=mime,
+        object_store=object_store,
     )

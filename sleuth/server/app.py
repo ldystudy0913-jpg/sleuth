@@ -269,12 +269,28 @@ def create_app(workdir: Optional[Path] = None):
         sess._prompt_file_ids = ids
         return None
 
-    def _parse_message_body(body: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-        """Return (prompt, error_message)."""
-        prompt = body.get("prompt") or body.get("text") or ""
-        if not prompt:
-            return None, "prompt required"
-        return str(prompt), None
+    def _parse_message_body(body: Dict[str, Any], cfg) -> tuple[Optional[str], Optional[str]]:
+        from ..orchestration import parse_message_prompt
+
+        return parse_message_prompt(body, cfg)
+
+    def _run_turn(sess, body: Dict[str, Any], prompt: str):
+        from ..orchestration import try_orchestrated_turn
+
+        turn = try_orchestrated_turn(
+            sess,
+            body,
+            prompt,
+            build_session_fn=build_session,
+            workdir=workdir,
+        )
+        if turn is None:
+            return sess.prompt(str(prompt)), None, None
+        if turn.error:
+            return None, turn.error, turn
+        if turn.job_id:
+            return turn.text or "", None, turn
+        return turn.text or "", None, turn
 
     async def post_message(request: Request):
         sid = request.path_params["session_id"]
@@ -286,11 +302,12 @@ def create_app(workdir: Optional[Path] = None):
             body = await request.json()
         except Exception:
             return _json_response({"error": "invalid json"}, 400)
-        prompt, err = _parse_message_body(body)
+
+        cfg = load(workdir)
+        prompt, err = _parse_message_body(body, cfg)
         if err:
             return _json_response({"error": err}, 400)
 
-        cfg = load(workdir)
         sess = build_session(
             config=cfg,
             workdir=workdir,
@@ -313,21 +330,29 @@ def create_app(workdir: Optional[Path] = None):
         if ferr:
             return _json_response({"error": ferr}, 400)
         sess.block_on_question = False
-        text = sess.prompt(str(prompt))
-        return _json_response(
-            {
-                "session_id": sess.id,
-                "text": text,
-                "title": sess.title,
-                "agent": sess.agent_name,
-                "model": _session_model_payload(sess),
-                **_skill_fields(sess),
-                **_turn_files_fields(sess),
-                "usage": sess._last_usage,
-                "cost": sess._session_cost,
-                **sess.ask_payload(),
-            }
-        )
+        text, turn_err, turn = _run_turn(sess, body, str(prompt or ""))
+        if turn_err:
+            return _json_response({"error": turn_err}, 400)
+        payload = {
+            "session_id": sess.id,
+            "text": text,
+            "title": sess.title,
+            "agent": sess.agent_name,
+            "model": _session_model_payload(sess),
+            **_skill_fields(sess),
+            **_turn_files_fields(sess),
+            "usage": sess._last_usage,
+            "cost": sess._session_cost,
+            **sess.ask_payload(),
+        }
+        if turn and turn.job_id:
+            payload["job_id"] = turn.job_id
+            payload["status"] = "accepted"
+        if turn and turn.parallel_results:
+            payload["parallel_results"] = turn.parallel_results
+        if turn and turn.mode:
+            payload["orchestration_mode"] = turn.mode
+        return _json_response(payload)
 
     async def post_message_stream(request: Request):
         """SSE stream of one agent turn (text deltas + tool events + done)."""
@@ -340,11 +365,12 @@ def create_app(workdir: Optional[Path] = None):
             body = await request.json()
         except Exception:
             return _json_response({"error": "invalid json"}, 400)
-        prompt, err = _parse_message_body(body)
+
+        cfg = load(workdir)
+        prompt, err = _parse_message_body(body, cfg)
         if err:
             return _json_response({"error": err}, 400)
 
-        cfg = load(workdir)
         renderer = StreamingRenderer(session_id=sid)
         sess = build_session(
             config=cfg,
@@ -369,7 +395,18 @@ def create_app(workdir: Optional[Path] = None):
             return _json_response({"error": ferr}, 400)
         sess.block_on_question = False
 
-        run_prompt_in_thread(sess, str(prompt), renderer)
+        text, turn_err, turn = _run_turn(sess, body, str(prompt or ""))
+        if turn_err:
+            return _json_response({"error": turn_err}, 400)
+        orchestrated = turn is not None
+        if orchestrated:
+            if turn.job_id:
+                renderer.on_text("")
+            elif text:
+                renderer.on_text(text)
+            renderer.close()
+        else:
+            run_prompt_in_thread(sess, str(prompt), renderer)
 
         async def event_gen():
             disconnected = False
@@ -392,7 +429,7 @@ def create_app(workdir: Optional[Path] = None):
                 done = {
                     "type": "done",
                     "session_id": sess.id,
-                    "text": sess.last_assistant_text(),
+                    "text": (text if orchestrated and text else sess.last_assistant_text()),
                     "title": sess.title,
                     "agent": sess.agent_name,
                     "model": _session_model_payload(sess),
@@ -402,6 +439,13 @@ def create_app(workdir: Optional[Path] = None):
                     "cost": float(sess._session_cost or 0),
                     **sess.ask_payload(),
                 }
+                if turn and turn.job_id:
+                    done["job_id"] = turn.job_id
+                    done["status"] = "accepted"
+                if turn and turn.parallel_results:
+                    done["parallel_results"] = turn.parallel_results
+                if turn and turn.mode:
+                    done["orchestration_mode"] = turn.mode
                 yield sse_pack(done)
 
         return StreamingResponse(
@@ -603,6 +647,16 @@ def create_app(workdir: Optional[Path] = None):
             return _mailbox_error_response(exc)
         return _json_response({"ok": True, "id": file_id})
 
+    async def get_orchestration_job(request: Request):
+        job_id = request.path_params["job_id"]
+        user_id = _user_id(request)
+        from ..orchestration import get_job
+
+        job = get_job(job_id, user_id=user_id)
+        if job is None:
+            return _json_response({"error": "not found"}, 404)
+        return _json_response(job)
+
     routes = [
         Route("/health", health),
         Route("/v1/sessions", create_session, methods=["POST"]),
@@ -615,6 +669,7 @@ def create_app(workdir: Optional[Path] = None):
             post_message_stream,
             methods=["POST"],
         ),
+        Route("/v1/orchestration/jobs/{job_id}", get_orchestration_job, methods=["GET"]),
         Route(
             "/v1/sessions/{session_id}/files/uploads",
             deprecated_presign_upload,

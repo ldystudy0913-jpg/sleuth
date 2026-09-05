@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from .attachments import load_excerpts, summarize_refs
 from .config import Settings
 from .kb import search as kb_search
-from .llm import LlmError, LlmFn, complete_json
+from .llm import LlmError, LlmFn, complete_json, settings_with_llm_json
 from .output import emit_file
 from .rubric import (
     RubricError,
@@ -131,11 +131,13 @@ def check_report(
     report_json: str = "",
     question: str = "",
     attachment_refs: Optional[List[dict]] = None,
+    sleuth_llm_json: str = "",
     llm_fn: Optional[LlmFn] = None,
     kb_opener=None,
     emit_fn: Optional[Callable[..., Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     empty = {"ok": False, "score": None, "findings": [], "sources": [], "files": []}
+    settings = settings_with_llm_json(settings, sleuth_llm_json)
     try:
         rubric = load_rubric(settings.rubric_path)
     except RubricError as exc:
@@ -143,7 +145,10 @@ def check_report(
     if not settings.llm_configured() and llm_fn is None:
         return {
             **empty,
-            "detail": "LLM not configured: set DD_CHECK_LLM_BASE_URL, DD_CHECK_LLM_API_KEY, DD_CHECK_LLM_MODEL",
+            "detail": (
+                "LLM not configured: set DD_CHECK_LLM_BASE_URL, DD_CHECK_LLM_API_KEY, "
+                "DD_CHECK_LLM_MODEL (or leave them empty and call via Sleuth)"
+            ),
         }
     try:
         system_t = _read_text(settings.system_prompt_path)
@@ -229,19 +234,16 @@ def check_report(
         mime = str((rubric.get("word") or {}).get("mime") or "")
         filename = _word_filename(settings, rubric, score)
         uploader = emit_fn or emit_file
-        if settings.output_enabled or emit_fn is not None:
-            uploaded = uploader(
-                settings,
-                filename=filename,
-                content_bytes=docx_bytes,
-                mime=mime,
-            )
-            if uploaded.get("ok"):
-                files = list(uploaded.get("files") or [])
-            else:
-                word_detail = str(uploaded.get("detail") or "word upload failed")
+        uploaded = uploader(
+            settings,
+            filename=filename,
+            content_bytes=docx_bytes,
+            mime=mime,
+        )
+        if uploaded.get("ok"):
+            files = list(uploaded.get("files") or [])
         else:
-            word_detail = "COS not configured: Word generated but not uploaded"
+            word_detail = str(uploaded.get("detail") or "word packaging failed")
     except Exception as exc:
         word_detail = f"word render/upload failed: {exc}"
 

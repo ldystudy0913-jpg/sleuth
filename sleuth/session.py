@@ -907,6 +907,10 @@ class Session:
         self._update_record()
 
     def _execute_tool(self, tool_use: ToolUseBlock) -> ToolResult:
+        return self.execute_guarded_tool(tool_use.name, tool_use.input or {})
+
+    def execute_guarded_tool(self, tool_name: str, args: dict) -> ToolResult:
+        """Run a registry tool through permission + MCP bridge (orchestration entry point)."""
         ctx = ToolContext(
             workdir=self.workdir,
             session_id=self.id,
@@ -916,12 +920,24 @@ class Session:
             session=self,
             guardrails_enabled=bool(getattr(self.config, "guardrails", True)),
         )
+        renderer = getattr(self, "renderer", None)
+        if renderer is not None and hasattr(renderer, "on_tool_start"):
+            try:
+                renderer.on_tool_start(tool_name, args or {})
+            except Exception:
+                pass
         try:
             if self._abort.is_set():
-                return ToolResult.error(tool_use.name, "aborted before execution")
-            return self.registry.execute(tool_use.name, tool_use.input, ctx)
+                return ToolResult.error(tool_name, "aborted before execution")
+            result = self.registry.execute(tool_name, args or {}, ctx)
         except PermissionDenied as exc:
-            return ToolResult.error(tool_use.name, f"permission denied: {exc}")
+            result = ToolResult.error(tool_name, f"permission denied: {exc}")
+        if renderer is not None and hasattr(renderer, "on_tool_result"):
+            try:
+                renderer.on_tool_result(tool_name, result)
+            except Exception:
+                pass
+        return result
 
     def _cost_rates(self) -> Optional[dict]:
         pid = getattr(self.provider, "id", "") or ""

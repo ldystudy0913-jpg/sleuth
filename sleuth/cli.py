@@ -328,6 +328,12 @@ def _parse_args(argv=None):
                         help="force reload skills from paths/urls/s3 before starting")
     parser.add_argument("--skill", action="append", default=None,
                         help="pin skill(s); repeat or comma-separate (default agent only)")
+    parser.add_argument(
+        "--auto-run",
+        dest="auto_run",
+        action="store_true",
+        help="skip host LLM; invoke agent primary_tool once (Mode F; see SLEUTH_ORCHESTRATION_*)",
+    )
     return parser.parse_args(argv)
 
 
@@ -366,6 +372,25 @@ def main(argv=None) -> int:
             pass
 
 
+def _run_prompt(session, prompt: str, *, auto_run: bool = False) -> str:
+    if not auto_run:
+        return session.prompt(prompt)
+    from .orchestration import orch_cfg, try_orchestrated_turn
+
+    ocfg = orch_cfg(session.config)
+    body = {ocfg.body_auto_run_key: True, "prompt": prompt}
+    turn = try_orchestrated_turn(session, body, prompt)
+    if turn is None:
+        return session.prompt(prompt)
+    if turn.error:
+        raise RuntimeError(turn.error)
+    if turn.text:
+        _print(turn.text)
+        if not turn.text.endswith("\n"):
+            _print("\n")
+    return turn.text or ""
+
+
 def _run_session(args, session) -> int:
     if args.model:
         try:
@@ -396,7 +421,7 @@ def _run_session(args, session) -> int:
                 session = new_sess
             if text is None:
                 return 1
-            session.prompt(text)
+            _run_prompt(session, text, auto_run=bool(getattr(args, "auto_run", False)))
         except KeyboardInterrupt:
             session.cancel()
             _print("\n[aborted]\n")

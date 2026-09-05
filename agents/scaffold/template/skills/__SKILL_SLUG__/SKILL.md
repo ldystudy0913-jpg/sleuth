@@ -31,5 +31,10 @@ SLEUTH_MCP_SERVERS={"__SERVER_NAME__":{"type":"remote","url":"http://127.0.0.1:_
 
 1. （可选）调用 `__SERVER_NAME___health`。
 2. 将用户要回显的文本传入 `__SERVER_NAME___ping` 的 `message`。
-3. 用中文归纳 `echo`；不要把完整附件明文读给无关上下文。
-4. 若返回顶层 `sources[]`，保留 URL，不要改写。Sleuth 会在最终答复末尾列出。
+3. 若返回 `status=need_input`：**不要继续生成**。向用户列出 `missing`，并询问是否还有其他缺失信息要补充。用内置 `question` 工具，选项建议：
+   - 「补充信息」（Recommended）
+   - 「没有补充，继续」
+   - 用户提供了新内容：带上更新后的入参再调用（不要设 `proceed_with_gaps`）。
+   - 用户明确说没有补充 / 继续：再次调用并设 `proceed_with_gaps=true`。
+4. 用中文归纳 `echo`；不要把完整附件明文读给无关上下文。
+5. 若返回顶层 `sources[]`，保留 URL，不要改写。Sleuth 会在最终答复末尾列出。

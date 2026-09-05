@@ -1,6 +1,6 @@
 # 将 __AGENT_NAME__ 挂到 Sleuth
 
-本包始终生成本地 SOP（`skills/__SKILL_SLUG__/SKILL.md`，嵌入 Agent Card）以及 attachments / kb / output 三个模块。工具是否对外暴露由**本包 `.env`** 决定，改完重启 MCP，不必重新 generate。
+本包始终生成本地 SOP（`skills/__SKILL_SLUG__/SKILL.md`，嵌入 Agent Card）以及 attachments / kb / output / llm / hitl 模块。工具是否对外暴露由**本包 `.env`** 决定，改完重启 MCP，不必重新 generate。
 
 ## 1. 启动工具面
 
@@ -50,8 +50,9 @@ HTTP：`POST /v1/sessions` body `{ "agent": "__AGENT_NAME__" }`。
 | 约定 | 谁用 | 不遵守会怎样 |
 |------|------|----------------|
 | 入参 `attachment_refs_json` | 要读会话附件 | 收不到摘录 |
+| 入参 `sleuth_llm_json` | 内部 LLM 未配齐时用会话模型 | 直连 MCP 且本包 LLM 为空则调用失败 |
 | 出参 `sources[]`（`title` + `http(s) url`） | 答复末尾灰色「知识来源」 | 不附来源段 |
-| 出参 `files[]`（`filename` + `https url` 或 `object_key`） | 登记为助手文件，进 `done.files` | 前端收不到回传文件 |
+| 出参 `files[]`（`content_base64` 或已有 `https url` / `object_key`） | Sleuth 加密写入会话邮箱，进 `done.files` | 前端收不到回传文件 |
 
 禁止 data-URL / file-URL。
 
@@ -60,8 +61,10 @@ HTTP：`POST /v1/sessions` body `{ "agent": "__AGENT_NAME__" }`。
 | 能力 | 本包 `.env` | 未配齐时 |
 |------|-------------|---------|
 | 会话摘录 | `__ENV_PREFIX___ATTACHMENTS=1` | `ping` 不声明 `attachment_refs_json` |
+| 内部 LLM | `__ENV_PREFIX___LLM_BASE_URL` + `_API_KEY` + `_MODEL` | 用 Sleuth 注入的会话模型；两头都空则业务 LLM 失败 |
 | 知识库 | `__ENV_PREFIX___KB_API_URL` + `_LOGIN_URL` + `_OPENID` + `_SERVICEID` | 不注册 `kb_search` |
-| 回传文件 | COS：access + secret + bucket + (region 或 endpoint) | 不注册 `emit_file` |
+| 回传文件 MCP 工具 | COS：access + secret + bucket + (region 或 endpoint) | 不注册 `emit_file`；业务 JSON 仍可带 `files[].content_base64` |
+| 人工介入 | `__ENV_PREFIX___HITL=1` | 缺料不返回 `need_input`；基座不暂停 |
 | HTTP 鉴权 | `__ENV_PREFIX___MCP_TOKEN` 非空 | 不装中间件 |
 
 知识库、生成文件也可以不写进 MCP：会话里仍有 Sleuth 内置 `kb_lookup` / `save_output_file`（Card 权限可 deny 藏掉）。

@@ -1,13 +1,13 @@
 # 将 dd_check 挂到 Sleuth
 
-本包始终生成本地 SOP（`skills/dd-check-sop/SKILL.md`，嵌入 Agent Card）以及 attachments / kb / output 三个模块。工具是否对外暴露由**本包 `.env`** 决定，改完重启 MCP，不必重新 generate。
+本包始终生成本地 SOP（`skills/dd-check-sop/SKILL.md`，嵌入 Agent Card）以及 attachments / kb / output / llm / hitl 模块。工具是否对外暴露由**本包 `.env`** 决定，改完重启 MCP，不必重新 generate。
 
 ## 1. 启动工具面
 
 ```powershell
 cd <this-package>
 py -3.12 -m pip install -e ".[mcp,cos,docx]"
-# 填写本包 .env：DD_CHECK_LLM_* 必填才能检查；KB/COS 按需
+# 填写本包 .env：DD_CHECK_LLM_* 配齐则用本包模型；留空则用 Sleuth 会话模型。KB 按需
 Copy-Item .env.example .env
 py -3.12 -m dd_check.mcp_server
 ```
@@ -50,8 +50,9 @@ HTTP：`POST /v1/sessions` body `{ "agent": "dd_check" }`。
 | 约定 | 谁用 | 不遵守会怎样 |
 |------|------|----------------|
 | 入参 `attachment_refs_json` | 要读会话附件 | 收不到摘录 |
+| 入参 `sleuth_llm_json` | 本包 LLM 未配齐时用会话模型 | 直连 MCP 且本包 LLM 为空则检查失败 |
 | 出参 `sources[]`（`title` + `http(s) url`） | 答复末尾灰色「知识来源」 | 不附来源段 |
-| 出参 `files[]`（`filename` + `https url` 或 `object_key`） | 登记为助手文件，进 `done.files` | 前端收不到回传文件 |
+| 出参 `files[]`（`content_base64` 或已有 `https url` / `object_key`） | Sleuth 加密写入会话邮箱，进 `done.files` | 前端收不到回传文件 |
 
 禁止 data-URL / file-URL。
 
@@ -60,8 +61,10 @@ HTTP：`POST /v1/sessions` body `{ "agent": "dd_check" }`。
 | 能力 | 本包 `.env` | 未配齐时 |
 |------|-------------|---------|
 | 会话摘录 | `DD_CHECK_ATTACHMENTS=1` | `check_report` 不声明 `attachment_refs_json` |
+| 人工介入 | `DD_CHECK_HITL=1` | 空材料不返回 `need_input`，直接进检查 |
+| 内部 LLM | `DD_CHECK_LLM_BASE_URL` + `_API_KEY` + `_MODEL` | 用 Sleuth 注入的会话模型；两头都空则检查失败 |
 | 知识库 | `DD_CHECK_KB_API_URL` + `_LOGIN_URL` + `_OPENID` + `_SERVICEID` | 不注册 `kb_search` |
-| 回传文件 | COS：access + secret + bucket + (region 或 endpoint) | 不注册 `emit_file` |
+| 回传文件 MCP 工具 | COS：access + secret + bucket + (region 或 endpoint) | 不注册 `emit_file`；Word 仍走 `files[].content_base64` |
 | HTTP 鉴权 | `DD_CHECK_MCP_TOKEN` 非空 | 不装中间件 |
 
 知识库、生成文件也可以不写进 MCP：会话里仍有 Sleuth 内置 `kb_lookup` / `save_output_file`（Card 权限可 deny 藏掉）。

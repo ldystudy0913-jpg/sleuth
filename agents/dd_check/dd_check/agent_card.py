@@ -188,6 +188,14 @@ def _apply_runtime_permissions(
     return out
 
 
+def _coerce_optional_bool(val: Any) -> Optional[bool]:
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_agent_card(
     *,
     server_name: str = DEFAULT_SERVER,
@@ -218,6 +226,11 @@ def load_agent_card(
         "title": parsed.get("title") or "尽调报告检查",
         "description": parsed.get("description") or "尽调报告检查",
         "mode": parsed.get("mode") or "primary",
+        "orchestration": parsed.get("orchestration"),
+        "primary_tool": parsed.get("primary_tool"),
+        "delegatable": _coerce_optional_bool(parsed.get("delegatable")),
+        "execution": parsed.get("execution"),
+        "auto_invoke_prompt_field": parsed.get("auto_invoke_prompt_field"),
         "prompt": parsed.get("prompt") or "",
         "permission": permission,
         "skills": skills,

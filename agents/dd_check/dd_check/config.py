@@ -65,8 +65,12 @@ class Settings:
         self.mcp_token: str = str(
             overrides.get("mcp_token", _env(f"{p}_MCP_TOKEN", "") or "")
         ).strip()
+        self.env_prefix: str = p
         self.attachments_enabled: bool = bool(
             overrides.get("attachments_enabled", _env_truthy(f"{p}_ATTACHMENTS"))
+        )
+        self.hitl_enabled: bool = bool(
+            overrides.get("hitl_enabled", _env_truthy(f"{p}_HITL"))
         )
 
         self.kb_api_url: str = str(
@@ -226,6 +230,7 @@ class Settings:
             "service": self.service_name,
             "agent_card": True,
             "attachments": self.attachments_enabled,
+            "hitl": self.hitl_enabled,
             "kb": self.kb_enabled,
             "output": self.output_enabled,
             "llm": self.llm_configured(),

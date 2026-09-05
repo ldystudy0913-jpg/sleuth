@@ -73,6 +73,26 @@ def parse_agent_card(
     permission = sanitize_permissions({str(k): v for k, v in permission.items()})
 
     steps = data.get("steps")
+    orchestration = data.get("orchestration")
+    primary_tool = data.get("primary_tool") or data.get("primaryTool")
+    delegatable = data.get("delegatable")
+    if delegatable is not None and not isinstance(delegatable, bool):
+        delegatable = str(delegatable).strip().lower() in ("1", "true", "yes", "on")
+    execution = data.get("execution")
+    auto_invoke_prompt_field = data.get("auto_invoke_prompt_field") or data.get("autoInvokePromptField")
+    auto_invoke_args: Dict[str, Any] = {}
+    raw_args = data.get("auto_invoke_args") or data.get("autoInvokeArgs")
+    if isinstance(raw_args, dict):
+        auto_invoke_args.update(raw_args)
+    raw_args_json = data.get("auto_invoke_args_json") or data.get("autoInvokeArgsJson")
+    if isinstance(raw_args_json, str) and raw_args_json.strip():
+        try:
+            parsed = json.loads(raw_args_json)
+            if isinstance(parsed, dict):
+                auto_invoke_args.update(parsed)
+        except json.JSONDecodeError:
+            pass
+
     agent = AgentConfig(
         name=name,
         title=title,
@@ -83,6 +103,12 @@ def parse_agent_card(
         steps=int(steps) if steps is not None else 50,
         model=str(data["model"]) if data.get("model") else None,
         skill_names=[],
+        orchestration=str(orchestration).strip() if orchestration else None,
+        primary_tool=str(primary_tool).strip() if primary_tool else None,
+        delegatable=bool(delegatable) if delegatable is not None else None,
+        execution=str(execution).strip() if execution else None,
+        auto_invoke_prompt_field=str(auto_invoke_prompt_field).strip() if auto_invoke_prompt_field else None,
+        auto_invoke_args=auto_invoke_args,
     )
 
     skills: List[SkillInfo] = []
@@ -163,6 +189,19 @@ def merge_agent_fill_empty(existing: AgentConfig, incoming: AgentConfig) -> Agen
                 seen.add(n)
                 merged_names.append(n)
         existing.skill_names = merged_names
+    if existing.orchestration is None and incoming.orchestration:
+        existing.orchestration = incoming.orchestration
+    if existing.primary_tool is None and incoming.primary_tool:
+        existing.primary_tool = incoming.primary_tool
+    if existing.delegatable is None and incoming.delegatable is not None:
+        existing.delegatable = incoming.delegatable
+    if existing.execution is None and incoming.execution:
+        existing.execution = incoming.execution
+    if existing.auto_invoke_prompt_field is None and incoming.auto_invoke_prompt_field:
+        existing.auto_invoke_prompt_field = incoming.auto_invoke_prompt_field
+    if incoming.auto_invoke_args:
+        for k, v in incoming.auto_invoke_args.items():
+            existing.auto_invoke_args.setdefault(k, v)
     return existing
 
 

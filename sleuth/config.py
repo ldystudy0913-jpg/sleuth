@@ -31,6 +31,13 @@ class AgentConfig:
     hidden: bool = False
     # Catalog skill names this agent auto-injects (COS/local reuse). Not a user pin list.
     skill_names: List[str] = field(default_factory=list)
+    # Orchestration (optional; unset → global OrchestrationConfig defaults).
+    orchestration: Optional[str] = None
+    primary_tool: Optional[str] = None
+    delegatable: Optional[bool] = None
+    execution: Optional[str] = None
+    auto_invoke_prompt_field: Optional[str] = None
+    auto_invoke_args: Dict[str, Any] = field(default_factory=dict)
 
     def merge(self, other: Dict[str, Any]) -> "AgentConfig":
         if "title" in other and other["title"] is not None:
@@ -67,7 +74,86 @@ class AgentConfig:
                     names.append(n)
             if names:
                 self.skill_names = names
+        if "orchestration" in other and other["orchestration"] is not None:
+            val = str(other["orchestration"]).strip()
+            if val:
+                self.orchestration = val
+        if "primary_tool" in other and other["primary_tool"] is not None:
+            val = str(other["primary_tool"]).strip()
+            if val:
+                self.primary_tool = val
+        if "primaryTool" in other and other["primaryTool"] is not None:
+            val = str(other["primaryTool"]).strip()
+            if val:
+                self.primary_tool = val
+        if "delegatable" in other and other["delegatable"] is not None:
+            self.delegatable = bool(other["delegatable"])
+        if "execution" in other and other["execution"] is not None:
+            val = str(other["execution"]).strip()
+            if val:
+                self.execution = val
+        if "auto_invoke_prompt_field" in other and other["auto_invoke_prompt_field"] is not None:
+            val = str(other["auto_invoke_prompt_field"]).strip()
+            if val:
+                self.auto_invoke_prompt_field = val
+        if "autoInvokePromptField" in other and other["autoInvokePromptField"] is not None:
+            val = str(other["autoInvokePromptField"]).strip()
+            if val:
+                self.auto_invoke_prompt_field = val
+        raw_args = other.get("auto_invoke_args")
+        if raw_args is None:
+            raw_args = other.get("autoInvokeArgs")
+        if isinstance(raw_args, dict):
+            self.auto_invoke_args.update(raw_args)
+        raw_args_json = other.get("auto_invoke_args_json") or other.get("autoInvokeArgsJson")
+        if isinstance(raw_args_json, str) and raw_args_json.strip():
+            try:
+                parsed = json.loads(raw_args_json)
+                if isinstance(parsed, dict):
+                    self.auto_invoke_args.update(parsed)
+            except json.JSONDecodeError:
+                pass
         return self
+
+
+@dataclass
+class OrchestrationConfig:
+    """Global orchestration defaults and feature toggles (env / JSONC ``orchestration`` block)."""
+
+    default_mode: str = "host"
+    default_execution: str = "sync"
+    default_delegatable: bool = False
+    modes: str = "host,pipeline,delegate,async,auto_invoke,parallel,invoke"
+    executions: str = "sync,async"
+    invoke_enabled: bool = True
+    auto_run_enabled: bool = True
+    parallel_enabled: bool = True
+    async_enabled: bool = False
+    delegate_enabled: bool = True
+    parallel_max_branches: int = 8
+    parallel_timeout_s: float = 300.0
+    async_max_jobs_per_user: int = 32
+    metadata_key: str = "orchestration"
+    execution_metadata_key: str = "execution"
+    jobs_metadata_key: str = "orchestration_jobs"
+    auto_invoke_prompt_field: str = "question"
+    body_invoke_key: str = "invoke"
+    body_auto_run_key: str = "auto_run"
+    body_parallel_key: str = "parallel"
+    body_execution_key: str = "execution"
+    body_orchestration_key: str = "orchestration"
+    async_tokens: str = "async,true,1,yes,on"
+    cli_auto_run_flag: str = "--auto-run"
+    err_async_disabled: str = "async execution is disabled"
+    err_parallel_disabled: str = "parallel orchestration is disabled"
+    err_auto_run_disabled: str = "auto_run is disabled"
+    err_invoke_disabled: str = "direct invoke is disabled"
+    err_delegate_not_allowed: str = "agent is not delegatable"
+    err_missing_primary_tool: str = "primary_tool not configured for agent"
+    err_missing_tool: str = "tool not found in session registry"
+    err_invalid_mode: str = "invalid orchestration mode"
+    err_parallel_branch: str = "parallel branch failed"
+    err_prompt_required: str = "prompt required"
 
 
 @dataclass
@@ -439,6 +525,7 @@ class Config:
     kb: KbConfig = field(default_factory=KbConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     acl: AclConfig = field(default_factory=AclConfig)
+    orchestration: OrchestrationConfig = field(default_factory=OrchestrationConfig)
     privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     # Session list / trace display timezone (env SLEUTH_TIMEZONE wins).
     timezone: str = "Asia/Shanghai"
@@ -613,6 +700,8 @@ class Config:
             self._merge_memory(raw["memory"])
         if "acl" in raw and isinstance(raw["acl"], dict):
             self._merge_acl(raw["acl"])
+        if "orchestration" in raw and isinstance(raw["orchestration"], dict):
+            self._merge_orchestration(raw["orchestration"])
         if "privacy" in raw and isinstance(raw["privacy"], dict):
             self._merge_privacy(raw["privacy"])
         tz = raw.get("timezone")
@@ -1065,6 +1154,109 @@ class Config:
                 setattr(self.acl, attr, val)
             else:
                 setattr(self.acl, attr, str(val).strip().lower() in ("1", "true", "yes", "on"))
+
+    def _merge_orchestration(self, block: Dict[str, Any]) -> None:
+        o = self.orchestration
+        str_keys = (
+            ("default_mode", "default_mode"),
+            ("defaultMode", "default_mode"),
+            ("default_execution", "default_execution"),
+            ("defaultExecution", "default_execution"),
+            ("modes", "modes"),
+            ("executions", "executions"),
+            ("metadata_key", "metadata_key"),
+            ("metadataKey", "metadata_key"),
+            ("execution_metadata_key", "execution_metadata_key"),
+            ("executionMetadataKey", "execution_metadata_key"),
+            ("jobs_metadata_key", "jobs_metadata_key"),
+            ("jobsMetadataKey", "jobs_metadata_key"),
+            ("auto_invoke_prompt_field", "auto_invoke_prompt_field"),
+            ("autoInvokePromptField", "auto_invoke_prompt_field"),
+            ("body_invoke_key", "body_invoke_key"),
+            ("bodyInvokeKey", "body_invoke_key"),
+            ("body_auto_run_key", "body_auto_run_key"),
+            ("bodyAutoRunKey", "body_auto_run_key"),
+            ("body_parallel_key", "body_parallel_key"),
+            ("bodyParallelKey", "body_parallel_key"),
+            ("body_execution_key", "body_execution_key"),
+            ("bodyExecutionKey", "body_execution_key"),
+            ("body_orchestration_key", "body_orchestration_key"),
+            ("bodyOrchestrationKey", "body_orchestration_key"),
+            ("async_tokens", "async_tokens"),
+            ("asyncTokens", "async_tokens"),
+            ("cli_auto_run_flag", "cli_auto_run_flag"),
+            ("cliAutoRunFlag", "cli_auto_run_flag"),
+            ("err_async_disabled", "err_async_disabled"),
+            ("errAsyncDisabled", "err_async_disabled"),
+            ("err_parallel_disabled", "err_parallel_disabled"),
+            ("errParallelDisabled", "err_parallel_disabled"),
+            ("err_auto_run_disabled", "err_auto_run_disabled"),
+            ("errAutoRunDisabled", "err_auto_run_disabled"),
+            ("err_invoke_disabled", "err_invoke_disabled"),
+            ("errInvokeDisabled", "err_invoke_disabled"),
+            ("err_delegate_not_allowed", "err_delegate_not_allowed"),
+            ("errDelegateNotAllowed", "err_delegate_not_allowed"),
+            ("err_missing_primary_tool", "err_missing_primary_tool"),
+            ("errMissingPrimaryTool", "err_missing_primary_tool"),
+            ("err_missing_tool", "err_missing_tool"),
+            ("errMissingTool", "err_missing_tool"),
+            ("err_invalid_mode", "err_invalid_mode"),
+            ("errInvalidMode", "err_invalid_mode"),
+            ("err_parallel_branch", "err_parallel_branch"),
+            ("errParallelBranch", "err_parallel_branch"),
+            ("err_prompt_required", "err_prompt_required"),
+            ("errPromptRequired", "err_prompt_required"),
+        )
+        for src, attr in str_keys:
+            val = block.get(src)
+            if val is None or val == "":
+                continue
+            setattr(o, attr, str(val))
+        for src, attr in (
+            ("default_delegatable", "default_delegatable"),
+            ("defaultDelegatable", "default_delegatable"),
+            ("invoke_enabled", "invoke_enabled"),
+            ("invokeEnabled", "invoke_enabled"),
+            ("auto_run_enabled", "auto_run_enabled"),
+            ("autoRunEnabled", "auto_run_enabled"),
+            ("parallel_enabled", "parallel_enabled"),
+            ("parallelEnabled", "parallel_enabled"),
+            ("async_enabled", "async_enabled"),
+            ("asyncEnabled", "async_enabled"),
+            ("delegate_enabled", "delegate_enabled"),
+            ("delegateEnabled", "delegate_enabled"),
+        ):
+            val = block.get(src)
+            if val is None:
+                continue
+            if isinstance(val, bool):
+                setattr(o, attr, val)
+            else:
+                setattr(o, attr, str(val).strip().lower() in ("1", "true", "yes", "on"))
+        for src, attr in (
+            ("parallel_max_branches", "parallel_max_branches"),
+            ("parallelMaxBranches", "parallel_max_branches"),
+            ("async_max_jobs_per_user", "async_max_jobs_per_user"),
+            ("asyncMaxJobsPerUser", "async_max_jobs_per_user"),
+        ):
+            val = block.get(src)
+            if val is None:
+                continue
+            try:
+                setattr(o, attr, int(val))
+            except (TypeError, ValueError):
+                pass
+        for src, attr in (
+            ("parallel_timeout_s", "parallel_timeout_s"),
+            ("parallelTimeoutS", "parallel_timeout_s"),
+        ):
+            val = block.get(src)
+            if val is None:
+                continue
+            try:
+                setattr(o, attr, float(val))
+            except (TypeError, ValueError):
+                pass
 
     def _merge_privacy(self, block: Dict[str, Any]) -> None:
         skip = block.get("skip_unix_ms")
@@ -1804,6 +1996,71 @@ def _apply_env(cfg: Config) -> None:
         val = os.environ.get(env_key)
         if val:
             setattr(cfg.acl, attr, val)
+
+    # orchestration
+    orch = cfg.orchestration
+    orch_json = os.environ.get("SLEUTH_ORCHESTRATION")
+    if orch_json:
+        try:
+            data = json.loads(orch_json)
+            if isinstance(data, dict):
+                cfg._merge_orchestration(data)
+        except json.JSONDecodeError:
+            pass
+    for env_key, attr in (
+        ("SLEUTH_ORCHESTRATION_DEFAULT_MODE", "default_mode"),
+        ("SLEUTH_ORCHESTRATION_DEFAULT_EXECUTION", "default_execution"),
+        ("SLEUTH_ORCHESTRATION_MODES", "modes"),
+        ("SLEUTH_ORCHESTRATION_EXECUTIONS", "executions"),
+        ("SLEUTH_ORCHESTRATION_METADATA_KEY", "metadata_key"),
+        ("SLEUTH_ORCHESTRATION_EXECUTION_METADATA_KEY", "execution_metadata_key"),
+        ("SLEUTH_ORCHESTRATION_JOBS_METADATA_KEY", "jobs_metadata_key"),
+        ("SLEUTH_ORCHESTRATION_AUTO_INVOKE_PROMPT_FIELD", "auto_invoke_prompt_field"),
+        ("SLEUTH_ORCHESTRATION_BODY_INVOKE_KEY", "body_invoke_key"),
+        ("SLEUTH_ORCHESTRATION_BODY_AUTO_RUN_KEY", "body_auto_run_key"),
+        ("SLEUTH_ORCHESTRATION_BODY_PARALLEL_KEY", "body_parallel_key"),
+        ("SLEUTH_ORCHESTRATION_BODY_EXECUTION_KEY", "body_execution_key"),
+        ("SLEUTH_ORCHESTRATION_BODY_ORCHESTRATION_KEY", "body_orchestration_key"),
+        ("SLEUTH_ORCHESTRATION_ASYNC_TOKENS", "async_tokens"),
+        ("SLEUTH_ORCHESTRATION_CLI_AUTO_RUN_FLAG", "cli_auto_run_flag"),
+        ("SLEUTH_ORCHESTRATION_ERR_ASYNC_DISABLED", "err_async_disabled"),
+        ("SLEUTH_ORCHESTRATION_ERR_PARALLEL_DISABLED", "err_parallel_disabled"),
+        ("SLEUTH_ORCHESTRATION_ERR_AUTO_RUN_DISABLED", "err_auto_run_disabled"),
+        ("SLEUTH_ORCHESTRATION_ERR_INVOKE_DISABLED", "err_invoke_disabled"),
+        ("SLEUTH_ORCHESTRATION_ERR_DELEGATE_NOT_ALLOWED", "err_delegate_not_allowed"),
+        ("SLEUTH_ORCHESTRATION_ERR_MISSING_PRIMARY_TOOL", "err_missing_primary_tool"),
+        ("SLEUTH_ORCHESTRATION_ERR_MISSING_TOOL", "err_missing_tool"),
+        ("SLEUTH_ORCHESTRATION_ERR_INVALID_MODE", "err_invalid_mode"),
+        ("SLEUTH_ORCHESTRATION_ERR_PARALLEL_BRANCH", "err_parallel_branch"),
+        ("SLEUTH_ORCHESTRATION_ERR_PROMPT_REQUIRED", "err_prompt_required"),
+    ):
+        val = os.environ.get(env_key)
+        if val is not None and str(val).strip() != "":
+            setattr(orch, attr, str(val).strip())
+    for env_key, attr in (
+        ("SLEUTH_ORCHESTRATION_INVOKE_ENABLED", "invoke_enabled"),
+        ("SLEUTH_ORCHESTRATION_AUTO_RUN_ENABLED", "auto_run_enabled"),
+        ("SLEUTH_ORCHESTRATION_PARALLEL_ENABLED", "parallel_enabled"),
+        ("SLEUTH_ORCHESTRATION_ASYNC_ENABLED", "async_enabled"),
+        ("SLEUTH_ORCHESTRATION_DELEGATE_ENABLED", "delegate_enabled"),
+        ("SLEUTH_ORCHESTRATION_DEFAULT_DELEGATABLE", "default_delegatable"),
+    ):
+        val = _env_bool(env_key)
+        if val is not None:
+            setattr(orch, attr, val)
+    for env_key, attr in (
+        ("SLEUTH_ORCHESTRATION_PARALLEL_MAX_BRANCHES", "parallel_max_branches"),
+        ("SLEUTH_ORCHESTRATION_ASYNC_MAX_JOBS_PER_USER", "async_max_jobs_per_user"),
+    ):
+        val = _env_int(env_key)
+        if val is not None:
+            setattr(orch, attr, val)
+    pto = os.environ.get("SLEUTH_ORCHESTRATION_PARALLEL_TIMEOUT_S")
+    if pto is not None and str(pto).strip() != "":
+        try:
+            orch.parallel_timeout_s = float(pto)
+        except ValueError:
+            pass
 
     # skills
     refresh = _env_int("SLEUTH_SKILLS_REFRESH_SECONDS")

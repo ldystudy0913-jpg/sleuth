@@ -122,6 +122,54 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(body.get("sources"), [])
         self.assertEqual(body.get("files"), [])
 
+    def test_empty_env_uses_sleuth_llm_json(self):
+        captured = {}
+
+        def fake_llm(messages, settings):
+            captured["model"] = settings.llm_model
+            captured["key"] = settings.llm_api_key
+            return _llm_payload()
+
+        body = check_report(
+            _settings(llm_base_url="", llm_api_key="", llm_model=""),
+            report_text="客户张三",
+            sleuth_llm_json=json.dumps(
+                {
+                    "model": "sess-model",
+                    "base_url": "https://sess.example/v1",
+                    "api_key": "sk-sess",
+                }
+            ),
+            llm_fn=fake_llm,
+            emit_fn=lambda settings, **kwargs: {"ok": True, "files": []},
+        )
+        self.assertTrue(body.get("ok"))
+        self.assertEqual(captured.get("model"), "sess-model")
+        self.assertEqual(captured.get("key"), "sk-sess")
+
+    def test_agent_llm_env_wins_over_sleuth_json(self):
+        captured = {}
+
+        def fake_llm(messages, settings):
+            captured["model"] = settings.llm_model
+            return _llm_payload()
+
+        body = check_report(
+            _settings(),
+            report_text="客户张三",
+            sleuth_llm_json=json.dumps(
+                {
+                    "model": "sess-model",
+                    "base_url": "https://sess.example/v1",
+                    "api_key": "sk-sess",
+                }
+            ),
+            llm_fn=fake_llm,
+            emit_fn=lambda settings, **kwargs: {"ok": True, "files": []},
+        )
+        self.assertTrue(body.get("ok"))
+        self.assertEqual(captured.get("model"), "test-model")
+
     def test_check_without_kb_has_findings_and_files(self):
         captured = {}
 

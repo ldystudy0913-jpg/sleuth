@@ -53,6 +53,42 @@ def _inject_attachment_refs(args: dict, ctx: ToolContext, schema: Any) -> dict:
     return out
 
 
+def _session_llm_payload(session: Any) -> Dict[str, str]:
+    provider = getattr(session, "provider", None)
+    model = str(getattr(session, "model_id", "") or "").strip()
+    api_key = str(getattr(provider, "api_key", "") or "").strip() if provider is not None else ""
+    base_url = str(getattr(provider, "base_url", "") or "").strip() if provider is not None else ""
+    if not base_url:
+        base_url = "https://api.openai.com/v1"
+    if not model or not api_key:
+        return {}
+    return {
+        "model": model,
+        "base_url": base_url.rstrip("/"),
+        "api_key": api_key,
+    }
+
+
+def _inject_sleuth_llm_json(args: dict, ctx: ToolContext, schema: Any) -> dict:
+    props = _schema_props(schema)
+    if "sleuth_llm_json" not in props:
+        return args
+    session = ctx.session
+    if session is None:
+        return args
+    payload = _session_llm_payload(session)
+    if not payload:
+        return args
+    out = dict(args or {})
+    out["sleuth_llm_json"] = json.dumps(payload, ensure_ascii=False)
+    return out
+
+
+def _inject_mcp_args(args: dict, ctx: ToolContext, schema: Any) -> dict:
+    forwarded = _inject_attachment_refs(args or {}, ctx, schema)
+    return _inject_sleuth_llm_json(forwarded, ctx, schema)
+
+
 def _parse_json_object(text: str) -> Any:
     raw = (text or "").strip()
     if not raw.startswith("{") and not raw.startswith("["):
@@ -61,6 +97,9 @@ def _parse_json_object(text: str) -> Any:
         return json.loads(raw)
     except json.JSONDecodeError:
         return None
+
+
+_FILE_BODY_KEYS = ("content", "content_base64", "contentBase64")
 
 
 def _harvest_files(text: str, ctx: ToolContext) -> List[Dict[str, Any]]:
@@ -72,13 +111,44 @@ def _harvest_files(text: str, ctx: ToolContext) -> List[Dict[str, Any]]:
         return []
     from ..files.mailbox import harvest_tool_files
 
-    atts = harvest_tool_files(session, payload)
-    https_only: List[Dict[str, Any]] = []
-    for att in atts:
-        url = str(att.get("url") or "")
-        if url.startswith("https://"):
-            https_only.append(att)
-    return https_only
+    return harvest_tool_files(session, payload)
+
+
+def _redact_tool_file_payloads(text: str, harvested: List[Dict[str, Any]]) -> str:
+    payload = _parse_json_object(text)
+    if not isinstance(payload, dict):
+        return text
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return text
+    by_name: Dict[str, List[Dict[str, Any]]] = {}
+    for item in harvested:
+        if not isinstance(item, dict):
+            continue
+        by_name.setdefault(str(item.get("filename") or ""), []).append(item)
+    new_files: List[Any] = []
+    changed = False
+    for entry in files:
+        if not isinstance(entry, dict):
+            new_files.append(entry)
+            continue
+        item = {k: v for k, v in entry.items() if k not in _FILE_BODY_KEYS}
+        if item != entry:
+            changed = True
+        name = str(item.get("filename") or item.get("name") or "")
+        queue = by_name.get(name) or []
+        if queue:
+            hit = queue.pop(0)
+            fid = str(hit.get("id") or "").strip()
+            if fid and item.get("id") != fid:
+                item["id"] = fid
+                changed = True
+        new_files.append(item)
+    if not changed:
+        return text
+    out = dict(payload)
+    out["files"] = new_files
+    return json.dumps(out, ensure_ascii=False)
 
 
 def _harvest_sources(text: str) -> List[Dict[str, Any]]:
@@ -129,11 +199,17 @@ class McpBridgeTool:
             ctx.ask(self.name, ["*"], ["*"])
         except Exception as exc:
             return ToolResult.error(self.name, f"permission denied: {exc}")
-        forwarded = _inject_attachment_refs(args or {}, ctx, self.parameters_json_schema)
+        forwarded = _inject_mcp_args(args or {}, ctx, self.parameters_json_schema)
         text, is_error = self._manager.call_tool(self.name, forwarded)
         if is_error:
             return ToolResult.error(self.name, text, server=self._info.server)
-        attachments = _harvest_files(text, ctx)
+        harvested = _harvest_files(text, ctx)
+        text = _redact_tool_file_payloads(text, harvested)
+        attachments: List[Dict[str, Any]] = []
+        for att in harvested:
+            url = str(att.get("url") or "")
+            if url.startswith("https://"):
+                attachments.append(att)
         sources = _harvest_sources(text)
         extra: Dict[str, Any] = {}
         if sources:
