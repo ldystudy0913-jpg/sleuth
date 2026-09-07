@@ -263,6 +263,13 @@ def build_mcp_server(
 
     _register_http_health(server, settings)
     _install_auth_middleware(server, settings)
+    try:
+        from sleuth.logtrace import ensure_initialized, install_mcp_middleware, is_enabled
+    except ImportError:
+        is_enabled = lambda: False  # type: ignore
+    if is_enabled():
+        ensure_initialized()
+        install_mcp_middleware(server)
 
     @server.tool(
         name="get_agent_card",

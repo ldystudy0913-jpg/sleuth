@@ -120,6 +120,27 @@ class WebFetchTool:
 
 
 def _http_get(url: str, headers: dict, timeout: int) -> tuple[bytes, str]:
+    from ..logtrace import get_tracer, is_enabled
+
+    if is_enabled() and get_tracer() is not None:
+        tracer = get_tracer()
+        try:
+            with tracer.request(method="GET", url=url, headers=headers, timeout=timeout) as resp:
+                data = resp.content if hasattr(resp, "content") else resp.read()
+                if callable(data):
+                    data = data()
+                if not isinstance(data, (bytes, bytearray)):
+                    data = bytes(data)
+                ctype = ""
+                hdrs = getattr(resp, "headers", None)
+                if hdrs is not None:
+                    ctype = hdrs.get("Content-Type") or hdrs.get("content-type") or ""
+                if len(data) > MAX_RESPONSE_SIZE:
+                    raise RuntimeError("Response too large (exceeds 5MB limit)")
+                return bytes(data), ctype
+        except Exception:
+            pass
+
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

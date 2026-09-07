@@ -20,7 +20,10 @@ def create_store(config: Optional["Config"] = None, *, backend: Optional[str] = 
 
     if kind == "mysql":
         from .mysql import MySQLStore
+        from ..logtrace import config_file, mysql_enabled
 
+        use_lt = mysql_enabled(cfg)
+        path = config_file(cfg) if use_lt else None
         password = cfg.storage.mysql_password
         if not password:
             env_name = cfg.storage.mysql_password_env or "SLEUTH_MYSQL_PASSWORD"
@@ -31,6 +34,8 @@ def create_store(config: Optional["Config"] = None, *, backend: Optional[str] = 
             user=cfg.storage.mysql_user,
             password=password,
             database=cfg.storage.mysql_database,
+            use_log_trace=use_lt,
+            config_path=path,
         )
 
     path = cfg.storage.sqlite_path

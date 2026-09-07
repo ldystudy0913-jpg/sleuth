@@ -190,23 +190,34 @@ class SqlDirectory(Directory):
         if self.dialect == "mysql":
             import os
 
-            try:
-                import pymysql
-            except ImportError as exc:
-                raise RuntimeError("PyMySQL is required for MySQL directory access") from exc
-            password = storage.mysql_password
-            if not password:
-                env_name = storage.mysql_password_env or "SLEUTH_MYSQL_PASSWORD"
-                password = os.environ.get(env_name) or os.environ.get("SLEUTH_MYSQL_PASSWORD") or ""
-            conn = pymysql.connect(
-                host=storage.mysql_host,
-                port=int(storage.mysql_port),
-                user=storage.mysql_user,
-                password=password,
-                database=storage.mysql_database,
-                charset="utf8mb4",
-                autocommit=False,
-            )
+            from ..logtrace import config_file, mysql_enabled
+
+            if mysql_enabled(self.config):
+                from log_trace.mysql_log_trace import DictCursor, MySql
+
+                conn = MySql(
+                    config_path=config_file(self.config),
+                    autocommit=False,
+                    cursorclass=DictCursor,
+                )
+            else:
+                try:
+                    import pymysql
+                except ImportError as exc:
+                    raise RuntimeError("PyMySQL is required for MySQL directory access") from exc
+                password = storage.mysql_password
+                if not password:
+                    env_name = storage.mysql_password_env or "SLEUTH_MYSQL_PASSWORD"
+                    password = os.environ.get(env_name) or os.environ.get("SLEUTH_MYSQL_PASSWORD") or ""
+                conn = pymysql.connect(
+                    host=storage.mysql_host,
+                    port=int(storage.mysql_port),
+                    user=storage.mysql_user,
+                    password=password,
+                    database=storage.mysql_database,
+                    charset="utf8mb4",
+                    autocommit=False,
+                )
         else:
             path = storage.sqlite_path or str(default_db_path())
             conn = sqlite3.connect(path)

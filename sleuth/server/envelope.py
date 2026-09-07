@@ -9,6 +9,19 @@ from ..bizerror import APPError, BizErrorCode, ok_payload
 def json_ok(data: Any = None, status: int = 200):
     from starlette.responses import JSONResponse
 
+    from ..logtrace import envelope_uses_content, return_code_headers
+
+    if envelope_uses_content():
+        body = {
+            "code": BizErrorCode.SUC0000.code,
+            "msg": BizErrorCode.SUC0000.error_message,
+            "content": data,
+        }
+        return JSONResponse(
+            body,
+            status_code=status,
+            headers=return_code_headers("SUC0000"),
+        )
     return JSONResponse(ok_payload(data), status_code=status)
 
 

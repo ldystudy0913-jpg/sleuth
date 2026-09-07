@@ -193,7 +193,7 @@ class StreamingRenderer:
             yield event
 
 
-def run_prompt_in_thread(sess: Any, prompt: str, renderer: StreamingRenderer) -> threading.Thread:
+def run_prompt_in_thread(sess: Any, prompt: str, renderer: StreamingRenderer) -> Optional[threading.Thread]:
     """Start sess.prompt in a daemon thread; always close the renderer afterward."""
 
     def _target() -> None:
@@ -208,6 +208,19 @@ def run_prompt_in_thread(sess: Any, prompt: str, renderer: StreamingRenderer) ->
                 pass
         finally:
             renderer.close()
+
+    try:
+        from ..logtrace import get_tracer, is_enabled
+
+        if is_enabled() and get_tracer() is not None:
+            from log_trace import ContextThreadPoolExecutor
+
+            pool = ContextThreadPoolExecutor(max_workers=1)
+            renderer._log_trace_pool = pool  # keep pool alive for the stream
+            pool.submit(_target)
+            return None
+    except Exception:
+        pass
 
     t = threading.Thread(target=_target, name="sleuth-sse-prompt", daemon=True)
     t.start()

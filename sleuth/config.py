@@ -218,6 +218,17 @@ class ServerConfig:
 
 
 @dataclass
+class LogTraceConfig:
+    """Sleuth switch for intranet log_trace. Identity/jdbc live in the official toml."""
+
+    enabled: bool = False
+    config_file: str = ""
+    async_mode: bool = True
+    verbose: bool = False
+    ignore_paths: List[str] = field(default_factory=lambda: ["/health"])
+
+
+@dataclass
 class CosConfig:
     """Tencent COS / S3-compatible mailbox. All values come from env / JSONC."""
 
@@ -535,6 +546,7 @@ class Config:
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    log_trace: LogTraceConfig = field(default_factory=LogTraceConfig)
     cos: CosConfig = field(default_factory=CosConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
     kb: KbConfig = field(default_factory=KbConfig)
@@ -705,6 +717,8 @@ class Config:
             self._merge_storage(raw["storage"])
         if "server" in raw and isinstance(raw["server"], dict):
             self._merge_server(raw["server"])
+        if "log_trace" in raw and isinstance(raw["log_trace"], dict):
+            self._merge_log_trace(raw["log_trace"])
         if "cos" in raw and isinstance(raw["cos"], dict):
             self._merge_cos(raw["cos"])
         if "files" in raw and isinstance(raw["files"], dict):
@@ -748,6 +762,24 @@ class Config:
                 self.storage.mysql_database = str(mysql["database"])
             if mysql.get("password_env"):
                 self.storage.mysql_password_env = str(mysql["password_env"])
+
+    def _merge_log_trace(self, block: Dict[str, Any]) -> None:
+        if "enabled" in block and block["enabled"] is not None:
+            self.log_trace.enabled = bool(block["enabled"])
+        path = block.get("config_file") or block.get("configFile")
+        if path is not None:
+            self.log_trace.config_file = str(path).strip()
+        if "async_mode" in block and block["async_mode"] is not None:
+            self.log_trace.async_mode = bool(block["async_mode"])
+        if "asyncMode" in block and block["asyncMode"] is not None:
+            self.log_trace.async_mode = bool(block["asyncMode"])
+        if "verbose" in block and block["verbose"] is not None:
+            self.log_trace.verbose = bool(block["verbose"])
+        raw_paths = block.get("ignore_paths") or block.get("ignorePaths")
+        if isinstance(raw_paths, list):
+            self.log_trace.ignore_paths = [str(p).strip() for p in raw_paths if str(p).strip()] or ["/health"]
+        elif isinstance(raw_paths, str) and raw_paths.strip():
+            self.log_trace.ignore_paths = [p.strip() for p in raw_paths.split(",") if p.strip()] or ["/health"]
 
     def _merge_server(self, block: Dict[str, Any]) -> None:
         if block.get("host"):
@@ -1829,6 +1861,24 @@ def _apply_env(cfg: Config) -> None:
         cfg.server.admin_token = os.environ.get("SLEUTH_SERVER_ADMIN_TOKEN") or ""
     if os.environ.get("SLEUTH_SERVER_DEFAULT_BACKEND"):
         cfg.server.default_backend = os.environ["SLEUTH_SERVER_DEFAULT_BACKEND"]
+
+    # log_trace (official toml path + switch only; CMB ids / jdbc stay in that file)
+    lt_on = _env_bool("SLEUTH_LOG_TRACE")
+    if lt_on is None:
+        lt_on = _env_bool("SLEUTH_LOG_TRACE_ENABLED")
+    if lt_on is not None:
+        cfg.log_trace.enabled = lt_on
+    if os.environ.get("SLEUTH_LOG_TRACE_CONFIG"):
+        cfg.log_trace.config_file = os.environ["SLEUTH_LOG_TRACE_CONFIG"].strip()
+    lt_async = _env_bool("SLEUTH_LOG_TRACE_ASYNC")
+    if lt_async is not None:
+        cfg.log_trace.async_mode = lt_async
+    lt_verbose = _env_bool("SLEUTH_LOG_TRACE_VERBOSE")
+    if lt_verbose is not None:
+        cfg.log_trace.verbose = lt_verbose
+    ignore = _env_csv("SLEUTH_LOG_TRACE_IGNORE_PATHS")
+    if ignore:
+        cfg.log_trace.ignore_paths = ignore
 
     # session files (mailbox-only knobs; COS identity is the shared AWS / Skills S3 set)
     for env_key, attr in (

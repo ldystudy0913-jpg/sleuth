@@ -91,9 +91,14 @@ class ExtractScheduler:
                 return ev
             ev = threading.Event()
             self._inflight[key] = ev
+        def _target() -> None:
+            from ..logtrace import trace_span
+
+            with trace_span(host="sleuth", api="JOB:/extract"):
+                self._run(config, store, session_id, file_id, object_store, ev, key)
+
         thread = threading.Thread(
-            target=self._run,
-            args=(config, store, session_id, file_id, object_store, ev, key),
+            target=_target,
             daemon=True,
             name=f"sleuth-extract-{file_id[:16]}",
         )

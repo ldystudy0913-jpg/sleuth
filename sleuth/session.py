@@ -72,7 +72,14 @@ class NullRenderer:
     def on_tool_result(self, name: str, result: ToolResult, **kwargs) -> None: pass
     def on_step(self, step: int, max_steps: int, **kwargs) -> None: pass
     def on_stop(self, reason: str, usage: dict, **kwargs) -> None: pass
-    def on_error(self, message: str) -> None: print(message, file=sys.stderr)
+    def on_error(self, message: str) -> None:
+        print(message, file=sys.stderr)
+        try:
+            from .logtrace import trace_log
+
+            trace_log(message, "ERROR")
+        except Exception:
+            pass
     def on_retry(self, attempt: int, message: str, wait: float) -> None: pass
     def on_ack(self, **kwargs) -> None: pass
     def on_progress(self, **kwargs) -> None: pass

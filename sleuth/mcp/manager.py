@@ -262,6 +262,13 @@ class McpManager:
             return f"mcp server not connected: {info.server}", True
         if not self._loop:
             return "mcp event loop not running", True
+        try:
+            from ..logtrace import is_enabled, trace_log
+
+            if is_enabled():
+                trace_log(f"mcp call_tool {qualified_name}", "INFO")
+        except Exception:
+            pass
         request_ms = int(
             self.config.mcp_servers.get(info.server, McpServerConfig(info.server)).timeout.get(
                 "request",

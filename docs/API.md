@@ -23,6 +23,7 @@ py -3.12 -m sleuth.server
 | `SLEUTH_SERVER_ADMIN_TOKEN` | 空 | 管理接口口令；**为空则不做 admin 校验** |
 | `SLEUTH_SERVER_DEFAULT_BACKEND` | `sqlite` | 服务端默认存储 |
 | `SLEUTH_TIMEZONE` | `Asia/Shanghai` | 列表里 `time_updated_local` 的时区 |
+| `SLEUTH_LOG_TRACE` | 关 | 设为 `1` 启用行内 log_trace；需安装 intranet 包，配置见 `log_trace.toml.example` |
 
 ---
 
@@ -80,6 +81,8 @@ X-Admin-Token: <与 SLEUTH_SERVER_ADMIN_TOKEN 相同>
 | `404` | 会话不存在，或不属于当前用户 |
 | `413` | 上传文件过大或会话文件数超限 |
 | `503` | 未配置 COS（会话文件邮箱不可用），或长期记忆未就绪（OpenGauss 驱动/表；见 `detail`） |
+
+当 **`SLEUTH_LOG_TRACE=1`**（行内 log_trace）时：业务失败改为 **HTTP 200** + `{code, msg, content}`（官方 `APPError`），成功信封字段为 **`content`** 而非 `data`，并带 `x-b3-returnCode`。未开开关时行为仍是上表状态码 + `data`。身份配置用官方 toml（`log_trace.toml.example`），不要把 jdbc 写进 sleuth.jsonc。
 
 ### 2.4 重要限制（对接必读）
 

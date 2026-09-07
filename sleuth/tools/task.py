@@ -155,7 +155,7 @@ class TaskTool:
             )
 
         try:
-            from .memory.acl import attach_identity
+            from ..memory.acl import attach_identity
 
             attach_identity(child)
         except Exception:

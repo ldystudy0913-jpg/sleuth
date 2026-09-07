@@ -9,6 +9,7 @@ from ..app import build_session, reload_mcp, reload_skills
 from ..bizerror import APPError, BizErrorCode
 from ..catalog import agents_payload, mcp_status_dict, models_payload, skills_payload
 from ..config import load
+from ..logtrace import attach_starlette, ensure_initialized, is_enabled, return_code_headers
 from ..session import NullRenderer
 from ..session_select import apply_session_selectors, skill_from_metadata, skills_from_metadata
 from ..trace import message_timing_fields, project_session_trace
@@ -124,6 +125,7 @@ def create_app(workdir: Optional[Path] = None):
     workdir = workdir or Path.cwd()
     load_dotenv(workdir)
     config = load(workdir)
+    ensure_initialized(config, workdir=workdir)
     if not os.environ.get("SLEUTH_STORAGE_BACKEND") and config.server.default_backend:
         config.storage.backend = config.server.default_backend
     store = create_store(config)
@@ -478,6 +480,7 @@ def create_app(workdir: Optional[Path] = None):
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
+                **return_code_headers("SUC0000"),
             },
         )
 
@@ -721,7 +724,10 @@ def create_app(workdir: Optional[Path] = None):
         Route("/v1/directory/grants", directory_list_grants, methods=["GET"]),
         Route("/v1/directory/grants", directory_put_grant, methods=["PUT"]),
     ]
-    return Starlette(routes=routes, exception_handlers={APPError: app_error_handler})
+    handlers = {} if is_enabled(config) else {APPError: app_error_handler}
+    app = Starlette(routes=routes, exception_handlers=handlers)
+    attach_starlette(app, config)
+    return app
 
 
 def main(argv=None) -> int:

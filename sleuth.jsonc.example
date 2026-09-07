@@ -85,6 +85,8 @@
     "unix_ms_min": 946684800000,
     "unix_ms_max": 4102444800000
   }
+  // log_trace: switch + path only. CMB ids / jdbc stay in the official toml (see log_trace.toml.example).
+  // "log_trace": { "enabled": false, "config_file": "log_trace.toml", "async_mode": true, "verbose": false, "ignore_paths": ["/health"] }
   // files / kb / OpenGauss DSN via .env
   // Dedicated agents auto-inject skills listed on the Agent Card (or agent.skills in this file).
   // Example: "agent": { "dd_reply": { "skills": ["kyc-shared"] } }

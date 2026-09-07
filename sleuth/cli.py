@@ -353,16 +353,22 @@ def main(argv=None) -> int:
 
     # Load .env from cwd (does not overwrite already-exported env vars).
     from pathlib import Path
+
+    from .config import load
+    from .logtrace import ensure_initialized, is_enabled, trace_span
     from .util.env import load_dotenv
     load_dotenv(Path.cwd())
+    ensure_initialized(load(Path.cwd()), workdir=Path.cwd())
 
     if getattr(args, "refresh_skills", False):
         from .app import reload_skills
-        from .config import load
         reload_skills(load(Path.cwd()), Path.cwd())
 
     session = _build_session(args)
     try:
+        if is_enabled():
+            with trace_span(host="sleuth", api="CLI:/session"):
+                return _run_session(args, session)
         return _run_session(args, session)
     finally:
         try:

@@ -63,6 +63,25 @@ def _post_json(
     opener=None,
 ) -> Tuple[int, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    try:
+        from sleuth.logtrace import is_enabled, traced_httpx
+    except ImportError:
+        traced_httpx = None  # type: ignore
+        is_enabled = lambda: False  # type: ignore
+    if is_enabled() and traced_httpx is not None:
+        httpx = traced_httpx()
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.post(url, content=data, headers=headers)
+                raw = resp.content
+                status = int(resp.status_code)
+        except Exception as exc:
+            raise KbError(f"KB request failed: {exc}") from exc
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise KbError("KB response is not JSON") from exc
+        return status, parsed
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         if opener is not None:

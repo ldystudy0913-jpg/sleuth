@@ -1,0 +1,14 @@
+# Official cmb log_trace config (passed to LogTrace / MySql as config_path).
+# Copy to log_trace.toml and fill in intranet values. Do not put secrets in git.
+# Sleuth only needs SLEUTH_LOG_TRACE=1 and SLEUTH_LOG_TRACE_CONFIG=log_trace.toml
+
+[LOG_CFG]
+CMB_BUSINESSID = "YOUR_BUSINESS_ID"
+CMB_CAAS_DEPLOYUNITID = "YOUR_DEPLOY_UNIT_ID"
+CMB_CAAS_SERVICEUNITID = "YOUR_SERVICE_UNIT_ID"
+
+[MYSQL_CFG]
+jdbc_url = "jdbc:mysql://127.0.0.1:3306/sleuth?characterEncoding=UTF-8&useUnicode=true&useSSL=false"
+db_user = "sleuth"
+db_password = "CHANGE_ME"
+db_service_unit_id = "YOUR_MYSQL_SERVICE_UNIT_ID"
