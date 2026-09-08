@@ -103,6 +103,15 @@ class BizErrorCode(Enum):
             return f"{tmpl}: {args[0]}"
 
 
+def _envelope_uses_content() -> bool:
+    try:
+        from .logtrace import envelope_uses_content
+
+        return bool(envelope_uses_content())
+    except Exception:
+        return False
+
+
 class APPError(Exception):
     """Domain / HTTP failure carrying a BizErrorCode."""
 
@@ -135,10 +144,18 @@ class APPError(Exception):
         )
 
     def envelope(self) -> dict:
+        if _envelope_uses_content():
+            return {"code": self.code, "msg": self.msg, "content": self.data}
         return ResponseModel(code=self.code, msg=self.msg, data=self.data).model_dump()
 
 
 def ok_payload(data: Any = None) -> dict:
+    if _envelope_uses_content():
+        return {
+            "code": BizErrorCode.SUC0000.code,
+            "msg": BizErrorCode.SUC0000.error_message,
+            "content": data,
+        }
     return ResponseModel(
         code=BizErrorCode.SUC0000.code,
         msg=BizErrorCode.SUC0000.error_message,
@@ -147,6 +164,12 @@ def ok_payload(data: Any = None) -> dict:
 
 
 def fail_payload(item: BizErrorCode, *args, data: Any = None) -> dict:
+    if _envelope_uses_content():
+        return {
+            "code": item.code,
+            "msg": item.format_message(*args),
+            "content": data,
+        }
     return ResponseModel(
         code=item.code,
         msg=item.format_message(*args),

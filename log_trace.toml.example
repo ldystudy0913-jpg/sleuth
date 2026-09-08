@@ -1,14 +1,17 @@
-# Official cmb log_trace config (passed to LogTrace / MySql as config_path).
-# Copy to log_trace.toml and fill in intranet values. Do not put secrets in git.
-# Sleuth only needs SLEUTH_LOG_TRACE=1 and SLEUTH_LOG_TRACE_CONFIG=log_trace.toml
+# Official cmb log_trace config for FastapiLogTrace(config_path).
+# Copy to log_trace.toml. Sleuth: SLEUTH_LOG_TRACE=1 and SLEUTH_LOG_TRACE_CONFIG=log_trace.toml
+# LOG_CFG keys match LogTrace file mode: business_id, deploy_unit_id, service_unit_id (optional log_level).
+# MYSQL_CFG is read by MySql(tracer): jdbc_url, db_user, db_password, db_service_unit_id.
+# jdbc_url database name is the URL path (host:port/<dbname>?...). ENC_ passwords are decrypted by log_trace.
+# Do not put this file's secrets in git. Do not copy jdbc/passwords into sleuth.jsonc.
 
 [LOG_CFG]
-CMB_BUSINESSID = "YOUR_BUSINESS_ID"
-CMB_CAAS_DEPLOYUNITID = "YOUR_DEPLOY_UNIT_ID"
-CMB_CAAS_SERVICEUNITID = "YOUR_SERVICE_UNIT_ID"
+business_id = "LF5505AISLEUTHAGENT"
+deploy_unit_id = "LF55.05_AML_SLEUTH_AGENT_SERVICE"
+service_unit_id = "LF55.05@AML_SLEUTH_AGENT_SERVICE_DEV_DEV"
 
 [MYSQL_CFG]
-jdbc_url = "jdbc:mysql://127.0.0.1:3306/sleuth?characterEncoding=UTF-8&useUnicode=true&useSSL=false"
-db_user = "sleuth"
-db_password = "CHANGE_ME"
-db_service_unit_id = "YOUR_MYSQL_SERVICE_UNIT_ID"
+jdbc_url = "jdbc:tdsql-mysql://amltdsqldev.tdsql.dbdns.cmbchina.cn:6666?passwordCharacterEncoding=latin1&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useUnicode=true&useSSL=false&connectTimeout=10000&socketTimeout=600000&tdsqlSendClientInfoEnable=true"
+db_user = "app1"
+db_password = "ENC_TGRzwRETdxrRySmBZPxJiQ=="
+db_service_unit_id = "LF55.05@amltdsqldev_TDSQL_DEV_DEV"

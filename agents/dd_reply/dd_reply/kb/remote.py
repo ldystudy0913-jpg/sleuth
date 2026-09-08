@@ -29,6 +29,31 @@ _cached_token_key: str = ""
 _token_lock = threading.Lock()
 
 
+def _with_trace_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    try:
+        from sleuth.logtrace import is_enabled, outbound_headers
+
+        if is_enabled():
+            return outbound_headers(headers)
+    except Exception:
+        pass
+    return headers
+
+
+def _record_http(method: str, url: str, headers: Dict[str, str], start: float, code: str) -> None:
+    try:
+        from sleuth.logtrace import record_outbound_http
+
+        record_outbound_http(method, url, headers, start, code)
+    except Exception:
+        pass
+
+_cached_rag_token: Optional[str] = None
+_cached_expire_ms: int = 0
+_cached_token_key: str = ""
+_token_lock = threading.Lock()
+
+
 class KbApiError(RuntimeError):
     """Remote KB HTTP / protocol failure."""
 
@@ -74,10 +99,19 @@ def _fetch_kb_token(settings: Settings, http: httpx.Client) -> Tuple[str, int]:
         "openId": settings.kb_login_openid,
         "serviceId": settings.kb_login_service_id,
     }
+    headers = _with_trace_headers({
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    })
+    start = time.time()
+    code = "SUC0000"
     try:
-        resp = http.post(settings.kb_login_url, json=payload)
+        resp = http.post(settings.kb_login_url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
+        code = "ERROR"
         raise KbApiError(f"KB login failed: {exc}") from exc
+    finally:
+        _record_http("POST", settings.kb_login_url, headers, start, code)
     if resp.status_code >= 400:
         raise KbApiError(
             f"KB login HTTP {resp.status_code}: {(resp.text or '')[:500]}"
@@ -254,11 +288,16 @@ def search_knowledge(
     owns_client = client is None
     http = client or httpx.Client(timeout=timeout)
     try:
-        headers = _auth_headers(settings, http)
+        headers = _with_trace_headers(_auth_headers(settings, http))
+        start = time.time()
+        code = "SUC0000"
         try:
             resp = http.post(settings.kb_api_url, headers=headers, json=body)
         except httpx.HTTPError as exc:
+            code = "ERROR"
             raise KbApiError(f"KB request failed: {exc}") from exc
+        finally:
+            _record_http("POST", settings.kb_api_url, headers, start, code)
         if resp.status_code >= 400:
             raise KbApiError(
                 f"KB HTTP {resp.status_code}: {(resp.text or '')[:500]}"

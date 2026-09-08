@@ -190,16 +190,12 @@ class SqlDirectory(Directory):
         if self.dialect == "mysql":
             import os
 
-            from ..logtrace import config_file, mysql_enabled
+            from ..logtrace import get_tracer, mysql_enabled
 
             if mysql_enabled(self.config):
-                from log_trace.mysql_log_trace import DictCursor, MySql
+                from log_trace.mysql_log_trace import MySql
 
-                conn = MySql(
-                    config_path=config_file(self.config),
-                    autocommit=False,
-                    cursorclass=DictCursor,
-                )
+                conn = MySql(get_tracer(), autocommit=False)
             else:
                 try:
                     import pymysql
@@ -249,10 +245,11 @@ class SqlDirectory(Directory):
             row = cur.fetchone()
             return bool(row and int(row[0]) >= 4)
         cur = conn.cursor()
+        schema = getattr(conn, "db_schema", None) or self.config.storage.mysql_database
         cur.execute(
             "SELECT COUNT(*) FROM information_schema.tables "
             "WHERE table_schema = %s AND table_name IN (%s,%s,%s,%s)",
-            (self.config.storage.mysql_database, *names),
+            (schema, *names),
         )
         row = cur.fetchone()
         return bool(row and int(row[0]) >= 4)

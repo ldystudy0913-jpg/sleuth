@@ -101,17 +101,14 @@ class MySQLStore(Store):
         password: str = "",
         database: str = "sleuth",
         use_log_trace: bool = False,
-        config_path: Optional[str] = None,
     ):
         self._use_log_trace = bool(use_log_trace)
-        self._config_path = config_path
         if self._use_log_trace:
             from log_trace.mysql_log_trace import DictCursor, MySql
 
             self._MySql = MySql
             self._dict_cursor = DictCursor
             self._pymysql = None
-            self._kwargs = dict(autocommit=True, cursorclass=DictCursor)
             from ..logtrace import trace_span
 
             with trace_span(host="sleuth", api="JOB:/mysql_init"):
@@ -138,12 +135,24 @@ class MySQLStore(Store):
 
     def _conn(self):
         if self._use_log_trace:
-            return self._MySql(config_path=self._config_path, **self._kwargs)
+            from ..logtrace import get_tracer
+
+            return self._MySql(
+                get_tracer(),
+                autocommit=True,
+                cursorclass=self._dict_cursor,
+            )
         return self._pymysql.connect(**self._kwargs)
 
     def _init(self) -> None:
         with self._conn() as c:
-            with c.cursor() as cur:
+            if self._use_log_trace:
+                import pymysql
+
+                cursor = c.cursor(pymysql.cursors.Cursor)
+            else:
+                cursor = c.cursor()
+            with cursor as cur:
                 for stmt in _SCHEMA:
                     cur.execute(stmt)
 

@@ -15,11 +15,12 @@ from sleuth.logtrace import (
     ensure_initialized,
     envelope_uses_content,
     is_enabled,
+    outbound_headers,
     reset_for_tests,
     return_code_headers,
     trace_span,
 )
-from sleuth.server.envelope import json_ok
+from sleuth.server.envelope import json_app, json_ok
 from sleuth.server.streaming import run_prompt_in_thread
 
 
@@ -94,6 +95,7 @@ class _FakeTracer:
         self.inits = []
         self.traces = []
         self.logs = []
+        self.headers_out = []
         self._tid = None
 
     def init_context(self, headers, host, api):
@@ -102,6 +104,15 @@ class _FakeTracer:
 
     def _get_current_trace_id(self):
         return self._tid
+
+    def get_next_headers(self):
+        hdrs = {
+            "x-b3-spanId": "span1",
+            "x-b3-timestamp": "1",
+            "x-b3-traceId": "trace1",
+        }
+        self.headers_out.append(hdrs)
+        return hdrs
 
     def trace(self, code, extra_tags=None):
         self.traces.append(code)
@@ -120,8 +131,9 @@ class _FakeTraceAppError(Exception):
 
 
 class _FakeFastapiMw:
-    def __init__(self, app, ignore_path=None):
+    def __init__(self, app, tracer=None, ignore_path=None, **kwargs):
         self.app = app
+        self.tracer = tracer
         self.ignore_path = ignore_path or []
 
     def add_exception_handler(self, *args, **kwargs):
@@ -148,18 +160,18 @@ def _install_fake_log_trace(tracer=None):
     tracer = tracer or _FakeTracer()
     pkg = types.ModuleType("log_trace")
     pkg.APPError = _FakeTraceAppError
-    pkg.get_tracer = lambda: tracer
     pkg.ContextThreadPoolExecutor = _FakePool
     fastapi_mod = types.ModuleType("log_trace.fastapi_log_trace")
 
     class FastapiLogTrace:
-        def __init__(self, *args, **kwargs):
-            pass
+        def __new__(cls, *args, **kwargs):
+            return tracer
 
     fastapi_mod.FastapiLogTrace = FastapiLogTrace
     fastapi_mod.FastapiLogTraceMiddleware = _FakeFastapiMw
     http_mod = types.ModuleType("log_trace.http_client")
     http_mod.httpx = types.SimpleNamespace(Client=object, AsyncClient=object)
+    http_mod.add_http_callstack = lambda *a, **k: None
     sys.modules["log_trace"] = pkg
     sys.modules["log_trace.fastapi_log_trace"] = fastapi_mod
     sys.modules["log_trace.http_client"] = http_mod
@@ -199,6 +211,32 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(body["content"], {"ok": True})
         self.assertNotIn("data", body)
         self.assertEqual(resp.headers.get("x-b3-returnCode"), "SUC0000")
+
+    def test_app_error_envelope_uses_content(self):
+        from sleuth.bizerror import APPError, BizErrorCode
+
+        err = APPError.of(BizErrorCode.SESSION_NOT_FOUND, "s1", status=404)
+        env = err.envelope()
+        self.assertEqual(env["code"], "AMLS001")
+        self.assertIn("content", env)
+        self.assertNotIn("data", env)
+        resp = json_app(err)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("x-b3-returnCode"), "AMLS001")
+
+    def test_outbound_headers_merges_b3(self):
+        merged = outbound_headers({"Accept": "application/json"})
+        self.assertEqual(merged["Accept"], "application/json")
+        self.assertEqual(merged["x-b3-spanId"], "span1")
+        self.assertTrue(self.tracer.headers_out)
+
+    def test_mcp_headers_inject(self):
+        from sleuth.mcp.manager import McpManager
+
+        mgr = McpManager(Config())
+        hdrs = mgr._mcp_headers({"X-Custom": "1"})
+        self.assertEqual(hdrs["X-Custom"], "1")
+        self.assertEqual(hdrs["x-b3-spanId"], "span1")
 
     def test_return_code_headers(self):
         self.assertEqual(return_code_headers("SUC0000")["x-b3-returnCode"], "SUC0000")
@@ -294,6 +332,7 @@ class AttachStarletteTests(unittest.TestCase):
         self.assertIn(_FakeFastapiMw, kinds)
         fastapi_kw = [k for c, k in app.added if c is _FakeFastapiMw][0]
         self.assertEqual(fastapi_kw.get("ignore_path"), ["/health"])
+        self.assertIsNotNone(fastapi_kw.get("tracer"))
 
 
 class ConfigFileTests(unittest.TestCase):

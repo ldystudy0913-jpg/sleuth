@@ -157,7 +157,6 @@ def ensure_initialized(config: Any = None, *, workdir: Optional[Path] = None) ->
         return
     try:
         from log_trace.fastapi_log_trace import FastapiLogTrace
-        from log_trace import get_tracer as lib_get_tracer
     except ImportError as exc:
         raise RuntimeError(
             "SLEUTH_LOG_TRACE=1 requires the intranet log_trace package "
@@ -169,7 +168,7 @@ def ensure_initialized(config: Any = None, *, workdir: Optional[Path] = None) ->
         raise RuntimeError(f"SLEUTH_LOG_TRACE_CONFIG file not found: {path}")
     if not path and not _has_cmb_env():
         raise RuntimeError(
-            "SLEUTH_LOG_TRACE=1 needs SLEUTH_LOG_TRACE_CONFIG (toml like eg_config.toml) "
+            "SLEUTH_LOG_TRACE=1 needs SLEUTH_LOG_TRACE_CONFIG (toml like log_trace.toml.example) "
             "or CMB_BUSINESSID / CMB_CAAS_DEPLOYUNITID / CMB_CAAS_SERVICEUNITID"
         )
 
@@ -179,19 +178,6 @@ def ensure_initialized(config: Any = None, *, workdir: Optional[Path] = None) ->
         _tracer = FastapiLogTrace(path, verbose=verbose, async_mode=async_mode)
     else:
         _tracer = FastapiLogTrace(verbose=verbose, async_mode=async_mode)
-
-    lib_tracer = None
-    try:
-        lib_tracer = lib_get_tracer()
-    except Exception:
-        lib_tracer = None
-    if lib_tracer is not None:
-        _tracer = lib_tracer
-
-    try:
-        import log_trace.http_client  # noqa: F401 — patches httpx.Client.send
-    except Exception:
-        pass
 
     _install_log_handler()
     _ready = True
@@ -274,9 +260,11 @@ def attach_starlette(app: Any, config: Any = None) -> Any:
     ensure_initialized(config)
     from log_trace.fastapi_log_trace import FastapiLogTraceMiddleware
 
+    tracer = get_tracer()
     app.add_middleware(ConvertSleuthAppErrorMiddleware)
     app.add_middleware(
         FastapiLogTraceMiddleware,
+        tracer=tracer,
         ignore_path=ignore_paths(config),
     )
     return app
@@ -303,15 +291,42 @@ def install_mcp_middleware(server: Any, config: Any = None) -> None:
     server.streamable_http_app = wrapped  # type: ignore[method-assign]
 
 
-def traced_httpx():
-    """Return log_trace.http_client.httpx when initialized, else stdlib httpx."""
-    if _ready:
-        try:
-            from log_trace.http_client import httpx as traced
+def outbound_headers(headers: Optional[dict] = None) -> dict:
+    """Merge official get_next_headers into a header dict. No-op when disabled."""
+    out = dict(headers or {})
+    tracer = _tracer
+    getter = getattr(tracer, "get_next_headers", None) if tracer is not None else None
+    if not callable(getter):
+        return out
+    try:
+        extra = getter() or {}
+    except Exception:
+        return out
+    out.update(extra)
+    return out
 
-            return traced
-        except Exception:
-            pass
+
+def record_outbound_http(
+    method: str,
+    url: str,
+    headers: Optional[dict],
+    start_time: float,
+    code: str = "SUC0000",
+) -> None:
+    """Record one HTTP callstack entry when the request carried b3 headers."""
+    tracer = _tracer
+    if tracer is None or not headers or "x-b3-spanId" not in headers:
+        return
+    try:
+        from log_trace.http_client import add_http_callstack
+
+        add_http_callstack(tracer, method, url, headers, start_time, code)
+    except Exception:
+        pass
+
+
+def traced_httpx():
+    """Stdlib httpx. Official log_trace no longer patches Client.send; use tracer.request."""
     import httpx
 
     return httpx

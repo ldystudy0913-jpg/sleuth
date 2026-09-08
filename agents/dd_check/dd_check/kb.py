@@ -64,15 +64,16 @@ def _post_json(
 ) -> Tuple[int, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
-        from sleuth.logtrace import is_enabled, traced_httpx
+        from sleuth.logtrace import get_tracer, is_enabled
     except ImportError:
-        traced_httpx = None  # type: ignore
         is_enabled = lambda: False  # type: ignore
-    if is_enabled() and traced_httpx is not None:
-        httpx = traced_httpx()
+        get_tracer = lambda: None  # type: ignore
+    if is_enabled() and get_tracer() is not None:
+        tracer = get_tracer()
         try:
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.post(url, content=data, headers=headers)
+            with tracer.request(
+                method="POST", url=url, content=data, headers=headers, timeout=timeout
+            ) as resp:
                 raw = resp.content
                 status = int(resp.status_code)
         except Exception as exc:

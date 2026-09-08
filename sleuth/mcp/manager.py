@@ -15,6 +15,7 @@ import concurrent.futures
 import json
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -502,6 +503,25 @@ class McpManager:
             f"could not connect to {url}: {_exc_message(last_err) if last_err else 'unknown'}"
         )
 
+    def _mcp_headers(self, base: Optional[dict] = None) -> dict:
+        headers = dict(base or {})
+        try:
+            from ..logtrace import is_enabled, outbound_headers
+
+            if is_enabled():
+                return outbound_headers(headers)
+        except Exception:
+            pass
+        return headers
+
+    def _record_mcp_http(self, method: str, url: str, headers: dict, start: float, code: str) -> None:
+        try:
+            from ..logtrace import record_outbound_http
+
+            record_outbound_http(method, url, headers, start, code)
+        except Exception:
+            pass
+
     async def _hold_streamable(
         self,
         srv: McpServerConfig,
@@ -510,36 +530,58 @@ class McpManager:
         stop: asyncio.Event,
     ) -> None:
         url = srv.url
-        headers = dict(srv.headers)
+        headers = self._mcp_headers(dict(srv.headers))
+        start = time.time()
+        recorded = False
         try:
-            cm = streamable_client(url, headers=headers or None)
-        except TypeError:
-            cm = None
-        if cm is not None:
-            async with cm as streams:
-                await self._hold_session(srv, streams, ready, stop)
-            return
-
-        from mcp.shared._httpx_utils import create_mcp_http_client
-
-        http_client = create_mcp_http_client(headers=headers or None)
-        await http_client.__aenter__()
-        try:
-            async with streamable_client(url, http_client=http_client) as streams:
-                await self._hold_session(srv, streams, ready, stop)
-        finally:
             try:
-                await http_client.__aexit__(None, None, None)
-            except Exception:
-                pass
+                cm = streamable_client(url, headers=headers or None)
+            except TypeError:
+                cm = None
+            if cm is not None:
+                async with cm as streams:
+                    self._record_mcp_http("POST", url or "", headers, start, "SUC0000")
+                    recorded = True
+                    await self._hold_session(srv, streams, ready, stop)
+                return
+
+            from mcp.shared._httpx_utils import create_mcp_http_client
+
+            http_client = create_mcp_http_client(headers=headers or None)
+            await http_client.__aenter__()
+            try:
+                async with streamable_client(url, http_client=http_client) as streams:
+                    self._record_mcp_http("POST", url or "", headers, start, "SUC0000")
+                    recorded = True
+                    await self._hold_session(srv, streams, ready, stop)
+            finally:
+                try:
+                    await http_client.__aexit__(None, None, None)
+                except Exception:
+                    pass
+        except Exception:
+            if not recorded:
+                self._record_mcp_http("POST", url or "", headers, start, "ERROR")
+            raise
 
     async def _hold_sse(
         self, srv: McpServerConfig, ready: asyncio.Future, stop: asyncio.Event
     ) -> None:
         from mcp.client.sse import sse_client
 
-        async with sse_client(srv.url, headers=dict(srv.headers) or None) as streams:
-            await self._hold_session(srv, streams, ready, stop)
+        url = srv.url or ""
+        headers = self._mcp_headers(dict(srv.headers))
+        start = time.time()
+        recorded = False
+        try:
+            async with sse_client(url, headers=headers or None) as streams:
+                self._record_mcp_http("GET", url, headers, start, "SUC0000")
+                recorded = True
+                await self._hold_session(srv, streams, ready, stop)
+        except Exception:
+            if not recorded:
+                self._record_mcp_http("GET", url, headers, start, "ERROR")
+            raise
 
     async def _hold_session(
         self,

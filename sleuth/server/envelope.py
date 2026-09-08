@@ -28,7 +28,16 @@ def json_ok(data: Any = None, status: int = 200):
 def json_app(exc: APPError):
     from starlette.responses import JSONResponse
 
-    return JSONResponse(exc.envelope(), status_code=exc.status)
+    from ..logtrace import envelope_uses_content, return_code_headers
+
+    body = exc.envelope()
+    if envelope_uses_content():
+        return JSONResponse(
+            body,
+            status_code=200,
+            headers=return_code_headers(exc.code),
+        )
+    return JSONResponse(body, status_code=exc.status)
 
 
 async def app_error_handler(_request, exc: APPError):

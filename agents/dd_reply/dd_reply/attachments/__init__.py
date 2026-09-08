@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import time
 
 from ..config import Settings
 
@@ -143,31 +144,54 @@ def load_from_urls(
                 bundle.skipped.append(f"url:{name}:size {claimed_i} > {max_bytes}")
                 continue
             try:
-                with http.stream("GET", url) as resp:
-                    if resp.status_code >= 400:
-                        bundle.skipped.append(f"url:{name}:HTTP {resp.status_code}")
-                        continue
-                    cl = resp.headers.get("content-length")
-                    try:
-                        cl_i = int(cl) if cl else 0
-                    except (TypeError, ValueError):
-                        cl_i = 0
-                    if cl_i and cl_i > max_bytes:
-                        bundle.skipped.append(f"url:{name}:size {cl_i} > {max_bytes}")
-                        continue
-                    buf = bytearray()
-                    truncated_bytes = False
-                    for chunk in resp.iter_bytes(256 * 1024):
-                        if not chunk:
+                req_headers: Dict[str, str] = {}
+                try:
+                    from sleuth.logtrace import is_enabled, outbound_headers, record_outbound_http
+
+                    if is_enabled():
+                        req_headers = outbound_headers({})
+                except Exception:
+                    record_outbound_http = None  # type: ignore
+                start = time.time()
+                http_code = "SUC0000"
+                stream_kw = {}
+                if req_headers:
+                    stream_kw["headers"] = req_headers
+                try:
+                    with http.stream("GET", url, **stream_kw) as resp:
+                        if resp.status_code >= 400:
+                            bundle.skipped.append(f"url:{name}:HTTP {resp.status_code}")
                             continue
-                        room = max_bytes - len(buf)
-                        if room <= 0:
-                            truncated_bytes = True
-                            break
-                        buf.extend(chunk[:room])
-                        if len(chunk) > room:
-                            truncated_bytes = True
-                            break
+                        cl = resp.headers.get("content-length")
+                        try:
+                            cl_i = int(cl) if cl else 0
+                        except (TypeError, ValueError):
+                            cl_i = 0
+                        if cl_i and cl_i > max_bytes:
+                            bundle.skipped.append(f"url:{name}:size {cl_i} > {max_bytes}")
+                            continue
+                        buf = bytearray()
+                        truncated_bytes = False
+                        for chunk in resp.iter_bytes(256 * 1024):
+                            if not chunk:
+                                continue
+                            room = max_bytes - len(buf)
+                            if room <= 0:
+                                truncated_bytes = True
+                                break
+                            buf.extend(chunk[:room])
+                            if len(chunk) > room:
+                                truncated_bytes = True
+                                break
+                except Exception:
+                    http_code = "ERROR"
+                    raise
+                finally:
+                    if record_outbound_http is not None:
+                        try:
+                            record_outbound_http("GET", url, req_headers, start, http_code)
+                        except Exception:
+                            pass
             except Exception as exc:  # noqa: BLE001
                 bundle.skipped.append(f"url:{name}:{exc}")
                 continue
