@@ -118,7 +118,7 @@ def build_mcp_server(
 
     _register_http_health(server, settings)
     try:
-        from sleuth.logtrace import ensure_initialized, install_mcp_middleware, is_enabled
+        from .logtrace import ensure_initialized, install_mcp_middleware, is_enabled
     except ImportError:
         is_enabled = lambda: False  # type: ignore
     if is_enabled():

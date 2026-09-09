@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
 from .config import Settings
@@ -25,6 +25,46 @@ def _safe_name(filename: str) -> str:
     name = name.replace("\\", "/").split("/")[-1]
     name = re.sub(r"[^\w.\-]+", "_", name, flags=re.ASCII)
     return name or "output.txt"
+
+
+def _reject_href(href: str) -> Optional[Dict[str, Any]]:
+    if not href:
+        return None
+    blocked = href.startswith("data:") or href.lower().startswith("file:")
+    if not _http_url(href) or blocked:
+        return {
+            "ok": False,
+            "detail": "url must be http(s); data: and file: are not allowed",
+            "files": [],
+        }
+    return None
+
+
+def _inline_file(name: str, mime_s: str, raw: bytes) -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "files": [
+            {
+                "filename": name,
+                "mime": mime_s,
+                "size": len(raw),
+                "content_base64": base64.b64encode(raw).decode("ascii"),
+            }
+        ],
+    }
+
+
+def _ref_file(name: str, mime_s: str, raw: bytes, href: str, key: str, size: int) -> Dict[str, Any]:
+    entry: Dict[str, Any] = {
+        "filename": name,
+        "mime": mime_s,
+        "size": int(size or (len(raw) if raw else 0)),
+    }
+    if href:
+        entry["url"] = href
+    if key:
+        entry["object_key"] = key
+    return {"ok": True, "files": [entry]}
 
 
 def emit_file(
@@ -44,43 +84,19 @@ def emit_file(
     key = (object_key or "").strip()
     body = content if isinstance(content, str) else ""
     mime_s = (mime or "text/plain").strip() or "text/plain"
-    if href:
-        if not _http_url(href) or href.startswith("data:") or href.lower().startswith("file:"):
-            return {
-                "ok": False,
-                "detail": "url must be http(s); data: and file: are not allowed",
-                "files": [],
-            }
+    rejected = _reject_href(href)
+    if rejected:
+        return rejected
     raw = content_bytes if content_bytes is not None else (body.encode("utf-8") if body else b"")
     if raw and not href and not key:
-        encoded = base64.b64encode(raw).decode("ascii")
-        return {
-            "ok": True,
-            "files": [
-                {
-                    "filename": name,
-                    "mime": mime_s,
-                    "size": len(raw),
-                    "content_base64": encoded,
-                }
-            ],
-        }
+        return _inline_file(name, mime_s, raw)
     if not href and not key:
         return {
             "ok": False,
             "detail": "provide content to return, or https url / object_key",
             "files": [],
         }
-    entry: Dict[str, Any] = {
-        "filename": name,
-        "mime": mime_s,
-        "size": int(size or (len(raw) if raw else 0)),
-    }
-    if href:
-        entry["url"] = href
-    if key:
-        entry["object_key"] = key
-    return {"ok": True, "files": [entry]}
+    return _ref_file(name, mime_s, raw, href, key, size)
 
 
 def register(server: Any, settings: Settings) -> None:

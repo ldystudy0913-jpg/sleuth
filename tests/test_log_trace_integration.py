@@ -35,11 +35,14 @@ class ConfigSwitchTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_for_tests()
         self._old = os.environ.get("SLEUTH_LOG_TRACE")
+        self._old_cfg = os.environ.get("SLEUTH_LOG_TRACE_CONFIG")
         _bool_env("SLEUTH_LOG_TRACE", None)
+        _bool_env("SLEUTH_LOG_TRACE_CONFIG", None)
 
     def tearDown(self) -> None:
         reset_for_tests()
         _bool_env("SLEUTH_LOG_TRACE", self._old)
+        _bool_env("SLEUTH_LOG_TRACE_CONFIG", self._old_cfg)
 
     def test_disabled_by_default(self):
         self.assertFalse(is_enabled())
@@ -131,16 +134,38 @@ class _FakeTraceAppError(Exception):
 
 
 class _FakeFastapiMw:
-    def __init__(self, app, tracer=None, ignore_path=None, **kwargs):
+    def __init__(self, app, ignore_path=None, **kwargs):
         self.app = app
-        self.tracer = tracer
         self.ignore_path = ignore_path or []
+        self.kwargs = kwargs
 
     def add_exception_handler(self, *args, **kwargs):
         return self.app.add_exception_handler(*args, **kwargs)
 
     async def __call__(self, scope, receive, send):
         await self.app(scope, receive, send)
+
+
+class _FakeMySql:
+    last = None
+
+    def __init__(self, config_path=None, config_section="MYSQL_CFG", **kwargs):
+        _FakeMySql.last = {"config_path": config_path, "config_section": config_section, **kwargs}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def cursor(self, *args, **kwargs):
+        return self
+
+    def execute(self, *args, **kwargs):
+        return None
+
+    def close(self):
+        return None
 
 
 class _FakePool:
@@ -161,6 +186,7 @@ def _install_fake_log_trace(tracer=None):
     pkg = types.ModuleType("log_trace")
     pkg.APPError = _FakeTraceAppError
     pkg.ContextThreadPoolExecutor = _FakePool
+    pkg.get_tracer = lambda: tracer
     fastapi_mod = types.ModuleType("log_trace.fastapi_log_trace")
 
     class FastapiLogTrace:
@@ -172,9 +198,13 @@ def _install_fake_log_trace(tracer=None):
     http_mod = types.ModuleType("log_trace.http_client")
     http_mod.httpx = types.SimpleNamespace(Client=object, AsyncClient=object)
     http_mod.add_http_callstack = lambda *a, **k: None
+    mysql_mod = types.ModuleType("log_trace.mysql_log_trace")
+    mysql_mod.MySql = _FakeMySql
+    mysql_mod.DictCursor = object
     sys.modules["log_trace"] = pkg
     sys.modules["log_trace.fastapi_log_trace"] = fastapi_mod
     sys.modules["log_trace.http_client"] = http_mod
+    sys.modules["log_trace.mysql_log_trace"] = mysql_mod
     return tracer
 
 
@@ -182,11 +212,20 @@ class AdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_for_tests()
         self._old = os.environ.get("SLEUTH_LOG_TRACE")
+        os.environ.pop("SLEUTH_LOG_TRACE_CONFIG", None)
         os.environ["SLEUTH_LOG_TRACE"] = "1"
         os.environ["CMB_BUSINESSID"] = "b"
         os.environ["CMB_CAAS_DEPLOYUNITID"] = "d"
         os.environ["CMB_CAAS_SERVICEUNITID"] = "s"
-        self._mods = {k: sys.modules.get(k) for k in ("log_trace", "log_trace.fastapi_log_trace", "log_trace.http_client")}
+        self._mods = {
+            k: sys.modules.get(k)
+            for k in (
+                "log_trace",
+                "log_trace.fastapi_log_trace",
+                "log_trace.http_client",
+                "log_trace.mysql_log_trace",
+            )
+        }
         self.tracer = _install_fake_log_trace()
         ensure_initialized()
 
@@ -295,11 +334,20 @@ class AdapterTests(unittest.TestCase):
 class AttachStarletteTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_for_tests()
+        os.environ.pop("SLEUTH_LOG_TRACE_CONFIG", None)
         os.environ["SLEUTH_LOG_TRACE"] = "1"
         os.environ["CMB_BUSINESSID"] = "b"
         os.environ["CMB_CAAS_DEPLOYUNITID"] = "d"
         os.environ["CMB_CAAS_SERVICEUNITID"] = "s"
-        self._mods = {k: sys.modules.get(k) for k in ("log_trace", "log_trace.fastapi_log_trace", "log_trace.http_client")}
+        self._mods = {
+            k: sys.modules.get(k)
+            for k in (
+                "log_trace",
+                "log_trace.fastapi_log_trace",
+                "log_trace.http_client",
+                "log_trace.mysql_log_trace",
+            )
+        }
         _install_fake_log_trace()
         ensure_initialized()
 
@@ -332,7 +380,13 @@ class AttachStarletteTests(unittest.TestCase):
         self.assertIn(_FakeFastapiMw, kinds)
         fastapi_kw = [k for c, k in app.added if c is _FakeFastapiMw][0]
         self.assertEqual(fastapi_kw.get("ignore_path"), ["/health"])
-        self.assertIsNotNone(fastapi_kw.get("tracer"))
+        self.assertNotIn("tracer", fastapi_kw)
+
+    def test_ensure_initialized_uses_get_tracer_and_http_client(self):
+        from sleuth.logtrace import get_tracer
+
+        self.assertIs(get_tracer(), sys.modules["log_trace"].get_tracer())
+        self.assertIn("log_trace.http_client", sys.modules)
 
 
 class ConfigFileTests(unittest.TestCase):
@@ -340,3 +394,58 @@ class ConfigFileTests(unittest.TestCase):
         cfg = Config()
         cfg.log_trace.config_file = "x.toml"
         self.assertEqual(config_file(cfg), "x.toml")
+
+
+class MySqlPlaceholderTests(unittest.TestCase):
+    def test_ph_question_when_log_trace(self):
+        from sleuth.storage.mysql import MySQLStore
+
+        store = object.__new__(MySQLStore)
+        store._use_log_trace = True
+        self.assertEqual(store._ph(), "?")
+        self.assertEqual(store._ps(3), "?,?,?")
+        store._use_log_trace = False
+        self.assertEqual(store._ph(), "%s")
+        self.assertEqual(store._ps(2), "%s,%s")
+
+    def test_mysql_ctor_passes_config_path(self):
+        reset_for_tests()
+        os.environ.pop("SLEUTH_LOG_TRACE_CONFIG", None)
+        os.environ["SLEUTH_LOG_TRACE"] = "1"
+        os.environ["CMB_BUSINESSID"] = "b"
+        os.environ["CMB_CAAS_DEPLOYUNITID"] = "d"
+        os.environ["CMB_CAAS_SERVICEUNITID"] = "s"
+        mods = {
+            k: sys.modules.get(k)
+            for k in (
+                "log_trace",
+                "log_trace.fastapi_log_trace",
+                "log_trace.http_client",
+                "log_trace.mysql_log_trace",
+            )
+        }
+        _FakeMySql.last = None
+        try:
+            _install_fake_log_trace()
+            ensure_initialized()
+            from sleuth.storage.mysql import MySQLStore
+
+            store = object.__new__(MySQLStore)
+            store._use_log_trace = True
+            store._MySql = _FakeMySql
+            store._dict_cursor = object
+            with mock.patch("sleuth.logtrace.config_file", return_value="lt.toml"):
+                store._log_trace_conn()
+            self.assertEqual(_FakeMySql.last["config_path"], "lt.toml")
+            self.assertNotIn("tracer", _FakeMySql.last)
+        finally:
+            reset_for_tests()
+            os.environ.pop("SLEUTH_LOG_TRACE", None)
+            os.environ.pop("SLEUTH_LOG_TRACE_CONFIG", None)
+            for k in ("CMB_BUSINESSID", "CMB_CAAS_DEPLOYUNITID", "CMB_CAAS_SERVICEUNITID"):
+                os.environ.pop(k, None)
+            for name, mod in mods.items():
+                if mod is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = mod

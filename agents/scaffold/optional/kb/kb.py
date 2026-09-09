@@ -55,40 +55,35 @@ def _normalize_expire_ms(expire_time: Any) -> int:
     return val
 
 
-def _post_json(
+def _decode_json_body(raw: bytes) -> Any:
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise KbError("KB response is not JSON") from exc
+
+
+def _post_via_tracer(url: str, data: bytes, headers: Dict[str, str], timeout: float, tracer: Any) -> Tuple[int, Any]:
+    try:
+        with tracer.request(
+            method="POST", url=url, content=data, headers=headers, timeout=timeout
+        ) as resp:
+            raw = resp.content
+            status = int(resp.status_code)
+    except Exception as exc:
+        raise KbError(f"KB request failed: {exc}") from exc
+    return status, _decode_json_body(raw)
+
+
+def _post_via_urllib(
     url: str,
-    payload: Dict[str, Any],
+    data: bytes,
     headers: Dict[str, str],
     timeout: float,
     opener=None,
 ) -> Tuple[int, Any]:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    try:
-        from sleuth.logtrace import get_tracer, is_enabled
-    except ImportError:
-        is_enabled = lambda: False  # type: ignore
-        get_tracer = lambda: None  # type: ignore
-    if is_enabled() and get_tracer() is not None:
-        tracer = get_tracer()
-        try:
-            with tracer.request(
-                method="POST", url=url, content=data, headers=headers, timeout=timeout
-            ) as resp:
-                raw = resp.content
-                status = int(resp.status_code)
-        except Exception as exc:
-            raise KbError(f"KB request failed: {exc}") from exc
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise KbError("KB response is not JSON") from exc
-        return status, parsed
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        if opener is not None:
-            resp = opener.open(req, timeout=timeout)
-        else:
-            resp = urllib.request.urlopen(req, timeout=timeout)
+        resp = opener.open(req, timeout=timeout) if opener is not None else urllib.request.urlopen(req, timeout=timeout)
         with resp:
             raw = resp.read()
             status = getattr(resp, "status", None) or getattr(resp, "code", 200)
@@ -101,11 +96,26 @@ def _post_json(
         raise KbError(f"KB HTTP {exc.code}: {err_body}") from exc
     except urllib.error.URLError as exc:
         raise KbError(f"KB request failed: {exc}") from exc
+    return int(status), _decode_json_body(raw)
+
+
+def _post_json(
+    url: str,
+    payload: Dict[str, Any],
+    headers: Dict[str, str],
+    timeout: float,
+    opener=None,
+) -> Tuple[int, Any]:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise KbError("KB response is not JSON") from exc
-    return int(status), parsed
+        from .logtrace import get_tracer, is_enabled
+    except ImportError:
+        is_enabled = lambda: False  # type: ignore
+        get_tracer = lambda: None  # type: ignore
+    tracer = get_tracer() if is_enabled() else None
+    if tracer is not None:
+        return _post_via_tracer(url, data, headers, timeout, tracer)
+    return _post_via_urllib(url, data, headers, timeout, opener)
 
 
 def _fetch_kb_token(settings: Settings, opener=None) -> Tuple[str, int]:
@@ -208,10 +218,49 @@ def _http_url(url: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+def _search_fail(q: str, detail: str) -> Dict[str, Any]:
+    return {"ok": False, "question": q, "detail": detail, "sources": []}
+
+
+def _collect_sources(hits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    sources: List[Dict[str, str]] = []
+    seen = set()
+    for hit in hits:
+        url = str(hit.get("url") or "").strip()
+        if not _http_url(url):
+            continue
+        key = url.rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        title = str(hit.get("file_name") or hit.get("title") or "").strip() or key
+        sources.append({"title": title, "url": url})
+    return sources
+
+
+def _search_payload(q: str, payload: Any, settings: Settings) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return _search_fail(q, "KB response root must be an object")
+    code = str(payload.get("returnCode") or "")
+    if code and code != "SUC0000":
+        return _search_fail(q, f"KB returnCode={code}")
+    body_list = payload.get("body")
+    if body_list is None:
+        return {"ok": True, "question": q, "hits": [], "sources": []}
+    if not isinstance(body_list, list):
+        return _search_fail(q, "KB body must be a list")
+    hits = [_hit_from_dict(x) for x in body_list if isinstance(x, dict)]
+    hits.sort(key=lambda h: float(h.get("rank_score") or 0), reverse=True)
+    cap = int(settings.kb_sort_count or 0)
+    if cap > 0:
+        hits = hits[:cap]
+    return {"ok": True, "question": q, "hits": hits, "sources": _collect_sources(hits)}
+
+
 def search(question: str, settings: Settings, *, opener=None) -> Dict[str, Any]:
     q = (question or "").strip()
     if not q:
-        return {"ok": False, "question": q, "detail": "question is required", "sources": []}
+        return _search_fail(q, "question is required")
     body: Dict[str, Any] = {"question": q}
     service = _service_config(settings)
     if service:
@@ -226,40 +275,8 @@ def search(question: str, settings: Settings, *, opener=None) -> Dict[str, Any]:
             opener=opener,
         )
     except KbError as exc:
-        return {"ok": False, "question": q, "detail": str(exc), "sources": []}
-    if not isinstance(payload, dict):
-        return {"ok": False, "question": q, "detail": "KB response root must be an object", "sources": []}
-    code = str(payload.get("returnCode") or "")
-    if code and code != "SUC0000":
-        return {
-            "ok": False,
-            "question": q,
-            "detail": f"KB returnCode={code}",
-            "sources": [],
-        }
-    body_list = payload.get("body")
-    if body_list is None:
-        return {"ok": True, "question": q, "hits": [], "sources": []}
-    if not isinstance(body_list, list):
-        return {"ok": False, "question": q, "detail": "KB body must be a list", "sources": []}
-    hits = [_hit_from_dict(x) for x in body_list if isinstance(x, dict)]
-    hits.sort(key=lambda h: float(h.get("rank_score") or 0), reverse=True)
-    cap = int(settings.kb_sort_count or 0)
-    if cap > 0:
-        hits = hits[:cap]
-    sources: List[Dict[str, str]] = []
-    seen = set()
-    for hit in hits:
-        url = str(hit.get("url") or "").strip()
-        if not _http_url(url):
-            continue
-        key = url.rstrip("/")
-        if key in seen:
-            continue
-        seen.add(key)
-        title = str(hit.get("file_name") or hit.get("title") or "").strip() or key
-        sources.append({"title": title, "url": url})
-    return {"ok": True, "question": q, "hits": hits, "sources": sources}
+        return _search_fail(q, str(exc))
+    return _search_payload(q, payload, settings)
 
 
 def register(server: Any, settings: Settings) -> None:

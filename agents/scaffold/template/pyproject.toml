@@ -16,6 +16,9 @@ dependencies = [
 mcp = ["mcp>=1.9", "uvicorn>=0.30", "starlette>=0.37"]
 cos = ["boto3"]
 all = ["mcp>=1.9", "uvicorn>=0.30", "starlette>=0.37", "boto3"]
+# Intranet-only (not in `all`): pip install "log-trace[mysql]>=4.10"
+# then SLEUTH_LOG_TRACE=1 and SLEUTH_LOG_TRACE_CONFIG=log_trace.toml
+# trace = ["log-trace[mysql]>=4.10"]
 
 [project.scripts]
 __PKG_NAME__-mcp = "__PKG_NAME__.mcp_server:main"

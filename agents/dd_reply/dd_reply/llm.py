@@ -16,7 +16,7 @@ class LlmError(RuntimeError):
 
 def _trace_headers(headers: Dict[str, str]) -> Dict[str, str]:
     try:
-        from sleuth.logtrace import is_enabled, outbound_headers
+        from .logtrace import is_enabled, outbound_headers
 
         if is_enabled():
             return outbound_headers(headers)
@@ -27,7 +27,7 @@ def _trace_headers(headers: Dict[str, str]) -> Dict[str, str]:
 
 def _record_http(method: str, url: str, headers: Dict[str, str], start: float, code: str) -> None:
     try:
-        from sleuth.logtrace import record_outbound_http
+        from .logtrace import record_outbound_http
 
         record_outbound_http(method, url, headers, start, code)
     except Exception:

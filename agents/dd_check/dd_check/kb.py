@@ -64,7 +64,7 @@ def _post_json(
 ) -> Tuple[int, Any]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
-        from sleuth.logtrace import get_tracer, is_enabled
+        from .logtrace import get_tracer, is_enabled
     except ImportError:
         is_enabled = lambda: False  # type: ignore
         get_tracer = lambda: None  # type: ignore

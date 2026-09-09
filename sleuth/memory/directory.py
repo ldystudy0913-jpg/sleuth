@@ -182,38 +182,58 @@ class SqlDirectory(Directory):
         return bool(self._ok)
 
     def _ph(self) -> str:
-        return "%s" if self.dialect == "mysql" else "?"
+        """SQL 占位符。
+
+        log_trace 的 Cursor 拦截器用 sqlglot.parse() 解析 SQL，而 sqlglot
+        会把 "%s" 中的 % 当作取模操作符导致 ParseError。因此 mysql +
+        log_trace 模式下返回 "?"，由 log_trace 内部转回 %s 再 mogrify。
+        """
+        if self.dialect == "mysql":
+            from ..logtrace import mysql_enabled
+
+            if mysql_enabled(self.config):
+                return "?"
+            return "%s"
+        return "?"
+
+
+    def _mysql_password(self) -> str:
+        import os
+
+        storage = self.config.storage
+        password = storage.mysql_password
+        if password:
+            return password
+        env_name = storage.mysql_password_env or "SLEUTH_MYSQL_PASSWORD"
+        return os.environ.get(env_name) or os.environ.get("SLEUTH_MYSQL_PASSWORD") or ""
+
+    def _mysql_conn(self):
+        from ..logtrace import config_file, mysql_enabled
+
+        if mysql_enabled(self.config):
+            from log_trace.mysql_log_trace import MySql
+
+            return MySql(config_path=config_file(), autocommit=False)
+        try:
+            import pymysql
+        except ImportError as exc:
+            raise RuntimeError("PyMySQL is required for MySQL directory access") from exc
+        storage = self.config.storage
+        return pymysql.connect(
+            host=storage.mysql_host,
+            port=int(storage.mysql_port),
+            user=storage.mysql_user,
+            password=self._mysql_password(),
+            database=storage.mysql_database,
+            charset="utf8mb4",
+            autocommit=False,
+        )
 
     @contextmanager
     def _connect(self):
         storage = self.config.storage
         if self.dialect == "mysql":
-            import os
-
-            from ..logtrace import get_tracer, mysql_enabled
-
-            if mysql_enabled(self.config):
-                from log_trace.mysql_log_trace import MySql
-
-                conn = MySql(get_tracer(), autocommit=False)
-            else:
-                try:
-                    import pymysql
-                except ImportError as exc:
-                    raise RuntimeError("PyMySQL is required for MySQL directory access") from exc
-                password = storage.mysql_password
-                if not password:
-                    env_name = storage.mysql_password_env or "SLEUTH_MYSQL_PASSWORD"
-                    password = os.environ.get(env_name) or os.environ.get("SLEUTH_MYSQL_PASSWORD") or ""
-                conn = pymysql.connect(
-                    host=storage.mysql_host,
-                    port=int(storage.mysql_port),
-                    user=storage.mysql_user,
-                    password=password,
-                    database=storage.mysql_database,
-                    charset="utf8mb4",
-                    autocommit=False,
-                )
+            conn = self._mysql_conn()
         else:
             path = storage.sqlite_path or str(default_db_path())
             conn = sqlite3.connect(path)
@@ -246,13 +266,15 @@ class SqlDirectory(Directory):
             return bool(row and int(row[0]) >= 4)
         cur = conn.cursor()
         schema = getattr(conn, "db_schema", None) or self.config.storage.mysql_database
+        ph = self._ph()
         cur.execute(
-            "SELECT COUNT(*) FROM information_schema.tables "
-            "WHERE table_schema = %s AND table_name IN (%s,%s,%s,%s)",
+            f"SELECT COUNT(*) FROM information_schema.tables "
+            f"WHERE table_schema = {ph} AND table_name IN ({ph},{ph},{ph},{ph})",
             (schema, *names),
         )
         row = cur.fetchone()
         return bool(row and int(row[0]) >= 4)
+
 
     def get_user(self, user_id: str) -> Optional[UserRecord]:
         if not self.available() or not user_id:

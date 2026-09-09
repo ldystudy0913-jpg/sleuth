@@ -10,89 +10,115 @@ AGENT_NAME = "__AGENT_NAME__"
 DEFAULT_SERVER = "__SERVER_NAME__"
 
 
-def _parse_agent_md(text: str) -> Dict[str, Any]:
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {
-            "prompt": text.strip(),
-            "permission": {},
-            "description": "",
-            "title": "",
-            "mode": "primary",
-            "catalog_skills": [],
-        }
-    data: Dict[str, Any] = {}
-    i = 1
-    perm_lines: List[str] = []
-    catalog: List[str] = []
-    in_perm = False
-    in_catalog = False
-    while i < len(lines):
-        line = lines[i]
-        if line.strip() == "---":
-            i += 1
-            break
-        if in_perm:
-            if line.startswith("  ") or line.startswith("\t"):
-                perm_lines.append(line.strip())
-                i += 1
-                continue
-            in_perm = False
-        if in_catalog:
-            stripped = line.strip()
-            if stripped.startswith("- "):
-                name = stripped[2:].strip()
-                if name.startswith("#"):
-                    i += 1
-                    continue
-                if name:
-                    catalog.append(name)
-                i += 1
-                continue
-            if line.startswith("  ") or line.startswith("\t"):
-                i += 1
-                continue
-            in_catalog = False
-        if line.strip().startswith("permission:"):
-            in_perm = True
-            i += 1
-            continue
-        if line.strip().startswith("catalog_skills:"):
-            in_catalog = True
-            rest = line.split(":", 1)[1].strip()
-            if rest.startswith("[") and rest.endswith("]"):
-                inner = rest[1:-1].strip()
-                for part in inner.split(","):
-                    token = part.strip().strip("'").strip('"')
-                    if token:
-                        catalog.append(token)
-                in_catalog = False
-            i += 1
-            continue
-        if ":" in line and not line.startswith(" "):
-            k, _, v = line.partition(":")
-            data[k.strip()] = v.strip()
-        i += 1
-    prompt = "\n".join(lines[i:]).strip()
+def _empty_agent_md(prompt: str) -> Dict[str, Any]:
+    return {
+        "prompt": prompt.strip(),
+        "permission": {},
+        "description": "",
+        "title": "",
+        "mode": "primary",
+        "catalog_skills": [],
+    }
+
+
+def _step_perm(state: Dict[str, Any], line: str) -> bool:
+    if not state["in_perm"]:
+        return False
+    if line.startswith("  ") or line.startswith("\t"):
+        state["perm_lines"].append(line.strip())
+        return True
+    state["in_perm"] = False
+    return False
+
+
+def _step_catalog_item(state: Dict[str, Any], line: str) -> bool:
+    if not state["in_catalog"]:
+        return False
+    stripped = line.strip()
+    if stripped.startswith("- "):
+        name = stripped[2:].strip()
+        if name and not name.startswith("#"):
+            state["catalog"].append(name)
+        return True
+    if line.startswith("  ") or line.startswith("\t"):
+        return True
+    state["in_catalog"] = False
+    return False
+
+
+def _start_catalog(state: Dict[str, Any], line: str) -> bool:
+    if not line.strip().startswith("catalog_skills:"):
+        return False
+    state["in_catalog"] = True
+    rest = line.split(":", 1)[1].strip()
+    if rest.startswith("[") and rest.endswith("]"):
+        for part in rest[1:-1].split(","):
+            token = part.strip().strip("'").strip('"')
+            if token:
+                state["catalog"].append(token)
+        state["in_catalog"] = False
+    return True
+
+
+def _parse_permission_lines(perm_lines: List[str]) -> Dict[str, str]:
     permission: Dict[str, str] = {}
     for pl in perm_lines:
         if ":" not in pl:
             continue
         pk, _, pv = pl.partition(":")
         permission[pk.strip()] = pv.strip()
+    return permission
+
+
+def _dedupe_names(names: List[str]) -> List[str]:
     seen = set()
-    catalog_skills: List[str] = []
-    for name in catalog:
+    out: List[str] = []
+    for name in names:
         if name not in seen:
             seen.add(name)
-            catalog_skills.append(name)
+            out.append(name)
+    return out
+
+
+def _parse_agent_md(text: str) -> Dict[str, Any]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return _empty_agent_md(text)
+    state: Dict[str, Any] = {
+        "data": {},
+        "perm_lines": [],
+        "catalog": [],
+        "in_perm": False,
+        "in_catalog": False,
+    }
+    i = 1
+    while i < len(lines):
+        line = lines[i]
+        if line.strip() == "---":
+            i += 1
+            break
+        if _step_perm(state, line) or _step_catalog_item(state, line):
+            i += 1
+            continue
+        if line.strip().startswith("permission:"):
+            state["in_perm"] = True
+            i += 1
+            continue
+        if _start_catalog(state, line):
+            i += 1
+            continue
+        if ":" in line and not line.startswith(" "):
+            k, _, v = line.partition(":")
+            state["data"][k.strip()] = v.strip()
+        i += 1
+    data = state["data"]
     return {
         "description": data.get("description", ""),
         "title": data.get("title", ""),
         "mode": data.get("mode", "primary") or "primary",
-        "permission": permission,
-        "prompt": prompt,
-        "catalog_skills": catalog_skills,
+        "permission": _parse_permission_lines(state["perm_lines"]),
+        "prompt": "\n".join(lines[i:]).strip(),
+        "catalog_skills": _dedupe_names(state["catalog"]),
     }
 
 

@@ -146,7 +146,7 @@ def load_from_urls(
             try:
                 req_headers: Dict[str, str] = {}
                 try:
-                    from sleuth.logtrace import is_enabled, outbound_headers, record_outbound_http
+                    from ..logtrace import is_enabled, outbound_headers, record_outbound_http
 
                     if is_enabled():
                         req_headers = outbound_headers({})

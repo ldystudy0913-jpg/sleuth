@@ -48,104 +48,74 @@ def _load_dotenv() -> None:
             os.environ[k] = v
 
 
+def _env_first(*names: str, default: str = "") -> str:
+    for name in names:
+        val = (_env(name, "") or "").strip()
+        if val:
+            return val
+    return default
+
+
+def _ov_str(overrides: dict, key: str, fallback: str) -> str:
+    return str(overrides.get(key, fallback) or "").strip()
+
+
 class Settings:
     def __init__(self, **overrides: object) -> None:
         _load_dotenv()
         p = "__ENV_PREFIX__"
-        self.mcp_host: str = str(
-            overrides.get(
-                "mcp_host",
-                _env(f"{p}_MCP_HOST", "127.0.0.1") or "127.0.0.1",
-            )
-        )
-        self.mcp_port: int = int(
-            overrides.get("mcp_port", _env_int(f"{p}_MCP_PORT", __MCP_PORT__))
-        )
-        self.service_name: str = "__PKG_NAME__-tools"
-        self.mcp_token: str = str(
-            overrides.get("mcp_token", _env(f"{p}_MCP_TOKEN", "") or "")
-        ).strip()
         self.env_prefix: str = p
-        self.attachments_enabled: bool = bool(
-            overrides.get("attachments_enabled", _env_truthy(f"{p}_ATTACHMENTS"))
-        )
-        self.hitl_enabled: bool = bool(
-            overrides.get("hitl_enabled", _env_truthy(f"{p}_HITL"))
-        )
+        self.service_name: str = "__PKG_NAME__-tools"
+        ov = dict(overrides)
+        self._apply_server(p, ov)
+        self._apply_kb(p, ov)
+        self._apply_cos(p, ov)
+        self._apply_llm(p, ov)
 
-        self.kb_api_url: str = str(
-            overrides.get("kb_api_url", _env(f"{p}_KB_API_URL", "") or "")
-        ).strip()
-        self.kb_login_url: str = str(
-            overrides.get("kb_login_url", _env(f"{p}_KB_LOGIN_URL", "") or "")
-        ).strip()
-        self.kb_openid: str = str(
-            overrides.get("kb_openid", _env(f"{p}_KB_OPENID", "") or "")
-        ).strip()
-        self.kb_service_id: str = str(
-            overrides.get("kb_service_id", _env(f"{p}_KB_SERVICEID", "") or "")
-        ).strip()
-        self.kb_api_timeout: float = float(
-            overrides.get("kb_api_timeout", _env_float(f"{p}_KB_API_TIMEOUT", 30.0))
+    def _apply_server(self, p: str, ov: dict) -> None:
+        self.mcp_host: str = str(
+            ov.get("mcp_host", _env(f"{p}_MCP_HOST", "127.0.0.1") or "127.0.0.1")
         )
-        self.kb_sort_count: int = int(
-            overrides.get("kb_sort_count", _env_int(f"{p}_KB_SORT_COUNT", 10))
-        )
-        self.kb_knowledge_ids: str = str(
-            overrides.get("kb_knowledge_ids", _env(f"{p}_KB_KNOWLEDGE_IDS", "") or "")
-        ).strip()
-        self.kb_recall_count: int = int(
-            overrides.get("kb_recall_count", _env_int(f"{p}_KB_RECALL_COUNT", 10))
-        )
+        self.mcp_port: int = int(ov.get("mcp_port", _env_int(f"{p}_MCP_PORT", __MCP_PORT__)))
+        self.mcp_token: str = _ov_str(ov, "mcp_token", _env(f"{p}_MCP_TOKEN", "") or "")
+        self.attachments_enabled: bool = bool(ov.get("attachments_enabled", _env_truthy(f"{p}_ATTACHMENTS")))
+        self.hitl_enabled: bool = bool(ov.get("hitl_enabled", _env_truthy(f"{p}_HITL")))
 
-        self.cos_secret_id: str = str(
-            overrides.get(
-                "cos_secret_id",
-                _env(f"{p}_AWS_ACCESS_KEY_ID", "")
-                or _env(f"{p}_COS_SECRET_ID", "")
-                or "",
-            )
-        ).strip()
-        self.cos_secret_key: str = str(
-            overrides.get(
-                "cos_secret_key",
-                _env(f"{p}_AWS_SECRET_ACCESS_KEY", "")
-                or _env(f"{p}_COS_SECRET_KEY", "")
-                or "",
-            )
-        ).strip()
-        self.cos_region: str = str(
-            overrides.get(
-                "cos_region",
-                _env(f"{p}_AWS_DEFAULT_REGION", "") or _env(f"{p}_COS_REGION", "") or "",
-            )
-        ).strip()
-        self.cos_endpoint: str = str(
-            overrides.get(
-                "cos_endpoint",
-                _env(f"{p}_S3_ENDPOINT", "") or _env(f"{p}_COS_ENDPOINT", "") or "",
-            )
-        ).strip()
-        self.cos_bucket: str = str(
-            overrides.get("cos_bucket", _env(f"{p}_COS_BUCKET", "") or "")
-        ).strip()
-        self.cos_path_prefix: str = str(
-            overrides.get(
-                "cos_path_prefix",
-                _env(f"{p}_COS_PATH_PREFIX", "sleuth/files") or "sleuth/files",
-            )
-        ).strip()
-        if "kb_enabled" in overrides:
-            self.kb_enabled = bool(overrides.get("kb_enabled"))
+    def _apply_kb(self, p: str, ov: dict) -> None:
+        self.kb_api_url: str = _ov_str(ov, "kb_api_url", _env(f"{p}_KB_API_URL", "") or "")
+        self.kb_login_url: str = _ov_str(ov, "kb_login_url", _env(f"{p}_KB_LOGIN_URL", "") or "")
+        self.kb_openid: str = _ov_str(ov, "kb_openid", _env(f"{p}_KB_OPENID", "") or "")
+        self.kb_service_id: str = _ov_str(ov, "kb_service_id", _env(f"{p}_KB_SERVICEID", "") or "")
+        self.kb_api_timeout: float = float(ov.get("kb_api_timeout", _env_float(f"{p}_KB_API_TIMEOUT", 30.0)))
+        self.kb_sort_count: int = int(ov.get("kb_sort_count", _env_int(f"{p}_KB_SORT_COUNT", 10)))
+        self.kb_knowledge_ids: str = _ov_str(ov, "kb_knowledge_ids", _env(f"{p}_KB_KNOWLEDGE_IDS", "") or "")
+        self.kb_recall_count: int = int(ov.get("kb_recall_count", _env_int(f"{p}_KB_RECALL_COUNT", 10)))
+        if "kb_enabled" in ov:
+            self.kb_enabled = bool(ov.get("kb_enabled"))
         else:
             self.kb_enabled = bool(
-                self.kb_api_url
-                and self.kb_login_url
-                and self.kb_openid
-                and self.kb_service_id
+                self.kb_api_url and self.kb_login_url and self.kb_openid and self.kb_service_id
             )
-        if "output_enabled" in overrides:
-            self.output_enabled = bool(overrides.get("output_enabled"))
+
+    def _apply_cos(self, p: str, ov: dict) -> None:
+        self.cos_secret_id: str = _ov_str(
+            ov, "cos_secret_id", _env_first(f"{p}_AWS_ACCESS_KEY_ID", f"{p}_COS_SECRET_ID")
+        )
+        self.cos_secret_key: str = _ov_str(
+            ov, "cos_secret_key", _env_first(f"{p}_AWS_SECRET_ACCESS_KEY", f"{p}_COS_SECRET_KEY")
+        )
+        self.cos_region: str = _ov_str(
+            ov, "cos_region", _env_first(f"{p}_AWS_DEFAULT_REGION", f"{p}_COS_REGION")
+        )
+        self.cos_endpoint: str = _ov_str(
+            ov, "cos_endpoint", _env_first(f"{p}_S3_ENDPOINT", f"{p}_COS_ENDPOINT")
+        )
+        self.cos_bucket: str = _ov_str(ov, "cos_bucket", _env(f"{p}_COS_BUCKET", "") or "")
+        self.cos_path_prefix: str = str(
+            ov.get("cos_path_prefix", _env(f"{p}_COS_PATH_PREFIX", "sleuth/files") or "sleuth/files")
+        ).strip()
+        if "output_enabled" in ov:
+            self.output_enabled = bool(ov.get("output_enabled"))
         else:
             self.output_enabled = bool(
                 self.cos_secret_id
@@ -154,24 +124,15 @@ class Settings:
                 and (self.cos_region or self.cos_endpoint)
             )
 
-        self.llm_base_url: str = str(
-            overrides.get("llm_base_url", _env(f"{p}_LLM_BASE_URL", "") or "")
-        ).strip().rstrip("/")
-        self.llm_api_key: str = str(
-            overrides.get("llm_api_key", _env(f"{p}_LLM_API_KEY", "") or "")
-        ).strip()
-        self.llm_model: str = str(
-            overrides.get("llm_model", _env(f"{p}_LLM_MODEL", "") or "")
-        ).strip()
-        self.llm_temperature: float = float(
-            overrides.get("llm_temperature", _env_float(f"{p}_LLM_TEMPERATURE", 0.2))
-        )
-        self.llm_timeout: float = float(
-            overrides.get("llm_timeout", _env_float(f"{p}_LLM_TIMEOUT", 120.0))
-        )
+    def _apply_llm(self, p: str, ov: dict) -> None:
+        self.llm_base_url: str = _ov_str(ov, "llm_base_url", _env(f"{p}_LLM_BASE_URL", "") or "").rstrip("/")
+        self.llm_api_key: str = _ov_str(ov, "llm_api_key", _env(f"{p}_LLM_API_KEY", "") or "")
+        self.llm_model: str = _ov_str(ov, "llm_model", _env(f"{p}_LLM_MODEL", "") or "")
+        self.llm_temperature: float = float(ov.get("llm_temperature", _env_float(f"{p}_LLM_TEMPERATURE", 0.2)))
+        self.llm_timeout: float = float(ov.get("llm_timeout", _env_float(f"{p}_LLM_TIMEOUT", 120.0)))
         json_mode_raw = os.environ.get(f"{p}_LLM_JSON_MODE")
-        if "llm_json_mode" in overrides:
-            self.llm_json_mode = bool(overrides.get("llm_json_mode"))
+        if "llm_json_mode" in ov:
+            self.llm_json_mode = bool(ov.get("llm_json_mode"))
         elif json_mode_raw is None or str(json_mode_raw).strip() == "":
             self.llm_json_mode = True
         else:
