@@ -1,4 +1,8 @@
-"""Knowledge-base search. Same intranet RAG protocol as Sleuth kb_lookup; own env prefix."""
+"""本包知识库检索。协议与 Sleuth kb_lookup 相同，只用本包 {PKG}_KB_*。
+
+四项配齐后 mcp_server 自动注册 kb_search，一般不用改本文件。
+若要在 pipeline 内部检索：from .kb import search。只开 env 不会让 ping 去查库。
+"""
 from __future__ import annotations
 
 import json
@@ -18,6 +22,7 @@ _token_lock = threading.Lock()
 
 
 def reset_token_cache() -> None:
+    """单测用：清掉 ragToken 缓存。"""
     global _cached_rag_token, _cached_expire_ms, _cached_token_key
     with _token_lock:
         _cached_rag_token = None
@@ -30,18 +35,22 @@ class KbError(RuntimeError):
 
 
 def _csv(raw: str) -> List[str]:
+    """逗号分隔 knowledge id。"""
     return [x.strip() for x in (raw or "").split(",") if x.strip()]
 
 
 def _json_headers() -> Dict[str, str]:
+    """KB HTTP JSON 头。"""
     return {"Content-Type": "application/json", "Accept": "application/json"}
 
 
 def _token_cache_key(settings: Settings) -> str:
+    """登录参数变化时失效缓存。"""
     return "|".join((settings.kb_login_url, settings.kb_openid, settings.kb_service_id))
 
 
 def _normalize_expire_ms(expire_time: Any) -> int:
+    """把过期时间统一成毫秒时间戳。"""
     try:
         val = int(expire_time)
     except (TypeError, ValueError):
@@ -56,6 +65,7 @@ def _normalize_expire_ms(expire_time: Any) -> int:
 
 
 def _decode_json_body(raw: bytes) -> Any:
+    """解码 KB 响应体。"""
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -63,6 +73,7 @@ def _decode_json_body(raw: bytes) -> Any:
 
 
 def _post_via_tracer(url: str, data: bytes, headers: Dict[str, str], timeout: float, tracer: Any) -> Tuple[int, Any]:
+    """走 log_trace HTTP 客户端，便于北斗记下游。"""
     try:
         with tracer.request(
             method="POST", url=url, content=data, headers=headers, timeout=timeout
@@ -81,6 +92,7 @@ def _post_via_urllib(
     timeout: float,
     opener=None,
 ) -> Tuple[int, Any]:
+    """无 log_trace 时用 urllib POST。"""
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         resp = opener.open(req, timeout=timeout) if opener is not None else urllib.request.urlopen(req, timeout=timeout)
@@ -106,6 +118,7 @@ def _post_json(
     timeout: float,
     opener=None,
 ) -> Tuple[int, Any]:
+    """有 tracer 走官方 HTTP 客户端，否则 urllib。"""
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
         from .logtrace import get_tracer, is_enabled
@@ -119,6 +132,7 @@ def _post_json(
 
 
 def _fetch_kb_token(settings: Settings, opener=None) -> Tuple[str, int]:
+    """登录拿 ragToken 与过期时间。"""
     status, data = _post_json(
         settings.kb_login_url,
         {"openId": settings.kb_openid, "serviceId": settings.kb_service_id},
@@ -140,6 +154,7 @@ def _fetch_kb_token(settings: Settings, opener=None) -> Tuple[str, int]:
 
 
 def _auth_headers(settings: Settings, opener=None) -> Dict[str, str]:
+    """带缓存的 Cookie ragToken。"""
     global _cached_rag_token, _cached_expire_ms, _cached_token_key
     headers = _json_headers()
     key = _token_cache_key(settings)
@@ -167,6 +182,7 @@ def _auth_headers(settings: Settings, opener=None) -> Dict[str, str]:
 
 
 def _source_url(item: Dict[str, Any]) -> str:
+    """从命中里挑可点击的 http(s) 链接。"""
     dmz = str(item.get("dmzUrl") or item.get("dmz_url") or "").strip()
     if dmz:
         return dmz
@@ -185,6 +201,7 @@ def _source_url(item: Dict[str, Any]) -> str:
 
 
 def _hit_from_dict(item: Dict[str, Any]) -> Dict[str, Any]:
+    """单条命中收成 title / url / score。"""
     try:
         score = float(item.get("rankScore") or item.get("rank_score") or 0)
     except (TypeError, ValueError):
@@ -198,6 +215,7 @@ def _hit_from_dict(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _service_config(settings: Settings) -> Optional[Dict[str, Any]]:
+    """按 knowledge_ids / recall / sort 拼 serviceConfig。"""
     service: Dict[str, Any] = {}
     knowledge_ids = _csv(settings.kb_knowledge_ids)
     if knowledge_ids:
@@ -214,15 +232,18 @@ def _service_config(settings: Settings) -> Optional[Dict[str, Any]]:
 
 
 def _http_url(url: str) -> bool:
+    """sources[] 只收有 host 的 http(s)。"""
     parsed = urlparse(url)
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
 def _search_fail(q: str, detail: str) -> Dict[str, Any]:
+    """检索失败也带空 sources[]，避免基座挂空工具。"""
     return {"ok": False, "question": q, "detail": detail, "sources": []}
 
 
 def _collect_sources(hits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """命中去重后变成基座约定的 sources[]。"""
     sources: List[Dict[str, str]] = []
     seen = set()
     for hit in hits:
@@ -239,6 +260,7 @@ def _collect_sources(hits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
 
 
 def _search_payload(q: str, payload: Any, settings: Settings) -> Dict[str, Any]:
+    """解析 KB 搜索响应。"""
     if not isinstance(payload, dict):
         return _search_fail(q, "KB response root must be an object")
     code = str(payload.get("returnCode") or "")
@@ -258,6 +280,7 @@ def _search_payload(q: str, payload: Any, settings: Settings) -> Dict[str, Any]:
 
 
 def search(question: str, settings: Settings, *, opener=None) -> Dict[str, Any]:
+    """检索并返回 hits + sources[]。pipeline 内检索调这个，不必经 MCP。"""
     q = (question or "").strip()
     if not q:
         return _search_fail(q, "question is required")
@@ -280,6 +303,7 @@ def search(question: str, settings: Settings, *, opener=None) -> Dict[str, Any]:
 
 
 def register(server: Any, settings: Settings) -> None:
+    """kb_enabled 时由 mcp_server 调用，注册 kb_search。"""
     @server.tool(
         name="kb_search",
         description=(
@@ -288,4 +312,5 @@ def register(server: Any, settings: Settings) -> None:
         ),
     )
     def kb_search(question: str = "") -> str:
+        """MCP 工具：按问句检索，JSON 含 sources[] 供基座附「知识来源」。"""
         return json.dumps(search(question, settings), ensure_ascii=False)

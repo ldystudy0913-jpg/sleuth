@@ -2,7 +2,7 @@
 
 独立项目包：MCP 工具面 + Agent Card + Skill。不修改 sleuth 内核。
 
-完整业务对照：`agents/dd_check`、`agents/dd_reply`。本包只保留 hello `ping`。
+完整业务对照：`agents/dd_check`、`agents/dd_reply`。本包只保留 hello `ping`。二次开发步骤见 [HOWTO_SLEUTH.md](HOWTO_SLEUTH.md) 第 0 节（改哪些函数、开了可选能力还要不要改代码）。
 
 ## 开发你要改的文件
 
@@ -29,10 +29,13 @@ py -3.12 -m __PKG_NAME__.mcp_server
 
 文件解析在 Sleuth 完成。可选模块始终生成，**只有本包 `.env` 配齐才注册对应工具**（空配置不会挂一个返回空 JSON 的空工具）。HITL 不注册新工具。
 
-| 模块 | 开关 | 行为 |
-|------|------|------|
-| `attachments.py` | `__ENV_PREFIX___ATTACHMENTS=1` | `ping` 声明 `attachment_refs_json`；优先 excerpt |
-| `hitl.py` | `__ENV_PREFIX___HITL=1` | 缺料返回 `status=need_input`；基座用 `question` 暂停 |
-| `llm.py` | 可选 `__ENV_PREFIX___LLM_*` | 本包三项配齐用自己的模型；否则用 Sleuth `sleuth_llm_json` |
-| `kb.py` | 四项 `__ENV_PREFIX___KB_*` | 注册 `kb_search`，返回 `sources[]` |
-| `output.py` | 本包 COS 配齐才注册 MCP 工具 | `emit_file` 把正文打成 `files[].content_base64`；Sleuth 加密上传 |
+「配齐就自动可用」只有 `kb_search` / `emit_file` / MCP token。HITL、LLM、新工具读附件、进度**必须改代码**，见 HOWTO 第 0.3 节。
+
+| 模块 | 开关 | 开了自动有什么 | 你还要改什么 |
+|------|------|----------------|--------------|
+| `attachments.py` | `__ENV_PREFIX___ATTACHMENTS=1` | 仅演示 `ping` 声明 `attachment_refs_json` | 新工具自己声明该参数，pipeline 用 `summarize_refs` |
+| `hitl.py` | `__ENV_PREFIX___HITL=1` | 演示 ping 空 message 返回 `need_input` | 按业务自己列 `missing`；SOP 调 `question` |
+| `llm.py` | 可选 `__ENV_PREFIX___LLM_*` | 不会自动调模型 | pipeline 里 `chat_completion` / `complete_json` |
+| `kb.py` | 四项 `__ENV_PREFIX___KB_*` | 注册 `kb_search`，返回 `sources[]` | 一般只改 SOP；流水线内检索再调 `search()` |
+| `output.py` | 本包 COS 配齐 | 注册 `emit_file` | 或业务 JSON 带 `files[].content_base64`，不必配 COS |
+| `progress.py` | 无单独开关 | 模块已拷入 | 长步骤调 `progress_fn("阶段")` |

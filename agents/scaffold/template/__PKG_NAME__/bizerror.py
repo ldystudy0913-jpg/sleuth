@@ -1,4 +1,4 @@
-"""Business error catalog and APPError. Messages come from BizErrorCode only."""
+"""业务错误码与 APPError（从 Sleuth 拷贝）。二次开发不要改本文件。"""
 from __future__ import annotations
 
 from enum import Enum

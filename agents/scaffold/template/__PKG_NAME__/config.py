@@ -1,4 +1,8 @@
-"""Settings from environment (__ENV_PREFIX___*). Do not put these in Sleuth .env."""
+"""本包 Settings，只读 __ENV_PREFIX___*。不要写进 Sleuth .env，也不要回退 SLEUTH_*。
+
+二次开发：加业务密钥时在 Settings 里加字段，并在 .env.example 写明。
+可选能力开关（attachments / hitl / kb / llm / output）已接好，勿删。
+"""
 from __future__ import annotations
 
 import os
@@ -7,10 +11,12 @@ from typing import Optional
 
 
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
+    """读环境变量，缺省返回 default。"""
     return os.environ.get(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
+    """读整数环境变量；空则 default。"""
     raw = os.environ.get(name)
     if raw is None or raw == "":
         return default
@@ -18,6 +24,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_float(name: str, default: float) -> float:
+    """读浮点环境变量；空则 default。"""
     raw = os.environ.get(name)
     if raw is None or raw == "":
         return default
@@ -25,11 +32,13 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_truthy(name: str) -> bool:
+    """1/true/yes/on 为真。HITL、ATTACHMENTS 用这个。"""
     raw = (os.environ.get(name) or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
 def _load_dotenv() -> None:
+    """从 cwd/.env 填入 os.environ（不覆盖已有）。启动 MCP 前先跑。"""
     path = Path.cwd() / ".env"
     if not path.is_file():
         return
@@ -49,6 +58,7 @@ def _load_dotenv() -> None:
 
 
 def _env_first(*names: str, default: str = "") -> str:
+    """按顺序取第一个非空环境变量（COS 的 AWS_* / COS_* 双名）。"""
     for name in names:
         val = (_env(name, "") or "").strip()
         if val:
@@ -57,11 +67,13 @@ def _env_first(*names: str, default: str = "") -> str:
 
 
 def _ov_str(overrides: dict, key: str, fallback: str) -> str:
+    """单测可用 overrides 覆盖 env。"""
     return str(overrides.get(key, fallback) or "").strip()
 
 
 class Settings:
     def __init__(self, **overrides: object) -> None:
+        """从 env 组装；测试可传 attachments_enabled / hitl_enabled 等覆盖。"""
         _load_dotenv()
         p = "__ENV_PREFIX__"
         self.env_prefix: str = p
@@ -73,6 +85,7 @@ class Settings:
         self._apply_llm(p, ov)
 
     def _apply_server(self, p: str, ov: dict) -> None:
+        """MCP 监听、token、附件开关、HITL 开关。"""
         self.mcp_host: str = str(
             ov.get("mcp_host", _env(f"{p}_MCP_HOST", "127.0.0.1") or "127.0.0.1")
         )
@@ -82,6 +95,7 @@ class Settings:
         self.hitl_enabled: bool = bool(ov.get("hitl_enabled", _env_truthy(f"{p}_HITL")))
 
     def _apply_kb(self, p: str, ov: dict) -> None:
+        """知识库。四项 URL/openid/serviceId 配齐才 kb_enabled，才会注册 kb_search。"""
         self.kb_api_url: str = _ov_str(ov, "kb_api_url", _env(f"{p}_KB_API_URL", "") or "")
         self.kb_login_url: str = _ov_str(ov, "kb_login_url", _env(f"{p}_KB_LOGIN_URL", "") or "")
         self.kb_openid: str = _ov_str(ov, "kb_openid", _env(f"{p}_KB_OPENID", "") or "")
@@ -98,6 +112,7 @@ class Settings:
             )
 
     def _apply_cos(self, p: str, ov: dict) -> None:
+        """本包 COS。配齐才 output_enabled，才会注册 emit_file。会话回传文件不必配。"""
         self.cos_secret_id: str = _ov_str(
             ov, "cos_secret_id", _env_first(f"{p}_AWS_ACCESS_KEY_ID", f"{p}_COS_SECRET_ID")
         )
@@ -125,6 +140,7 @@ class Settings:
             )
 
     def _apply_llm(self, p: str, ov: dict) -> None:
+        """本包 LLM。三项配齐只表示「能调」，pipeline 里还要自己调用 llm.py。"""
         self.llm_base_url: str = _ov_str(ov, "llm_base_url", _env(f"{p}_LLM_BASE_URL", "") or "").rstrip("/")
         self.llm_api_key: str = _ov_str(ov, "llm_api_key", _env(f"{p}_LLM_API_KEY", "") or "")
         self.llm_model: str = _ov_str(ov, "llm_model", _env(f"{p}_LLM_MODEL", "") or "")
@@ -139,9 +155,11 @@ class Settings:
             self.llm_json_mode = _env_truthy(f"{p}_LLM_JSON_MODE")
 
     def llm_configured(self) -> bool:
+        """本包 LLM 三项是否配齐。未齐则用 sleuth_llm_json。"""
         return bool(self.llm_base_url and self.llm_api_key and self.llm_model)
 
     def as_health(self) -> dict:
+        """给 /health 和 health 工具看的能力开关快照。"""
         return {
             "ok": True,
             "service": self.service_name,
@@ -156,4 +174,5 @@ class Settings:
 
 
 def get_settings() -> Settings:
+    """进程内读一遍当前 env。"""
     return Settings()

@@ -1,4 +1,8 @@
-"""Report pipeline stages to Sleuth via MCP progress notifications."""
+"""把流水线阶段推给 Sleuth（MCP progress → SSE progress）。
+
+没有单独 env 开关。长步骤在 pipeline 里调 progress_fn("ocr")，不调则前端只有 tool_start。
+本文件一般不用改。
+"""
 from __future__ import annotations
 
 import inspect
@@ -13,6 +17,7 @@ def report_progress(
     current: float = 0,
     total: float = 1,
 ) -> None:
+    """向当前 MCP context 报阶段。ctx 为空则静默。"""
     if ctx is None:
         return
     message = f"{stage}: {detail}" if detail else str(stage)
@@ -48,6 +53,7 @@ def report_progress(
 
 
 def current_context() -> Any:
+    """取 FastMCP 当前请求上下文；不在工具调用里则为 None。"""
     try:
         from fastmcp.server.dependencies import get_context
 
@@ -65,10 +71,12 @@ def current_context() -> Any:
 
 
 def bind_current() -> Optional[Callable[..., None]]:
+    """mcp_server 里调用，得到可传入 pipeline 的 progress_fn。"""
     return bind_progress(current_context())
 
 
 def bind_progress(ctx: Any) -> Optional[Callable[..., None]]:
+    """把 ctx 绑成 progress_fn(stage, **kwargs)。"""
     if ctx is None:
         return None
 

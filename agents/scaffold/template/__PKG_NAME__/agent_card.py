@@ -1,4 +1,7 @@
-"""Build Agent Card JSON from agent.md + skills/ + catalog_skills names."""
+"""从 agent.md + skills/ + catalog_skills 拼 Agent Card。二次开发不要改本文件，改 agent.md。
+
+打开 KB / output 时会自动给 {server}_kb_search / {server}_emit_file 补 allow。
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,6 +14,7 @@ DEFAULT_SERVER = "__SERVER_NAME__"
 
 
 def _empty_agent_md(prompt: str) -> Dict[str, Any]:
+    """没有 YAML 头时的回退结构。"""
     return {
         "prompt": prompt.strip(),
         "permission": {},
@@ -22,6 +26,7 @@ def _empty_agent_md(prompt: str) -> Dict[str, Any]:
 
 
 def _step_perm(state: Dict[str, Any], line: str) -> bool:
+    """解析 agent.md 里 permission: 块的一行。"""
     if not state["in_perm"]:
         return False
     if line.startswith("  ") or line.startswith("\t"):
@@ -32,6 +37,7 @@ def _step_perm(state: Dict[str, Any], line: str) -> bool:
 
 
 def _step_catalog_item(state: Dict[str, Any], line: str) -> bool:
+    """解析 catalog_skills 列表项。"""
     if not state["in_catalog"]:
         return False
     stripped = line.strip()
@@ -47,6 +53,7 @@ def _step_catalog_item(state: Dict[str, Any], line: str) -> bool:
 
 
 def _start_catalog(state: Dict[str, Any], line: str) -> bool:
+    """遇到 catalog_skills: 进入列表状态。"""
     if not line.strip().startswith("catalog_skills:"):
         return False
     state["in_catalog"] = True
@@ -61,6 +68,7 @@ def _start_catalog(state: Dict[str, Any], line: str) -> bool:
 
 
 def _parse_permission_lines(perm_lines: List[str]) -> Dict[str, str]:
+    """permission 行转成 {合格工具名: allow|ask|deny}。"""
     permission: Dict[str, str] = {}
     for pl in perm_lines:
         if ":" not in pl:
@@ -71,6 +79,7 @@ def _parse_permission_lines(perm_lines: List[str]) -> Dict[str, str]:
 
 
 def _dedupe_names(names: List[str]) -> List[str]:
+    """保持顺序去重。"""
     seen = set()
     out: List[str] = []
     for name in names:
@@ -81,6 +90,7 @@ def _dedupe_names(names: List[str]) -> List[str]:
 
 
 def _parse_agent_md(text: str) -> Dict[str, Any]:
+    """拆 agent.md 的 YAML 头与人设正文。"""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return _empty_agent_md(text)
@@ -123,6 +133,7 @@ def _parse_agent_md(text: str) -> Dict[str, Any]:
 
 
 def _parse_skill_md(path: Path) -> Optional[Dict[str, Any]]:
+    """读 SKILL.md；正文为空则返回 None（不嵌入 Card）。"""
     if not path.is_file():
         return None
     text = path.read_text(encoding="utf-8")
@@ -165,6 +176,7 @@ def _parse_skill_md(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _scan_local_skills(server_name: str) -> List[Dict[str, Any]]:
+    """扫描本包 skills/*/SKILL.md，带 content 嵌入 Card。"""
     root = _PACK_ROOT / "skills"
     if not root.is_dir():
         return []
@@ -198,6 +210,7 @@ def _apply_runtime_permissions(
     server_name: str,
     settings: Any,
 ) -> Dict[str, str]:
+    """按 env 给 kb_search / emit_file 补 allow；默认 deny 基座 kb_lookup / save_output_file。"""
     out = dict(permission)
     kb_key = f"{server_name}_kb_search"
     emit_key = f"{server_name}_emit_file"
@@ -219,6 +232,7 @@ def load_agent_card(
     server_name: str = DEFAULT_SERVER,
     settings: Any = None,
 ) -> Dict[str, Any]:
+    """给 get_agent_card 用。改人设请改 agent.md，不要改这里。"""
     agent_path = _PACK_ROOT / "agent.md"
     parsed = _parse_agent_md(agent_path.read_text(encoding="utf-8"))
     local = _scan_local_skills(server_name)

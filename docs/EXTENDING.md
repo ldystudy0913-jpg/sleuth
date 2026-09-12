@@ -393,7 +393,7 @@ Agent = **权限基线 +（可选）提示词/模型/步数**，不是另一套�
 
 默认 agent `build` 另有内置 `kb_lookup`（`SLEUTH_KB_API_URL` + 登录 Cookie `ragToken`）、`read_session_file`（读摘录；传入 `question` 可按用户问题再解析图片/扫描 PDF 或加长文档抽取，不覆盖已存 excerpt）与 `save_output_file`（把生成文本写入同一 COS 邮箱）。专用 Agent 的 Card 可对这两项写 `deny` 藏掉；也可以自建检索或对象存储，只要最终 JSON 符合上表，或干脆只返回纯文本。
 
-脚手架 [`agents/scaffold/generate.py`](../agents/scaffold/generate.py) 每次都拷贝 attachments / kb / output / llm / hitl 模块，**不**用 generate flag 开关。空 `{PKG}_*` 不注册对应工具（不会挂一个返回空 `sources[]` / `files[]` 的空工具）。`{PKG}_HITL=1` 时主工具缺料返回 `status=need_input`（基座不解析，靠 Skill 调内置 `question`）。配齐后重启该 Agent MCP 即可。不要从 `dd_reply` 拷业务代码。Agent 密钥只放它自己的 `.env`，不要读 `SLEUTH_*`。会话生成文件由 Sleuth 加密上传，Agent COS 不再写会话邮箱。
+脚手架 [`agents/scaffold/generate.py`](../agents/scaffold/generate.py) 每次都拷贝 attachments / kb / output / llm / hitl 模块，**不**用 generate flag 开关。空 `{PKG}_*` 不注册对应工具（不会挂一个返回空 `sources[]` / `files[]` 的空工具）。`{PKG}_HITL=1` 时主工具缺料返回 `status=need_input`（基座不解析，靠 Skill 调内置 `question`）；**缺料条件要业务自己写**，脚手架演示只认空 `message`。配齐 env **不会**自动调 LLM / 不会给新工具注入附件。二次开发改哪些函数、开了能力还要不要改代码：生成包 [`HOWTO_SLEUTH.md`](../agents/scaffold/template/HOWTO_SLEUTH.md) 第 0 节。不要从 `dd_reply` 拷业务代码。Agent 密钥只放它自己的 `.env`，不要读 `SLEUTH_*`。会话生成文件由 Sleuth 加密上传，Agent COS 不再写会话邮箱。
 
 ---
 

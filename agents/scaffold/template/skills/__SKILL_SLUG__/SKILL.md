@@ -31,7 +31,7 @@ SLEUTH_MCP_SERVERS={"__SERVER_NAME__":{"type":"remote","url":"http://127.0.0.1:_
 
 1. （可选）调用 `__SERVER_NAME___health`。
 2. 将用户要回显的文本传入 `__SERVER_NAME___ping` 的 `message`。
-3. 若返回 `status=need_input`：**不要继续生成**。向用户列出 `missing`，并询问是否还有其他缺失信息要补充。用内置 `question` 工具，选项建议：
+3. 若本包打开了 HITL 且返回 `status=need_input`：**不要继续生成**。`missing` 是业务方在工具里自己列出的缺项（脚手架演示只认空 `message`，真业务会换成报告/字段等）。向用户列出 `missing`，并询问是否还有其他缺失信息要补充。用内置 `question` 工具，选项建议：
    - 「补充信息」（Recommended）
    - 「没有补充，继续」
    - 用户提供了新内容：带上更新后的入参再调用（不要设 `proceed_with_gaps`）。

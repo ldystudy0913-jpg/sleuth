@@ -1,8 +1,8 @@
-"""OpenAI-compatible chat/completions via urllib. No extra HTTP library.
+"""本包 OpenAI 兼容 chat/completions（urllib，无额外 HTTP 库）。
 
-Agent ``{PKG}_LLM_*`` wins when complete. Otherwise apply Sleuth-injected
-``sleuth_llm_json`` (session model). Temperature / timeout / json_mode stay
-on the agent Settings object.
+配齐 {PKG}_LLM_* 不会自动调模型，必须在 pipeline 里调用本模块。
+本包三项未齐时，用 Sleuth 注入的 sleuth_llm_json（会话模型）。
+temperature / timeout / json_mode 仍读 Settings。本文件一般不用改。
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ class LlmError(RuntimeError):
 
 
 def parse_sleuth_llm_json(raw: str) -> Dict[str, str]:
+    """解析基座注入的 sleuth_llm_json。缺字段则空 dict。"""
     text = (raw or "").strip()
     if not text:
         return {}
@@ -43,7 +44,7 @@ def parse_sleuth_llm_json(raw: str) -> Dict[str, str]:
 
 
 def settings_with_llm_json(settings: Settings, sleuth_llm_json: str = "") -> Settings:
-    """Prefer agent LLM env; fill from Sleuth injection only when env is incomplete."""
+    """本包 LLM 配齐则原样返回；否则用注入补齐三项后再调 chat。"""
     if settings.llm_configured():
         return settings
     data = parse_sleuth_llm_json(sleuth_llm_json)
@@ -57,6 +58,7 @@ def settings_with_llm_json(settings: Settings, sleuth_llm_json: str = "") -> Set
 
 
 def _llm_missing_detail(settings: Settings) -> str:
+    """未配置 LLM 时的错误说明（提示配本包或走 Sleuth）。"""
     prefix = str(getattr(settings, "env_prefix", "") or "AGENT").strip() or "AGENT"
     return (
         f"LLM not configured: set {prefix}_LLM_BASE_URL, {prefix}_LLM_API_KEY, "
@@ -65,6 +67,7 @@ def _llm_missing_detail(settings: Settings) -> str:
 
 
 def _post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: float) -> Any:
+    """POST JSON。二次开发不要直接调，走 chat_completion。"""
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
@@ -89,6 +92,7 @@ def _post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeo
 
 
 def chat_completion(messages: List[Dict[str, str]], settings: Settings) -> str:
+    """同步 chat/completions，返回 assistant 文本。在 pipeline 里调用。"""
     if not settings.llm_configured():
         raise LlmError(_llm_missing_detail(settings))
     url = f"{settings.llm_base_url}/chat/completions"
@@ -118,6 +122,7 @@ def chat_completion(messages: List[Dict[str, str]], settings: Settings) -> str:
 
 
 def parse_json_object(text: str) -> Dict[str, Any]:
+    """从模型输出里抠 JSON 对象（含 fence / 前后废话）。"""
     raw = (text or "").strip()
     if not raw:
         raise LlmError("LLM returned empty content")
@@ -147,5 +152,6 @@ def complete_json(
     *,
     llm_fn: Optional[LlmFn] = None,
 ) -> Dict[str, Any]:
+    """调 LLM 并解析成 dict。pipeline 里生成结构化结果用这个。"""
     text = llm_fn(messages, settings) if llm_fn is not None else chat_completion(messages, settings)
     return parse_json_object(text)

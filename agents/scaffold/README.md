@@ -49,8 +49,10 @@ Sleuth `.env` 粘贴生成包里的 `deploy/sleuth.env.snippet`。客户端鉴�
 
 ## 模板里要自己实现的脚本
 
+生成包里的 [HOWTO_SLEUTH.md](template/HOWTO_SLEUTH.md) **第 0 节**写清了：哪些文件必改、可选能力开了还要不要二次开发。`_ping_payload` 里的 `missing` 只是「空 message」演示，真实业务必须自己定义缺项。
+
 1. `__PKG_NAME__/pipeline.py` — 业务（把 `ping` 换成真实流程）
-2. `__PKG_NAME__/mcp_server.py` — 为每个业务函数加 `@server.tool`
+2. `__PKG_NAME__/mcp_server.py` — 为每个业务函数加 `@server.tool`；HITL 的 `missing` 在这里算
 3. `agent.md` — 人设；`permission` 必须用合格名 `{server}_{tool}`
 4. `skills/*/SKILL.md` — 私有 SOP（正文非空才嵌入）；COS 复用只在 `catalog_skills` 点名
 
@@ -58,15 +60,15 @@ Sleuth `.env` 粘贴生成包里的 `deploy/sleuth.env.snippet`。客户端鉴�
 
 ## 可选能力（始终生成模块，按 env 注册）
 
-五个模块每次都会拷进包内。空 `.env` **不**注册会返回空 JSON 的空工具；配齐后重启 MCP 即可，不必重新 generate。HITL 不注册新工具，只在主工具缺料时返回 `need_input`。
+模块每次都会拷进包内。空 `.env` **不**注册会返回空 JSON 的空工具。**不是**「配齐 env 就不用改代码」：
 
-| 能力 | `{PKG}_*` | 未配齐 |
-|------|-----------|--------|
-| 会话摘录 | `ATTACHMENTS=1` | `ping` 无 `attachment_refs_json` |
-| 内部 LLM | `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` | 用 Sleuth 会话模型；两头都空则业务 LLM 失败 |
-| 知识库 | `KB_API_URL` + `KB_LOGIN_URL` + `KB_OPENID` + `KB_SERVICEID` | 不注册 `kb_search` |
-| 回传文件 MCP 工具 | `AWS_ACCESS_KEY_ID`/`COS_SECRET_ID` + secret + `COS_BUCKET` + region 或 endpoint | 不注册 `emit_file`；JSON 仍可带 `files[].content_base64` |
-| 人工介入 | `HITL=1` | 缺料不返回 `need_input`（演示 ping 不暂停） |
-| HTTP 鉴权 | `MCP_TOKEN` 非空 | 不装中间件；`GET /health` 始终开放 |
+| 能力 | `{PKG}_*` | 开了自动有什么 | 还要二次开发吗 |
+|------|-----------|----------------|----------------|
+| 会话摘录 | `ATTACHMENTS=1` | 仅演示 `ping` 声明 `attachment_refs_json` | **要。** 新工具自己声明该参数 |
+| 内部 LLM | `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` | 不会自动调模型 | **要。** pipeline 里调用 `llm.py` |
+| 知识库 | `KB_API_URL` + `KB_LOGIN_URL` + `KB_OPENID` + `KB_SERVICEID` | 注册 `kb_search` | 一般不用改 `kb.py` |
+| 回传文件 MCP 工具 | `AWS_ACCESS_KEY_ID`/`COS_SECRET_ID` + secret + `COS_BUCKET` + region 或 endpoint | 注册 `emit_file` | 一般不用；也可用 JSON `files[]` |
+| 人工介入 | `HITL=1` | 不注册新工具；演示 ping 空 message → `need_input` | **要。** 自己列 `missing`，SOP 调 `question` |
+| HTTP 鉴权 | `MCP_TOKEN` 非空 | 装中间件；`GET /health` 始终开放 | 不用改代码 |
 
 Card 默认仍写 `kb_lookup: deny`。打开本包 KB 时加 `{server}_kb_search: allow`。打开 COS 输出工具时加 `{server}_emit_file: allow`，`save_output_file` 默认 deny。想改用基座检索：删掉 `kb_lookup` deny 即可。生成文件用 MCP `files[].content_base64`（Sleuth 加密进邮箱），不要把 data-URL 写进答复。

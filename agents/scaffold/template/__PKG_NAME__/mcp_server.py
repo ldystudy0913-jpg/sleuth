@@ -1,4 +1,12 @@
-"""MCP tool surface for Sleuth. Business work lives in pipeline.py."""
+"""MCP 工具面：只做注册、鉴权、入参拼装；业务在 pipeline.py。
+
+二次开发时改这里：
+1. 把 `_register_ping` 换成你的 `@server.tool`（或留 ping 当探活）。
+2. HITL：在包装函数里自己列 `missing`（`_ping_payload` 的「空 message」只是演示）。
+3. 附件：新工具必须自己声明 `attachment_refs_json`，开 ATTACHMENTS 不会自动给新工具注入。
+4. `sleuth_llm_json`：要用会话模型时入参里保留这个字段，在 pipeline 里交给 llm.py。
+不要在本文件里调上游 API 或阻塞等人；人介入返回 need_input 后立刻结束本次 tools/call。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -14,13 +22,14 @@ from .pipeline import ping as run_ping
 
 
 def health_payload(settings: Settings) -> dict[str, Any]:
+    """探活 JSON：含各可选能力是否已按 env 打开（attachments / hitl / kb / llm）。"""
     body = settings.as_health()
     body["mcp_port"] = settings.mcp_port
     return body
 
 
 def mcp_token_ok(path: str, authorization: str, token: str) -> bool:
-    """Return True if this HTTP request may proceed."""
+    """校验 Bearer。`/health` 始终放行；token 为空则全部放行。"""
     p = (path or "").split("?")[0].rstrip("/") or "/"
     if p == "/health" or p.endswith("/health"):
         return True
@@ -34,18 +43,21 @@ def mcp_token_ok(path: str, authorization: str, token: str) -> bool:
 
 
 def _register_http_health(server: Any, settings: Settings) -> None:
+    """注册 GET /health（绕过 MCP 握手，给探活和网关用）。二次开发一般不用改。"""
     register = getattr(server, "custom_route", None)
     if not callable(register):
         return
 
     @register("/health", methods=["GET"])
     async def health_http(_request: Any) -> Any:
+        """HTTP GET /health，不校验 MCP token。"""
         from starlette.responses import JSONResponse
 
         return JSONResponse(health_payload(settings))
 
 
 def _install_auth_middleware(server: Any, settings: Settings) -> None:
+    """MCP_TOKEN 非空时给 Streamable HTTP 装鉴权。只配 env，不必二次开发。"""
     token = (settings.mcp_token or "").strip()
     if not token:
         return
@@ -61,6 +73,7 @@ def _install_auth_middleware(server: Any, settings: Settings) -> None:
 
         class McpTokenMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Any, call_next: Any) -> Any:
+                """非 /health 请求校验 Bearer。"""
                 path = str(getattr(request.url, "path", "") or "")
                 auth = request.headers.get("authorization") or ""
                 if mcp_token_ok(path, auth, token):
@@ -74,6 +87,7 @@ def _install_auth_middleware(server: Any, settings: Settings) -> None:
 
 
 def _mcp_server_cls():
+    """兼容行内 MCPServer 与开源 FastMCP。二次开发不用改。"""
     try:
         from mcp.server.mcpserver.server import MCPServer as ServerCls
     except ImportError:
@@ -89,6 +103,7 @@ async def _run_streamable_http(
     streamable_http_path: str,
     stateless_http: bool = True,
 ) -> None:
+    """启动 Streamable HTTP。不同 MCP 包的 run 签名不一致，这里做兼容。"""
     try:
         await server.run_streamable_http_async(
             host=host,
@@ -107,6 +122,7 @@ async def _run_streamable_http(
 
 
 def _parse_refs(attachment_refs_json: str) -> list:
+    """把 Sleuth 注入的 attachment_refs_json 解成 dict 列表。坏 JSON 当空列表。"""
     try:
         refs = json.loads(attachment_refs_json) if attachment_refs_json else []
     except json.JSONDecodeError:
@@ -123,6 +139,15 @@ def _ping_payload(
     refs: Optional[list] = None,
     proceed_with_gaps: Any = False,
 ) -> str:
+    """演示：缺料则返回 need_input，否则进 pipeline.ping。
+
+    `missing` 在这里用「message 是否为空」判断，**只为跑通 HITL**。
+    真实业务请复制本函数结构，把 missing 改成你的字段/附件规则，例如：
+    missing = []
+    if not report_text.strip() and not refs:
+        missing.append("报告正文或会话附件")
+    开 HITL=1 不会自动知道这些规则。基座不解析返回的 JSON，要靠 SOP 调 question。
+    """
     missing = [] if (message or "").strip() else ["回显文本 message"]
     if should_pause(settings.hitl_enabled, missing, proceed_with_gaps):
         return json.dumps(need_input_payload(missing), ensure_ascii=False)
@@ -137,6 +162,7 @@ def _ping_payload(
 
 
 def _ping_description(settings: Settings) -> str:
+    """按已打开的能力拼 ping 的 tool description，给模型看何时调用。"""
     parts = [
         "Echo a message. Replace this with your real business tool.",
         "Optional sleuth_llm_json is injected by Sleuth (session model).",
@@ -157,6 +183,11 @@ def _ping_description(settings: Settings) -> str:
 
 
 def _register_ping(server: Any, settings: Settings) -> None:
+    """注册演示工具 ping。你的主工具照这个模式写：声明入参 → 算 missing → 调 pipeline。
+
+    ATTACHMENTS=1 时才会声明 attachment_refs_json；新工具不会自动带上这个参数。
+    sleuth_llm_json 始终声明，避免未配本包 LLM 时无法用会话模型。
+    """
     description = _ping_description(settings)
     if settings.attachments_enabled:
 
@@ -167,6 +198,7 @@ def _register_ping(server: Any, settings: Settings) -> None:
             proceed_with_gaps: bool = False,
             sleuth_llm_json: str = "",
         ) -> str:
+            """演示 ping（已开附件）。sleuth_llm_json 由基座注入，演示不调 LLM 故丢弃。"""
             del sleuth_llm_json
             return _ping_payload(
                 settings,
@@ -183,6 +215,7 @@ def _register_ping(server: Any, settings: Settings) -> None:
         proceed_with_gaps: bool = False,
         sleuth_llm_json: str = "",
     ) -> str:
+        """演示 ping（未开附件）。新业务工具请另写，不要只改 message 判断。"""
         del sleuth_llm_json
         return _ping_payload(settings, message, proceed_with_gaps=proceed_with_gaps)
 
@@ -195,6 +228,10 @@ def build_mcp_server(
     streamable_http_path: str = "/mcp",
     stateless_http: bool = True,
 ):
+    """组装 FastMCP/MCPServer：health、鉴权、log_trace、ping、可选 kb/emit_file。
+
+    二次开发：在 `_register_ping` 之后加你的 `@server.tool`，并在 agent.md 写合格名 allow。
+    """
     ServerCls = _mcp_server_cls()
     settings = settings or get_settings()
 
@@ -236,6 +273,7 @@ def build_mcp_server(
         ),
     )
     def get_agent_card() -> str:
+        """Sleuth agent:true 时拉取 Card。不要在这里改人设。"""
         return json.dumps(
             load_agent_card(server_name="__SERVER_NAME__", settings=settings),
             ensure_ascii=False,
@@ -245,6 +283,7 @@ def build_mcp_server(
 
     @server.tool(name="health", description="__AGENT_NAME__ tool-surface health probe.")
     def health() -> str:
+        """MCP 工具探活，字段与 GET /health 一致。"""
         return json.dumps(health_payload(settings), ensure_ascii=False)
 
     if settings.kb_enabled:
@@ -256,6 +295,7 @@ def build_mcp_server(
 
 
 def main(argv=None) -> int:
+    """命令行入口：读本包 .env 的 host/port，监听 Streamable HTTP。"""
     import argparse
 
     parser = argparse.ArgumentParser(prog="__PKG_NAME__-mcp")

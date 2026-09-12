@@ -1,4 +1,7 @@
-"""Copy the Sleuth agent template and fill placeholders. No extra dependencies."""
+"""复制脚手架模板并替换占位符。无额外依赖。
+
+生成后请先读输出目录 HOWTO_SLEUTH.md 第 0 节：哪些文件必改、可选能力开了还要不要改代码。
+"""
 from __future__ import annotations
 
 import argparse
@@ -19,6 +22,7 @@ _LEFTOVER_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
 
 
 def _pkg_name(raw: str) -> str:
+    """Agent id → 合法 Python 包名（小写+下划线）。"""
     name = re.sub(r"[^a-z0-9_]", "_", raw.strip().lower())
     name = re.sub(r"_+", "_", name).strip("_")
     if not name or not name[0].isalpha():
@@ -29,6 +33,7 @@ def _pkg_name(raw: str) -> str:
 
 
 def _server_name(raw: str) -> str:
+    """MCP 配置键 / 合格名前缀。"""
     name = re.sub(r"[^a-z0-9_-]", "", raw.strip().lower())
     if not name or not name[0].isalpha():
         raise ValueError("server name must start with a letter (a-z)")
@@ -38,10 +43,12 @@ def _server_name(raw: str) -> str:
 
 
 def _skill_slug(pkg: str) -> str:
+    """本地 SOP 目录名，如 demo_ops → demo-ops-sop。"""
     return pkg.replace("_", "-") + "-sop"
 
 
 def _title_from_pkg(pkg: str) -> str:
+    """未传 --title 时的展示名。"""
     return pkg.replace("_", " ").title()
 
 
@@ -55,6 +62,7 @@ def _replacements(
     skill_slug: str,
     tools_only: bool,
 ) -> dict[str, str]:
+    """模板里 __AGENT_NAME__ 等占位符的替换表。"""
     return {
         "__AGENT_NAME__": agent_name,
         "__PKG_NAME__": pkg_name,
@@ -69,6 +77,7 @@ def _replacements(
 
 
 def _is_text(path: Path) -> bool:
+    """能否当 UTF-8 文本替换。"""
     try:
         path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -77,6 +86,7 @@ def _is_text(path: Path) -> bool:
 
 
 def _replace_in_tree(root: Path, mapping: dict[str, str]) -> None:
+    """整树替换占位符。"""
     for path in root.rglob("*"):
         if not path.is_file():
             continue
@@ -93,6 +103,7 @@ def _replace_in_tree(root: Path, mapping: dict[str, str]) -> None:
 
 
 def _rename_placeholder_dirs(root: Path, mapping: dict[str, str]) -> None:
+    """把目录名 __PKG_NAME__ / __SKILL_SLUG__ 改成真实名字。"""
     dirs = sorted(
         (p for p in root.rglob("*") if p.is_dir()),
         key=lambda p: len(p.parts),
@@ -108,6 +119,7 @@ def _rename_placeholder_dirs(root: Path, mapping: dict[str, str]) -> None:
 
 
 def leftover_placeholders(root: Path) -> list[str]:
+    """查出未替换的 __FOO__，生成失败时用来报错。"""
     hits: list[str] = []
     for path in root.rglob("*"):
         if path.is_dir() and _LEFTOVER_RE.fullmatch(path.name):
@@ -124,6 +136,7 @@ def leftover_placeholders(root: Path) -> list[str]:
 
 
 def _copy_capability_modules(dest: Path) -> None:
+    """把 optional/ 下 attachments/kb/llm/hitl/output/progress 拷进包内。"""
     pkg_dir = dest / "__PKG_NAME__"
     if not pkg_dir.is_dir():
         raise FileNotFoundError(f"package dir missing after copy: {pkg_dir}")
@@ -152,6 +165,7 @@ def generate(
     template: Path | None = None,
     tools_only: bool = False,
 ) -> Path:
+    """生成独立 Agent 包。业务方从这里开始改 HOWTO 第 0 节列出的文件。"""
     pkg = _pkg_name(name)
     agent_name = pkg
     srv = _server_name(server or pkg.replace("_", ""))
@@ -191,6 +205,7 @@ def generate(
 
 
 def main(argv=None) -> int:
+    """命令行：--name demo_ops --port 8799。"""
     parser = argparse.ArgumentParser(
         prog="generate.py",
         description="Create a Sleuth MCP agent project from agents/scaffold/template.",
@@ -221,6 +236,7 @@ def main(argv=None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"wrote {dest}")
+    print(f"read {dest / 'HOWTO_SLEUTH.md'} section 0 before editing")
     print(f"next: cd {dest} && python -m pip install -e \".[mcp]\" && python -m {dest.name}.mcp_server")
     return 0
 

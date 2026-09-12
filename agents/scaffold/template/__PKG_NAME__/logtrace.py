@@ -1,4 +1,4 @@
-"""Optional cmb log_trace adapter. Do not name this package log_trace."""
+"""行内 log_trace 适配（从 Sleuth 拷贝）。二次开发不要改本文件，禁止 import sleuth。"""
 from __future__ import annotations
 
 import logging
