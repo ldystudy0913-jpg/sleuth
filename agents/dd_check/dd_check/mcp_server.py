@@ -7,16 +7,29 @@ from typing import Any, Optional
 
 from .agent_card import load_agent_card
 from .attachments import load_excerpts
+from .bizerror import APPError
 from .config import Settings, get_settings
+from .envelope import json_app
 from .hitl import need_input_payload, should_pause
+from .http_routes import (
+    delete_check_payload,
+    list_checks_payload,
+    register_check_routes,
+    scenarios_payload,
+)
 from .kb import register as register_kb
 from .output import register as register_output
 from .pipeline import check_report as run_check
+from .scenarios import public_catalog, resolve_pack
 
 
 def health_payload(settings: Settings) -> dict[str, Any]:
     body = settings.as_health()
     body["mcp_port"] = settings.mcp_port
+    try:
+        body["scenario_count"] = len(public_catalog(settings.config_dir))
+    except Exception:
+        body["scenario_count"] = 0
     return body
 
 
@@ -56,7 +69,8 @@ def _install_auth_middleware(server: Any, settings: Settings) -> None:
 
     def wrapped():
         from starlette.middleware.base import BaseHTTPMiddleware
-        from starlette.responses import JSONResponse
+
+        from .bizerror import APPError, BizErrorCode
 
         app = orig()
 
@@ -66,7 +80,7 @@ def _install_auth_middleware(server: Any, settings: Settings) -> None:
                 auth = request.headers.get("authorization") or ""
                 if mcp_token_ok(path, auth, token):
                     return await call_next(request)
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return json_app(APPError.of(BizErrorCode.AUTH_NOT_PERMIT, status=401))
 
         app.add_middleware(McpTokenMiddleware)
         return app
@@ -133,8 +147,44 @@ def _report_gaps(
     if filled:
         return [], filled
     return (
-        ["报告正文 report_text", "结构化 JSON report_json", "会话附件"],
+        ["\u62a5\u544a\u6b63\u6587 report_text", "\u7ed3\u6784\u5316 JSON report_json", "\u4f1a\u8bdd\u9644\u4ef6"],
         filled,
+    )
+
+
+def _collect_gaps(
+    settings: Settings,
+    *,
+    report_text: str,
+    report_json: str,
+    refs: Optional[list],
+    report_id: str,
+    scenario: str,
+    question: str,
+    proceed_with_gaps: Any,
+) -> tuple[list[str], dict[str, Any], Optional[Any]]:
+    missing, filled = _report_gaps(report_text, report_json, refs)
+    filled["scenarios"] = public_catalog(settings.config_dir)
+    if not (report_id or "").strip():
+        missing.append("\u4e1a\u52a1\u5c3d\u8c03\u62a5\u544a id report_id")
+    pack = resolve_pack(
+        settings.config_dir,
+        scenario=scenario,
+        question=question,
+        proceed_with_gaps=bool(proceed_with_gaps),
+        hitl_enabled=settings.hitl_enabled,
+    )
+    if pack is not None:
+        filled["scenario"] = pack.scenario_id
+    elif settings.hitl_enabled:
+        missing.append("\u68c0\u67e5\u573a\u666f")
+    return missing, filled, pack
+
+
+def _tool_error(exc: APPError) -> str:
+    return json.dumps(
+        {"ok": False, "code": exc.code, "msg": exc.msg},
+        ensure_ascii=False,
     )
 
 
@@ -147,12 +197,24 @@ def _check_payload(
     sleuth_llm_json: str,
     refs: Optional[list] = None,
     proceed_with_gaps: Any = False,
+    report_id: str = "",
+    scenario: str = "",
 ) -> str:
-    missing, filled = _report_gaps(report_text, report_json, refs)
+    missing, filled, pack = _collect_gaps(
+        settings,
+        report_text=report_text,
+        report_json=report_json,
+        refs=refs,
+        report_id=report_id,
+        scenario=scenario,
+        question=question,
+        proceed_with_gaps=proceed_with_gaps,
+    )
     if should_pause(settings.hitl_enabled, missing, proceed_with_gaps):
         return json.dumps(need_input_payload(missing, filled), ensure_ascii=False)
     from .progress import bind_current
 
+    scenario_id = pack.scenario_id if pack is not None else "default"
     result = run_check(
         settings,
         report_text=report_text,
@@ -160,6 +222,8 @@ def _check_payload(
         question=question,
         attachment_refs=refs,
         sleuth_llm_json=sleuth_llm_json,
+        scenario=scenario_id,
+        report_id=report_id,
         progress_fn=bind_current(),
     )
     return json.dumps(result, ensure_ascii=False)
@@ -167,28 +231,47 @@ def _check_payload(
 
 def _check_description(settings: Settings) -> str:
     parts = [
-        "Check a filled due-diligence report (plain text, structured JSON, "
-        "and/or session-file excerpts). Returns JSON with score (rubric scale), "
-        "findings (with location), sources[], and files[] for the Word report.",
-        "Optional sleuth_llm_json is injected by Sleuth; this agent's "
-        "DD_CHECK_LLM_* wins when complete.",
+        "Check a filled due-diligence report. Pass scenario (id or alias) and report_id. "
+        "Returns JSON with findings or conflicts, sources[], and files[] for the Word report. "
+        "Optional sleuth_llm_json is injected by Sleuth; this agent's DD_CHECK_LLM_* wins when complete.",
     ]
     if settings.attachments_enabled:
-        parts.append(
-            "Prefer excerpt in attachment_refs_json; do not decrypt SM4."
-        )
+        parts.append("Prefer excerpt in attachment_refs_json; do not decrypt SM4.")
     if settings.hitl_enabled:
         parts.append(
-            "If report_text, report_json, and attachment excerpts are all empty, "
-            "returns status=need_input (do not invent a score). List missing and "
-            "ask the user with the built-in question tool. Pass "
-            "proceed_with_gaps=true only after they say there is nothing more."
+            "If materials, report_id, or scenario are missing, returns status=need_input. "
+            "List missing and ask with the built-in question tool (once for scenario). "
+            "Pass proceed_with_gaps=true after they say continue/default; empty scenario then uses default."
         )
     return " ".join(parts)
 
 
 def _register_check_report(server: Any, settings: Settings) -> None:
     description = _check_description(settings)
+
+    def _run(
+        report_text: str = "",
+        report_json: str = "",
+        question: str = "",
+        proceed_with_gaps: bool = False,
+        sleuth_llm_json: str = "",
+        report_id: str = "",
+        scenario: str = "",
+        attachment_refs_json: str = "[]",
+    ) -> str:
+        refs = _parse_refs(attachment_refs_json) if settings.attachments_enabled else None
+        return _check_payload(
+            settings,
+            report_text=report_text,
+            report_json=report_json,
+            question=question,
+            sleuth_llm_json=sleuth_llm_json,
+            refs=refs,
+            proceed_with_gaps=proceed_with_gaps,
+            report_id=report_id,
+            scenario=scenario,
+        )
+
     if settings.attachments_enabled:
 
         @server.tool(name="check_report", description=description)
@@ -199,15 +282,18 @@ def _register_check_report(server: Any, settings: Settings) -> None:
             attachment_refs_json: str = "[]",
             proceed_with_gaps: bool = False,
             sleuth_llm_json: str = "",
+            report_id: str = "",
+            scenario: str = "",
         ) -> str:
-            return _check_payload(
-                settings,
+            return _run(
                 report_text=report_text,
                 report_json=report_json,
                 question=question,
-                sleuth_llm_json=sleuth_llm_json,
-                refs=_parse_refs(attachment_refs_json),
                 proceed_with_gaps=proceed_with_gaps,
+                sleuth_llm_json=sleuth_llm_json,
+                report_id=report_id,
+                scenario=scenario,
+                attachment_refs_json=attachment_refs_json,
             )
 
         return
@@ -219,15 +305,58 @@ def _register_check_report(server: Any, settings: Settings) -> None:
         question: str = "",
         proceed_with_gaps: bool = False,
         sleuth_llm_json: str = "",
+        report_id: str = "",
+        scenario: str = "",
     ) -> str:
-        return _check_payload(
-            settings,
+        return _run(
             report_text=report_text,
             report_json=report_json,
             question=question,
-            sleuth_llm_json=sleuth_llm_json,
             proceed_with_gaps=proceed_with_gaps,
+            sleuth_llm_json=sleuth_llm_json,
+            report_id=report_id,
+            scenario=scenario,
         )
+
+
+def _register_history_tools(server: Any, settings: Settings) -> None:
+    @server.tool(
+        name="list_scenarios",
+        description=(
+            "List due-diligence check scenarios (id, title, description, aliases). "
+            "Call this when the user asks which reports or scenes can be checked. Do not invent names."
+        ),
+    )
+    def list_scenarios() -> str:
+        try:
+            return json.dumps({"ok": True, **scenarios_payload(settings)}, ensure_ascii=False)
+        except APPError as exc:
+            return _tool_error(exc)
+
+    @server.tool(
+        name="list_checks",
+        description=(
+            "List past checks for a report_id. Returns metadata only "
+            "(check_id, scenario, filename, created_at); no Word bytes."
+        ),
+    )
+    def list_checks(report_id: str = "") -> str:
+        try:
+            body = list_checks_payload(settings, report_id, include_files=False)
+            return json.dumps({"ok": True, **body}, ensure_ascii=False)
+        except APPError as exc:
+            return _tool_error(exc)
+
+    @server.tool(
+        name="delete_check",
+        description="Delete one history check by check_id (row + COS object). Does not remove session files.",
+    )
+    def delete_check(check_id: str = "") -> str:
+        try:
+            body = delete_check_payload(settings, check_id)
+            return json.dumps({"ok": True, **body}, ensure_ascii=False)
+        except APPError as exc:
+            return _tool_error(exc)
 
 
 def build_mcp_server(
@@ -244,6 +373,7 @@ def build_mcp_server(
     ctor_kwargs: dict = {
         "instructions": (
             "Sleuth agent dd_check. Call check_report to inspect a due-diligence report. "
+            "Call list_scenarios when asked which scenes can be checked. "
             "Use get_agent_card only when Sleuth registers this process with agent:true."
         ),
     }
@@ -262,6 +392,7 @@ def build_mcp_server(
         server = ServerCls("dd_check", **ctor_kwargs)
 
     _register_http_health(server, settings)
+    register_check_routes(server, settings)
     _install_auth_middleware(server, settings)
     try:
         from .logtrace import ensure_initialized, install_mcp_middleware, is_enabled
@@ -285,6 +416,7 @@ def build_mcp_server(
         )
 
     _register_check_report(server, settings)
+    _register_history_tools(server, settings)
 
     @server.tool(name="health", description="dd_check tool-surface health probe.")
     def health() -> str:

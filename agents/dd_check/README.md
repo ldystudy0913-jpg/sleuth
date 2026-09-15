@@ -2,7 +2,7 @@
 
 独立项目包：尽调报告填写检查。MCP 工具面 + Agent Card + Skill。不修改 sleuth 内核。
 
-主工具 `check_report`：归一化正文/JSON/附件摘录 → 按需检索本包知识库 → LLM 按 `config/rubric.json` 打维度分 → Python 加权总分 → Word 以 `files[].content_base64` 回给 Sleuth 加密进会话邮箱。
+主工具 `check_report`：归一化正文/JSON/附件摘录 → 按场景加载提示词 → 按需检索本包知识库 → LLM → Word 以 `files[].content_base64` 回给 Sleuth。未指定场景则 HITL 反问一次，仍不清走 `config/prompts` 默认检查。检查成功且配置了本包 MySQL/COS 时写入历史指针（结果在 Word 里）。
 
 ## 开发你要改的文件
 
@@ -10,7 +10,7 @@
 |------|--------|
 | [`pipeline.py`](dd_check/pipeline.py) | 检查编排 |
 | [`config/rubric.json`](config/rubric.json) | 维度、权重、分制、Word 文件名、KB seed |
-| [`config/prompts/`](config/prompts/) | 系统/用户提示词 |
+| [`config/scenarios/`](config/scenarios/) | 场景 catalog 与开户/变更提示词；`default` 指向现有 prompts |
 | [`.env.example`](.env.example) | `DD_CHECK_*` 密钥与开关 |
 | [`agent.md`](agent.md) | 人设、权限 |
 | `skills/dd-check-sop/SKILL.md` | SOP |

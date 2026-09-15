@@ -19,6 +19,13 @@ def load_rubric(path: Path) -> Dict[str, Any]:
         raise RubricError(f"rubric is not JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise RubricError("rubric root must be an object")
+    output = str(data.get("output") or "findings").strip() or "findings"
+    data["output"] = output
+    word = data.get("word")
+    if not isinstance(word, dict) or not word.get("filename") or not word.get("date_format"):
+        raise RubricError("rubric.word.filename and word.date_format are required")
+    if output == "conflicts":
+        return data
     score = data.get("score")
     if not isinstance(score, dict):
         raise RubricError("rubric.score must be an object")
@@ -32,9 +39,6 @@ def load_rubric(path: Path) -> Dict[str, Any]:
             raise RubricError("each dimension needs id")
         if "weight" not in item:
             raise RubricError(f"dimension {item.get('id')} missing weight")
-    word = data.get("word")
-    if not isinstance(word, dict) or not word.get("filename") or not word.get("date_format"):
-        raise RubricError("rubric.word.filename and word.date_format are required")
     return data
 
 

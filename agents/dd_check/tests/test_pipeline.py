@@ -14,6 +14,14 @@ from dd_check.rubric import aggregate_score, load_rubric
 _PACK = Path(__file__).resolve().parents[1]
 
 
+def _has_docx() -> bool:
+    try:
+        import docx  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _settings(**kwargs) -> Settings:
     body = {
         "attachments_enabled": True,
@@ -171,6 +179,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(captured.get("model"), "test-model")
 
     def test_check_without_kb_has_findings_and_files(self):
+        if not _has_docx():
+            self.skipTest("python-docx not installed")
         captured = {}
 
         def fake_llm(messages, settings):
@@ -255,6 +265,74 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(body.get("sources"))
         self.assertEqual(body["sources"][0]["url"], "https://kb.example/rule")
 
+    def test_default_scenario_keeps_findings(self) -> None:
+        def fake_llm(messages, settings):
+            return _llm_payload()
+
+        body = check_report(
+            _settings(),
+            report_text="\u5ba2\u6237\u5f20\u4e09",
+            scenario="default",
+            llm_fn=fake_llm,
+            emit_fn=lambda settings, **kwargs: {"ok": True, "files": []},
+            persist_fn=lambda settings, **kwargs: {"ok": False},
+        )
+        self.assertTrue(body.get("ok"))
+        self.assertEqual(body.get("scenario"), "default")
+        self.assertTrue(body.get("findings"))
+        self.assertNotIn("conflicts", body)
+
+    def test_onboarding_returns_conflicts_and_persists(self) -> None:
+        if not _has_docx():
+            self.skipTest("python-docx not installed")
+        def fake_llm(messages, settings):
+            return json.dumps(
+                {
+                    "conflicts": [
+                        {
+                            "item": "account use",
+                            "info1": "payroll",
+                            "info1_source": "form",
+                            "info2": "trade",
+                            "info2_source": "json",
+                            "verdict": "obvious",
+                            "detail": "mismatch",
+                            "suggestion": "verify",
+                        }
+                    ],
+                    "summary": "1 obvious",
+                    "obvious_count": 1,
+                    "suspected_count": 0,
+                    "kb_questions": [],
+                },
+                ensure_ascii=False,
+            )
+
+        saved = {}
+
+        def persist(settings, **kwargs):
+            saved.update(kwargs)
+            return {"ok": True, "check_id": "cid-9"}
+
+        body = check_report(
+            _settings(),
+            report_text="report",
+            scenario="corp_onboarding",
+            report_id="R-1",
+            llm_fn=fake_llm,
+            emit_fn=lambda settings, **kwargs: {
+                "ok": True,
+                "files": [{"filename": kwargs.get("filename"), "mime": kwargs.get("mime")}],
+            },
+            persist_fn=persist,
+        )
+        self.assertTrue(body.get("ok"))
+        self.assertEqual(body.get("scenario"), "corp_onboarding")
+        self.assertEqual(body.get("check_id"), "cid-9")
+        self.assertEqual(len(body.get("conflicts") or []), 1)
+        self.assertEqual(saved.get("report_id"), "R-1")
+        self.assertEqual(saved.get("scenario"), "corp_onboarding")
+
 
 class DocxTests(unittest.TestCase):
     def test_docx_bytes_are_zip(self):
@@ -277,6 +355,35 @@ class DocxTests(unittest.TestCase):
                 }
             ],
             sources=[{"title": "规范", "url": "https://kb.example/a"}],
+        )
+        self.assertTrue(data.startswith(b"PK"))
+
+    def test_conflicts_docx_bytes_are_zip(self):
+        try:
+            import docx  # noqa: F401
+        except ImportError:
+            self.skipTest("python-docx not installed")
+        from dd_check.report_docx import render_conflicts_docx_bytes
+        from dd_check.rubric import load_rubric
+
+        rubric = load_rubric(_PACK / "config" / "scenarios" / "corp_onboarding" / "rubric.json")
+        data = render_conflicts_docx_bytes(
+            rubric=rubric,
+            summary="ok",
+            conflicts=[
+                {
+                    "item": "a",
+                    "info1": "1",
+                    "info1_source": "s1",
+                    "info2": "2",
+                    "info2_source": "s2",
+                    "verdict": "obvious",
+                    "detail": "d",
+                    "suggestion": "u",
+                }
+            ],
+            sources=[],
+            scenario_title="onboarding",
         )
         self.assertTrue(data.startswith(b"PK"))
 

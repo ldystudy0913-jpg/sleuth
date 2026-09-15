@@ -1,0 +1,21 @@
+{
+  "scenarios": [
+    {
+      "id": "default",
+      "title": "默认检查",
+      "aliases": [
+        "默认",
+        "通用",
+        "按默认检查",
+        "不清楚",
+        "随便"
+      ],
+      "description": "现有尽调报告填写检查：逻辑一致性、填写充分性、附件有效性，并给出评分。",
+      "prompt_dir": "prompts",
+      "rubric_path": "rubric.json",
+      "output": "findings"
+    },
+    "corp_onboarding",
+    "corp_change"
+  ]
+}

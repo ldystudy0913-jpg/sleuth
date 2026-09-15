@@ -16,10 +16,22 @@ class TestMcpServer(unittest.TestCase):
         except ImportError:
             self.skipTest("mcp not installed")
         server = build_mcp_server(
-            Settings(attachments_enabled=False, kb_enabled=False, output_enabled=False)
+            Settings(
+                attachments_enabled=False,
+                kb_enabled=False,
+                output_enabled=False,
+                hitl_enabled=False,
+            )
         )
         tools = {t.name: t for t in server._tool_manager.list_tools()}
-        for name in ("get_agent_card", "check_report", "health"):
+        for name in (
+            "get_agent_card",
+            "check_report",
+            "health",
+            "list_scenarios",
+            "list_checks",
+            "delete_check",
+        ):
             self.assertIn(name, tools)
         self.assertNotIn("ping", tools)
         self.assertNotIn("kb_search", tools)
@@ -38,6 +50,12 @@ class TestMcpServer(unittest.TestCase):
         self.assertEqual(card.get("mcp_server"), "ddcheck")
         self.assertIn("ddcheck_check_report", card.get("permission") or {})
         self.assertEqual((card.get("permission") or {}).get("question"), "allow")
+
+        listed = json.loads(tools["list_scenarios"].fn())
+        self.assertTrue(listed.get("ok"))
+        ids = [s.get("id") for s in listed.get("scenarios") or []]
+        self.assertIn("default", ids)
+        self.assertIn("corp_onboarding", ids)
 
     def test_hitl_need_input_when_empty(self) -> None:
         try:
@@ -58,12 +76,45 @@ class TestMcpServer(unittest.TestCase):
         paused = json.loads(tools["check_report"].fn())
         self.assertEqual(paused.get("status"), "need_input")
         missing = paused.get("missing") or []
-        self.assertIn("报告正文 report_text", missing)
+        self.assertTrue(any("report_text" in str(x) for x in missing))
+        self.assertTrue(any("report_id" in str(x) for x in missing))
+        self.assertTrue(any("\u573a\u666f" in str(x) for x in missing))
         continued = json.loads(tools["check_report"].fn(proceed_with_gaps=True))
         self.assertIn("ok", continued)
         self.assertNotEqual(continued.get("status"), "need_input")
-        with_text = json.loads(tools["check_report"].fn(report_text="demo"))
+        with_text = json.loads(
+            tools["check_report"].fn(report_text="demo", report_id="R1", scenario="default")
+        )
         self.assertNotEqual(with_text.get("status"), "need_input")
+
+    def test_hitl_asks_scenario_when_text_present(self) -> None:
+        try:
+            import mcp  # noqa: F401
+        except ImportError:
+            self.skipTest("mcp not installed")
+        server = build_mcp_server(
+            Settings(
+                attachments_enabled=False,
+                kb_enabled=False,
+                output_enabled=False,
+                hitl_enabled=True,
+            )
+        )
+        tools = {t.name: t for t in server._tool_manager.list_tools()}
+        paused = json.loads(tools["check_report"].fn(report_text="demo", report_id="R1"))
+        self.assertEqual(paused.get("status"), "need_input")
+        missing = paused.get("missing") or []
+        self.assertTrue(any("\u573a\u666f" in str(x) for x in missing))
+        filled = paused.get("filled") or {}
+        self.assertTrue(filled.get("scenarios"))
+        continued = json.loads(
+            tools["check_report"].fn(
+                report_text="demo",
+                report_id="R1",
+                proceed_with_gaps=True,
+            )
+        )
+        self.assertNotEqual(continued.get("status"), "need_input")
 
     def test_hitl_skips_when_excerpt(self) -> None:
         try:
@@ -83,7 +134,7 @@ class TestMcpServer(unittest.TestCase):
             [{"filename": "a.pdf", "excerpt": "客户名称示例"}],
             ensure_ascii=False,
         )
-        body = json.loads(tools["check_report"].fn(attachment_refs_json=refs))
+        body = json.loads(tools["check_report"].fn(attachment_refs_json=refs, report_id="R1", scenario="default"))
         self.assertNotEqual(body.get("status"), "need_input")
 
     def test_http_health_payload(self) -> None:
@@ -97,6 +148,8 @@ class TestMcpServer(unittest.TestCase):
         self.assertTrue(mcp_token_ok("/mcp", "", ""))
         self.assertFalse(mcp_token_ok("/mcp", "", "secret"))
         self.assertTrue(mcp_token_ok("/mcp", "Bearer secret", "secret"))
+        self.assertFalse(mcp_token_ok("/v1/checks", "", "secret"))
+        self.assertTrue(mcp_token_ok("/v1/checks", "Bearer secret", "secret"))
 
 
 class TestAgentCard(unittest.TestCase):

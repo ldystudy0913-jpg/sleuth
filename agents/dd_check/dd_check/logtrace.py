@@ -304,6 +304,7 @@ def install_mcp_middleware(server: Any, config: Any = None) -> None:
 
     def wrapped():
         app = orig()
+        app.add_middleware(ConvertSleuthAppErrorMiddleware)
         app.add_middleware(
             FastapiLogTraceMiddleware,
             ignore_path=ignore_paths(config),

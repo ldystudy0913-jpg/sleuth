@@ -1,0 +1,7 @@
+{
+  "id": "corp_onboarding",
+  "title": "对公开户尽调",
+  "aliases": ["开户", "新开", "对公开户", "开户尽调"],
+  "description": "对公客户开户尽调报告：识别不同字段、资料与信息来源之间的明显冲突。",
+  "output": "conflicts"
+}

@@ -61,13 +61,32 @@ HTTP：`POST /v1/sessions` body `{ "agent": "dd_check" }`。
 | 能力 | 本包 `.env` | 未配齐时 |
 |------|-------------|---------|
 | 会话摘录 | `DD_CHECK_ATTACHMENTS=1` | `check_report` 不声明 `attachment_refs_json` |
-| 人工介入 | `DD_CHECK_HITL=1` | 空材料不返回 `need_input`，直接进检查 |
+| 人工介入 | `DD_CHECK_HITL=1` | 空材料 / 空 report_id / 未映射场景不返回 `need_input`，直接默认检查 |
 | 内部 LLM | `DD_CHECK_LLM_BASE_URL` + `_API_KEY` + `_MODEL` | 用 Sleuth 注入的会话模型；两头都空则检查失败 |
 | 知识库 | `DD_CHECK_KB_API_URL` + `_LOGIN_URL` + `_OPENID` + `_SERVICEID` | 不注册 `kb_search` |
 | 回传文件 MCP 工具 | COS：access + secret + bucket + (region 或 endpoint) | 不注册 `emit_file`；Word 仍走 `files[].content_base64` |
 | HTTP 鉴权 | `DD_CHECK_MCP_TOKEN` 非空 | 不装中间件 |
 
-知识库、生成文件也可以不写进 MCP：会话里仍有 Sleuth 内置 `kb_lookup` / `save_output_file`（Card 权限可 deny 藏掉）。
+历史检查（本包 MySQL + COS，代码不建表）：
+
+| 能力 | 本包 `.env` | 未配齐时 |
+|------|-------------|---------|
+| 检查历史落库 | `DD_CHECK_MYSQL_*` 或 `SLEUTH_LOG_TRACE=1`（官方 MySql） | 检查仍回传当次 Word，不写历史 |
+| 历史 COS | 与 `emit_file` 相同的 COS 四项 | 不上传历史对象 |
+| 每报告保留次数 | `DD_CHECK_HISTORY_MAX`（默认 10） | 超限 FIFO 删最旧行和对象 |
+
+请先在库中执行仓库 [`docs/ddl_dd_check_mysql.sql`](../../docs/ddl_dd_check_mysql.sql)。
+
+场景：`config/scenarios/`。用户问「能检查什么」走 MCP `list_scenarios`（读磁盘）。未指定场景时 HITL 反问一次，仍不清则 `default`（现有 `config/prompts`）。
+
+历史 HTTP（鉴权 `DD_CHECK_MCP_TOKEN`，信封与基座错误码相同；`/health` 除外）：
+
+- `GET /v1/checks/scenarios`
+- `GET /v1/checks?report_id=`
+- `GET /v1/checks/{check_id}/file`
+- `DELETE /v1/checks/{check_id}`
+
+开了 `SLEUTH_LOG_TRACE=1` 时业务失败也是 HTTP 200 + `{code, msg, content}`。
 
 ## 6. 无 Card 回退
 

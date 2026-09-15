@@ -1,0 +1,15 @@
+{
+  "output": "conflicts",
+  "word": {
+    "title": "对公开户尽调检查结果",
+    "filename": "dd_check_onboarding_{date}.docx",
+    "date_format": "%Y%m%d",
+    "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  },
+  "kb": {"max_queries": 5},
+  "kb_seed_queries": [
+    "对公开户尽职调查填写规范",
+    "受益所有人识别口径",
+    "开户目的与账户用途一致性"
+  ]
+}

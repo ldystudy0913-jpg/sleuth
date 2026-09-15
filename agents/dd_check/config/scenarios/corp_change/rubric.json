@@ -1,0 +1,15 @@
+{
+  "output": "conflicts",
+  "word": {
+    "title": "对公变更尽调检查结果",
+    "filename": "dd_check_change_{date}.docx",
+    "date_format": "%Y%m%d",
+    "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  },
+  "kb": {"max_queries": 5},
+  "kb_seed_queries": [
+    "对公客户信息变更尽职调查规范",
+    "受益所有人识别口径",
+    "变更事项与关联信息同步"
+  ]
+}

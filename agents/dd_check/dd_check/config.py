@@ -220,6 +220,34 @@ class Settings:
         self.word_filename: str = str(
             overrides.get("word_filename", _env(f"{p}_WORD_FILENAME", "") or "")
         ).strip()
+        self.history_max: int = int(
+            overrides.get("history_max", _env_int(f"{p}_HISTORY_MAX", 10))
+        )
+        if self.history_max < 1:
+            self.history_max = 10
+        self.mysql_host: str = str(
+            overrides.get("mysql_host", _env(f"{p}_MYSQL_HOST", "127.0.0.1") or "127.0.0.1")
+        ).strip()
+        self.mysql_port: int = int(
+            overrides.get("mysql_port", _env_int(f"{p}_MYSQL_PORT", 3306))
+        )
+        self.mysql_user: str = str(
+            overrides.get("mysql_user", _env(f"{p}_MYSQL_USER", "") or "")
+        ).strip()
+        self.mysql_database: str = str(
+            overrides.get("mysql_database", _env(f"{p}_MYSQL_DATABASE", "") or "")
+        ).strip()
+        password_env = str(
+            overrides.get(
+                "mysql_password_env",
+                _env(f"{p}_MYSQL_PASSWORD_ENV", f"{p}_MYSQL_PASSWORD") or f"{p}_MYSQL_PASSWORD",
+            )
+        ).strip()
+        self.mysql_password_env: str = password_env
+        if "mysql_password" in overrides:
+            self.mysql_password = str(overrides.get("mysql_password") or "")
+        else:
+            self.mysql_password = str(_env(password_env, "") or _env(f"{p}_MYSQL_PASSWORD", "") or "")
 
     def llm_configured(self) -> bool:
         return bool(self.llm_base_url and self.llm_api_key and self.llm_model)
@@ -235,6 +263,8 @@ class Settings:
             "output": self.output_enabled,
             "llm": self.llm_configured(),
             "mcp_auth": bool(self.mcp_token),
+            "history_max": self.history_max,
+            "mysql": bool(self.mysql_user and self.mysql_database),
         }
 
 
